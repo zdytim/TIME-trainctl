@@ -1,0 +1,5 @@
+# Slurm 19 allocation audit: preemption side effects
+
+Independent static review against official Slurm19 source identifies `_preempt_jobs` in src/slurmctld/node_scheduler.c near 2862–2876, before the candidate quota gate near 2960. A candidate that ultimately fails monthly admission could therefore cause preemption before denial where preemption is enabled. Quota gating requires an early read-only eligibility guard before potential preemption and a fresh decision at actual allocation commit; this does not by itself prove the strict guarantee or remove the accounting race. Fail closed for unsupported preemption configuration until correctness proven.
+
+Current u20 live read-only configuration on 2026-10-28 shows `PreemptMode=OFF`, `PreemptType=preempt/none`, `SchedulerType=sched/backfill`, `SelectType=select/cons_tres`, `SelectTypeParameters=CR_CPU_MEMORY`. These observations only apply to u20 at the time of checking; re-check before every deployment. No runtime behavior tested or services changed. pro6000d current configuration not verified by this observation. Controller remains disabled.
