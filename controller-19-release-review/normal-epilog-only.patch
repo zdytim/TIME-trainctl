@@ -1,0 +1,29 @@
+--- a/src/slurmctld/job_mgr.c
++++ b/src/slurmctld/job_mgr.c
+@@ -15237,10 +15237,24 @@
+ 		drain_nodes(node_name, "Epilog error",
+ 			    slurmctld_conf.slurm_user_id);
+ 	}
+-	/* Change job from completing to completed */
++	/*
++	 * Restricted monthly accounting handoff: a successful slurmd epilog
++	 * for the sole healthy node, while it remains in the completing bitmap,
++	 * is the only normal completion evidence handled by this prototype.
++	 * Down-node and controller-epilog paths are intentionally not inferred.
++	 */
+ 	node_ptr = find_node_record(node_name);
+-	if (node_ptr)
++	if (node_ptr) {
++		bool monthly_last_ack = !return_code && IS_JOB_COMPLETING(job_ptr) &&
++			job_ptr->total_nodes == 1 && job_ptr->node_cnt == 1 &&
++			!job_ptr->epilog_running && !IS_NODE_DOWN(node_ptr) &&
++			job_ptr->node_bitmap_cg &&
++			bit_test(job_ptr->node_bitmap_cg,
++				 node_ptr - node_record_table_ptr);
+ 		make_node_idle(node_ptr, job_ptr);
++		if (monthly_last_ack && !IS_JOB_COMPLETING(job_ptr))
++			monthly_quota_release(job_ptr);
++	}
+ #endif
+ 
+ 	step_epilog_complete(job_ptr, node_name);
