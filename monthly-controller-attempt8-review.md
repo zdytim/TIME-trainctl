@@ -1,0 +1,10 @@
+# u20 Slurm19 attempt8 independent review blockers
+
+Source: monthly-controller-u20-result/j-0959cd9eefdd4e9e94a7/8/outputs/strict-monthly-quota-19.05.5-u20. Review identified three additional blockers; none may be declared fixed solely by compilation.
+
+1. `monthly_quota_commit()` returns for gpu_count=0. Caller invokes it only when requested GPU >0, so actual GPU unknown/zero for a GPU-requesting job must mark ledger unhealthy/ambiguous and block subsequent allocations; ordinary CPU jobs are excluded at caller. Audit UINT64_MAX separately.
+2. `_load_locked()` treats missing existing journal as first-time empty, while init uses O_CREAT. Loss of journal can reset all balances to zero; directory entries for journal and clock fence are not fsynced. Implement explicit durable initial creation protocol distinguishing first initialization from lost/corrupt state, parent-directory durability, and fail closed, including clock fence replay. Preserve old data; no deletion.
+3. Admission check occurs before actual resource commit and releases ledger lock while running jobs continue consuming quota; quota can cross zero in that interval. Establish provable pre-allocation linearization at the actual resource commitment with no previous side effects; account all running jobs as of that point, hold/serialize state correctly and deal with tentative resource rollback. Explicitly document unsupported paths and fail closed. Do not claim strictness until proven.
+4. Scheduling allocation WAL+fence+checkpoint synchronous disk writes may stall under controller locks; characterize/design bounded IO and crash semantics. Non-durable preview timestamps create reboot/clock-regression uncertainty that must fail closed.
+
+Stay on u20 Slurm19; official verified source provided in work/mac-slurm-19-source.tar.gz. No tests or training, no deploy/service modification, credentials or unrequested host changes. Isolated compile and static review permitted. User requires git commit before deployment. Sibling outputs only; report residual blockers without overstating safety.
