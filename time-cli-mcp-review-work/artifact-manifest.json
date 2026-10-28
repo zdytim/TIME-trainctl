@@ -1,0 +1,90 @@
+{
+  "artifact": "time-cli-mcp",
+  "brand": "time",
+  "capability_server_state": "unknown_without_capabilities_endpoint",
+  "cli": "timectl",
+  "dependencies": [],
+  "file_count": 14,
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "ffd2ac00b5c267c554322a5aaba8e5e90975635ac4b0a656f2bc404f08e68984",
+      "mode": "0o600"
+    },
+    {
+      "path": "REVIEW-REPAIR.md",
+      "sha256": "fd1195a001bbe2744eea3d6a7a39ac31167249e9e904d3eb858713112aa95c2c",
+      "mode": "0o644"
+    },
+    {
+      "path": "docs/API-UPGRADES.md",
+      "sha256": "93118f4f6a1f589622af7c450e50d317efaa3f1eb2bea476b82df9b0ec684688",
+      "mode": "0o600"
+    },
+    {
+      "path": "docs/EVIDENCE.md",
+      "sha256": "32dbddc1c96816eefac6e24441a1643422ff5719f3a3a2a1828e9ff5c43e45ad",
+      "mode": "0o600"
+    },
+    {
+      "path": "docs/FEATURE-MATRIX.md",
+      "sha256": "1c3f313a45622c3cb300cea70e285bf978309cf2de31d4d5bb18ee3d7c09034d",
+      "mode": "0o600"
+    },
+    {
+      "path": "docs/REVIEW-AUDIT.md",
+      "sha256": "30c4ebaa84f3f3b712f33c453c8522da762b2b9c6781fe222c385016fe2253c7",
+      "mode": "0o600"
+    },
+    {
+      "path": "docs/SECURITY.md",
+      "sha256": "e9f5652c944937fcf3d30ece504f2883d8d9231f067254b5f3ace45e74ffbc36",
+      "mode": "0o600"
+    },
+    {
+      "path": "install.sh",
+      "sha256": "666c36d431e364c4b861e009edeb90a7df5fcfd8093e806a0b1c3f897a0730e5",
+      "mode": "0o755"
+    },
+    {
+      "path": "installer.py",
+      "sha256": "b8d778375610e2235abc7450a444e26234fdbe39c5de97a57d3114fdea71e7c6",
+      "mode": "0o755"
+    },
+    {
+      "path": "rollback.sh",
+      "sha256": "9e38b0b25d44b5bed5580a2cce5cba65b138d7bc7906f8a7438b6ca87f1fe5a4",
+      "mode": "0o755"
+    },
+    {
+      "path": "time_core.py",
+      "sha256": "b63549d544d65a8cb54640a32fc9185c2ba8f90441fca8f22a3650cd9f105e40",
+      "mode": "0o755"
+    },
+    {
+      "path": "time_mcp.py",
+      "sha256": "9149eea914e785f11b5689c8005218b56bc6d0571e8c9cc93ba908f61b673f6c",
+      "mode": "0o755"
+    },
+    {
+      "path": "timectl.py",
+      "sha256": "65414ee6585f151fa186d5deec06af3d5b1445825310c26ef1b683e19040c9e6",
+      "mode": "0o755"
+    },
+    {
+      "path": "uninstall.sh",
+      "sha256": "4add7f358fbcc1ad306f5baca85b9a8af0bb2bc996db574ffa9bd83da82c0344",
+      "mode": "0o755"
+    }
+  ],
+  "mcp": "time-mcp",
+  "mcp_mutations": "withheld_until_independent_host_consent",
+  "monthly_enforcement_claim": false,
+  "python_compatibility": "Python 3.8+",
+  "review_status": "attempt2_static_review_repairs_applied",
+  "server_files_changed": false,
+  "system_install": false,
+  "validation": "syntax/compilation checks only",
+  "version": "0.1.0",
+  "status": "supervisor-repaired-not-behavior-tested"
+}

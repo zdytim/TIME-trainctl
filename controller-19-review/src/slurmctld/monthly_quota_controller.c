@@ -1,0 +1,976 @@
+/*
+ * Strict monthly GPU-hour controller adapter for Slurm 19.05.5.
+ *
+ * This file is included by node_scheduler.c so the allocator and ledger share
+ * one controller binary and one synchronization domain.  The ledger is a
+ * controller-local authority; the platform API can only issue idempotent
+ * GRANT/SNAPSHOT requests over the root-authenticated socket.
+ */
+#include "monthly_quota_controller.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/un.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "src/slurmctld/slurmctld.h"
+
+extern time_t timegm(struct tm *);
+
+#define MQ_STATE_DEFAULT "/var/lib/slurm/monthly-quota"
+#define MQ_SOCKET_NAME "controller.sock"
+#define MQ_JOURNAL_NAME "ledger.journal"
+#define MQ_CHECKPOINT_NAME "ledger.checkpoint"
+#define MQ_NS 1000000000ULL
+#define MQ_DEBUG_NS (5ULL * 3600ULL * MQ_NS)
+#define MQ_IMPORTANT_NS (100ULL * 3600ULL * MQ_NS)
+#define MQ_NORMAL_NS (500ULL * 3600ULL * MQ_NS)
+#define MQ_PRIORITY_BASE_MASK 0x3fffffffU
+#define MQ_PRIORITY_SHIFT 30
+#define MQ_EVENT_MAX 1024
+
+typedef struct mq_alloc {
+	uid_t uid;
+	uint32_t job_id;
+	time_t submit;
+	uint64_t gpu;
+	uint64_t start_ns;
+	bool committed;
+	struct mq_alloc *next;
+} mq_alloc_t;
+
+typedef struct mq_total {
+	uid_t uid;
+	char month[8];
+	uint64_t used_ns;
+	uint64_t credit_ns;
+	struct mq_total *next;
+} mq_total_t;
+
+typedef struct mq_grant {
+	char id[160];
+	struct mq_grant *next;
+} mq_grant_t;
+
+static pthread_mutex_t mq_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t mq_thread;
+static volatile sig_atomic_t mq_stop;
+static int mq_listen_fd = -1;
+static int mq_journal_fd = -1;
+static uint64_t mq_seq;
+static bool mq_enabled;
+static bool mq_healthy;
+static bool mq_ambiguous;
+static char mq_state_dir[PATH_MAX];
+static mq_alloc_t *mq_allocs;
+static mq_total_t *mq_totals;
+static mq_grant_t *mq_grants;
+static uint64_t mq_replay_prev_seq;
+static pthread_mutex_t mq_clock_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t mq_last_wall_ns;
+static uint64_t mq_last_mono_ns;
+static bool mq_clock_bad;
+
+uint64_t monthly_quota_gpu_count(uint64_t *tres_req_cnt)
+{
+	slurmdb_tres_rec_t tres = { .type = "gres", .name = "gpu" };
+	int pos = assoc_mgr_find_tres_pos(&tres, false);
+	return (pos >= 0 && tres_req_cnt) ? tres_req_cnt[pos] : UINT64_MAX;
+}
+
+static uint32_t _fnv1a(const char *s)
+{
+	uint32_t h = 2166136261U;
+	for (; *s; s++) {
+		h ^= (unsigned char)*s;
+		h *= 16777619U;
+	}
+	return h;
+}
+
+static int _clock_fence_store_unlocked(uint64_t wall_ns)
+{
+	char path[PATH_MAX], tmp[PATH_MAX], text[64];
+	int fd, n;
+	snprintf(path, sizeof(path), "%s/clock.fence", mq_state_dir);
+	snprintf(tmp, sizeof(tmp), "%s/.clock.%ld", mq_state_dir, (long)getpid());
+	n = snprintf(text, sizeof(text), "%llu\n", (unsigned long long)wall_ns);
+	fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+	if (fd < 0 || write(fd, text, (size_t)n) != n || fsync(fd) != 0) {
+		if (fd >= 0) close(fd);
+		unlink(tmp);
+		return -1;
+	}
+	close(fd);
+	if (rename(tmp, path)) {
+		unlink(tmp);
+		return -1;
+	}
+	return 0;
+}
+
+static int _clock_fence_init(void)
+{
+	char path[PATH_MAX];
+	FILE *fp;
+	struct stat st;
+	unsigned long long previous = 0;
+	struct timespec wall, mono;
+	snprintf(path, sizeof(path), "%s/clock.fence", mq_state_dir);
+	if (!lstat(path, &st)) {
+		if (!S_ISREG(st.st_mode) || (st.st_mode & 077) ||
+		    st.st_uid != geteuid())
+			return -1;
+	} else if (errno != ENOENT) {
+		return -1;
+	}
+	if (clock_gettime(CLOCK_REALTIME, &wall) ||
+	    clock_gettime(CLOCK_MONOTONIC, &mono))
+		return -1;
+	mq_last_wall_ns = (uint64_t)wall.tv_sec * MQ_NS + (uint64_t)wall.tv_nsec;
+	mq_last_mono_ns = (uint64_t)mono.tv_sec * MQ_NS + (uint64_t)mono.tv_nsec;
+	fp = fopen(path, "r");
+	if (fp) {
+		if (fscanf(fp, "%llu", &previous) != 1) {
+			fclose(fp);
+			return -1;
+		}
+		fclose(fp);
+		if (mq_last_wall_ns < (uint64_t)previous)
+			return -1;
+	} else if (errno != ENOENT) {
+		return -1;
+	}
+	return _clock_fence_store_unlocked(mq_last_wall_ns);
+}
+
+static uint64_t _now_ns(void)
+{
+	struct timespec wall, mono;
+	uint64_t wall_ns, mono_ns;
+	int bad = 0;
+	pthread_mutex_lock(&mq_clock_lock);
+	if (clock_gettime(CLOCK_REALTIME, &wall) ||
+	    clock_gettime(CLOCK_MONOTONIC, &mono)) {
+		mq_clock_bad = true;
+		pthread_mutex_unlock(&mq_clock_lock);
+		return 0;
+	}
+	wall_ns = (uint64_t)wall.tv_sec * MQ_NS + (uint64_t)wall.tv_nsec;
+	mono_ns = (uint64_t)mono.tv_sec * MQ_NS + (uint64_t)mono.tv_nsec;
+	if (mq_clock_bad || (mq_last_wall_ns && wall_ns < mq_last_wall_ns) ||
+	    (mq_last_mono_ns && mono_ns < mq_last_mono_ns))
+		bad = 1;
+	if (!bad) {
+		mq_last_wall_ns = wall_ns;
+		mq_last_mono_ns = mono_ns;
+		if (_clock_fence_store_unlocked(wall_ns))
+			bad = 1;
+	}
+	if (bad)
+		mq_clock_bad = true;
+	pthread_mutex_unlock(&mq_clock_lock);
+	return bad ? 0 : wall_ns;
+}
+
+static time_t _month_start(time_t epoch)
+{
+	struct tm tm;
+	time_t local_epoch = epoch + (8 * 3600);
+	if (!gmtime_r(&local_epoch, &tm))
+		return (time_t)-1;
+	tm.tm_isdst = 0;
+	tm.tm_hour = 0;
+	tm.tm_min = 0;
+	tm.tm_sec = 0;
+	tm.tm_mday = 1;
+	return timegm(&tm) - (8 * 3600);
+}
+
+static uint64_t _quota_limit(uint64_t credit)
+{
+	const uint64_t base = MQ_DEBUG_NS + MQ_IMPORTANT_NS + MQ_NORMAL_NS;
+	return credit > UINT64_MAX - base ? UINT64_MAX : base + credit;
+}
+
+static void _month_name(uint64_t ns, char out[8])
+{
+	time_t epoch = (time_t)(ns / MQ_NS) + (8 * 3600);
+	struct tm tm;
+	gmtime_r(&epoch, &tm);
+	snprintf(out, 8, "%04d-%02d", tm.tm_year + 1900, tm.tm_mon + 1);
+}
+
+static mq_total_t *_total(uid_t uid, const char *month, bool create)
+{
+	mq_total_t *p;
+	for (p = mq_totals; p; p = p->next)
+		if (p->uid == uid && !strcmp(p->month, month))
+			return p;
+	if (!create)
+		return NULL;
+	p = calloc(1, sizeof(*p));
+	if (!p)
+		return NULL;
+	p->uid = uid;
+	strncpy(p->month, month, sizeof(p->month) - 1);
+	p->next = mq_totals;
+	mq_totals = p;
+	return p;
+}
+
+/* Charge an interval with nanosecond precision, splitting at Beijing month boundaries. */
+static time_t _next_month_start(time_t epoch)
+{
+	time_t start = _month_start(epoch);
+	struct tm local;
+	time_t local_epoch;
+	if (start == (time_t)-1)
+		return (time_t)-1;
+	local_epoch = start + (8 * 3600);
+	if (!gmtime_r(&local_epoch, &local))
+		return (time_t)-1;
+	local.tm_mon++;
+	local.tm_mday = 1;
+	local.tm_hour = local.tm_min = local.tm_sec = 0;
+	local.tm_isdst = 0;
+	return timegm(&local) - (8 * 3600);
+}
+
+/* Charge by Beijing calendar month; every boundary is normalized in UTC+8. */
+static int _charge(uid_t uid, uint64_t start_ns, uint64_t end_ns, uint64_t gpu)
+{
+	uint64_t pos = start_ns;
+	if (end_ns <= start_ns || !gpu)
+		return 0;
+	while (pos < end_ns) {
+		char month[8];
+		time_t boundary = _next_month_start((time_t)(pos / MQ_NS));
+		uint64_t next_ns;
+		if (boundary == (time_t)-1)
+			return -1;
+		next_ns = (uint64_t)boundary * MQ_NS;
+		if (next_ns <= pos || next_ns > end_ns)
+			next_ns = end_ns;
+		_month_name(pos, month);
+		mq_total_t *t = _total(uid, month, true);
+		if (!t || gpu > (UINT64_MAX - t->used_ns) / (next_ns - pos))
+			return -1;
+		t->used_ns += (next_ns - pos) * gpu;
+		pos = next_ns;
+	}
+	return 0;
+}
+
+static uint64_t _settled(uid_t uid, const char *month, uint64_t now_ns)
+{
+	uint64_t total = 0;
+	mq_total_t *t = _total(uid, month, false);
+	mq_alloc_t *a;
+	time_t month_start = _month_start((time_t)(now_ns / MQ_NS));
+	uint64_t month_start_ns = month_start > 0 ? (uint64_t)month_start * MQ_NS : 0;
+	if (t)
+		total = t->used_ns;
+	for (a = mq_allocs; a; a = a->next) {
+		uint64_t begin;
+		if (!a->committed || a->uid != uid)
+			continue;
+		begin = a->start_ns > month_start_ns ? a->start_ns : month_start_ns;
+		if (begin < now_ns) {
+			uint64_t elapsed = now_ns - begin;
+			/* A read-only settlement is used for decisions; release owns writes. */
+			if (a->gpu > (UINT64_MAX - total) / elapsed)
+				return UINT64_MAX;
+			total += elapsed * a->gpu;
+		}
+	}
+	return total;
+}
+
+static int _append_locked(const char *event, uid_t uid, uint32_t job_id,
+				  time_t submit, uint64_t gpu, uint64_t start_ns,
+				  uint64_t end_ns, const char *month, uint64_t amount,
+				  const char *id, const char *actor)
+{
+	char payload[MQ_EVENT_MAX], line[MQ_EVENT_MAX + 64];
+	ssize_t n;
+	if (mq_journal_fd < 0)
+		return -1;
+	mq_seq++;
+	snprintf(payload, sizeof(payload), "%s|%u|%u|%lld|%llu|%llu|%llu|%s|%llu|%s|%s",
+		  event, (unsigned)uid, job_id, (long long)submit,
+		  (unsigned long long)gpu, (unsigned long long)start_ns,
+		  (unsigned long long)end_ns, month ? month : "-",
+		  (unsigned long long)amount, id ? id : "-", actor ? actor : "-");
+	n = snprintf(line, sizeof(line), "%llu|%08x|%s\n",
+		     (unsigned long long)mq_seq, _fnv1a(payload), payload);
+	if (n <= 0 || (size_t)n >= sizeof(line) ||
+	    write(mq_journal_fd, line, (size_t)n) != n ||
+	    fsync(mq_journal_fd) != 0)
+		return -1;
+	return 0;
+}
+
+static void _checkpoint_locked(void)
+{
+	char path[PATH_MAX], tmp[PATH_MAX], text[256];
+	int fd;
+	snprintf(path, sizeof(path), "%s/%s", mq_state_dir, MQ_CHECKPOINT_NAME);
+	snprintf(tmp, sizeof(tmp), "%s/.checkpoint.%ld", mq_state_dir, (long)getpid());
+	unsigned active = 0;
+	mq_alloc_t *a;
+	for (a = mq_allocs; a; a = a->next)
+		active++;
+	int n = snprintf(text, sizeof(text), "version=1\nseq=%llu\nactive=%u\n",
+			 (unsigned long long)mq_seq, active);
+	if (n <= 0 || n >= (int)sizeof(text))
+		return;
+	n += snprintf(text + n, sizeof(text) - (size_t)n, "checksum=%08x\n",
+		      _fnv1a(text));
+	if (n <= 0 || n >= (int)sizeof(text))
+		return;
+	fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+	if (fd >= 0) {
+		if (write(fd, text, (size_t)n) == n && fsync(fd) == 0) {
+			close(fd);
+			rename(tmp, path);
+		} else {
+			close(fd);
+			unlink(tmp);
+		}
+	}
+}
+
+static mq_alloc_t *_find_alloc(uid_t uid, uint32_t job_id, time_t submit)
+{
+	mq_alloc_t *a, *best = NULL;
+	for (a = mq_allocs; a; a = a->next)
+		if (a->uid == uid && a->job_id == job_id && a->submit == submit &&
+		    (!best || a->start_ns > best->start_ns))
+			best = a;
+	return best;
+}
+
+static bool _grant_seen(const char *id)
+{
+	mq_grant_t *g;
+	for (g = mq_grants; g; g = g->next)
+		if (!strcmp(g->id, id))
+			return true;
+	return false;
+}
+
+static int _remember_grant(const char *id)
+{
+	mq_grant_t *g = calloc(1, sizeof(*g));
+	if (!g)
+		return -1;
+	strncpy(g->id, id, sizeof(g->id) - 1);
+	g->next = mq_grants;
+	mq_grants = g;
+	return 0;
+}
+
+static void _remove_alloc(mq_alloc_t *target)
+{
+	mq_alloc_t **p = &mq_allocs;
+	while (*p && *p != target)
+		p = &(*p)->next;
+	if (*p) {
+		*p = target->next;
+		free(target);
+	}
+}
+
+static int _replay_line(char *line)
+{
+	char *save = NULL, *seq_s, *hash_s, *payload, *event;
+	char *f[10] = {0};
+	int i;
+	uint32_t hash;
+	seq_s = strtok_r(line, "|", &save);
+	hash_s = strtok_r(NULL, "|", &save);
+	payload = strtok_r(NULL, "\n", &save);
+	uint64_t seq;
+	if (!seq_s || !hash_s || !payload || !(seq = strtoull(seq_s, NULL, 10)) ||
+	    seq <= mq_replay_prev_seq)
+		return -1;
+	if (sscanf(hash_s, "%x", &hash) != 1 || _fnv1a(payload) != hash)
+		return -1;
+	save = NULL;
+	event = strtok_r(payload, "|", &save);
+	for (i = 0; i < 10; i++)
+		if (!(f[i] = strtok_r(NULL, "|", &save)))
+			return -1;
+	if (strtok_r(NULL, "|", &save))
+		return -1;
+	mq_seq = mq_replay_prev_seq = seq;
+	if (!strcmp(event, "GRANT")) {
+		mq_total_t *t = _total((uid_t)strtoul(f[0], NULL, 10), f[6], true);
+		if (!t) return -1;
+		if (!_grant_seen(f[8])) {
+			t->credit_ns += strtoull(f[7], NULL, 10);
+			if (_remember_grant(f[8])) return -1;
+		}
+	} else if (!strcmp(event, "START_INTENT") || !strcmp(event, "START_COMMIT")) {
+		mq_alloc_t *a = _find_alloc((uid_t)strtoul(f[0], NULL, 10),
+			(uint32_t)strtoul(f[1], NULL, 10), (time_t)strtoll(f[2], NULL, 10));
+		if (!a) {
+			a = calloc(1, sizeof(*a));
+			if (!a) return -1;
+			a->uid = (uid_t)strtoul(f[0], NULL, 10);
+			a->job_id = (uint32_t)strtoul(f[1], NULL, 10);
+			a->submit = (time_t)strtoll(f[2], NULL, 10);
+			a->gpu = strtoull(f[3], NULL, 10);
+			a->start_ns = strtoull(f[4], NULL, 10);
+			a->next = mq_allocs;
+			mq_allocs = a;
+		}
+		if (!strcmp(event, "START_COMMIT")) {
+			uint64_t actual_gpu = strtoull(f[3], NULL, 10);
+			if (!actual_gpu || actual_gpu == UINT64_MAX)
+				return -1;
+			a->gpu = actual_gpu;
+			a->committed = true;
+		}
+	} else if (!strcmp(event, "RELEASE")) {
+		mq_alloc_t *a = _find_alloc((uid_t)strtoul(f[0], NULL, 10),
+			(uint32_t)strtoul(f[1], NULL, 10), (time_t)strtoll(f[2], NULL, 10));
+		if (a) {
+			if (_charge(a->uid, a->start_ns, strtoull(f[5], NULL, 10), a->gpu))
+				return -1;
+			_remove_alloc(a);
+		}
+	} else if (!strcmp(event, "ABORT")) {
+		mq_alloc_t *a = _find_alloc((uid_t)strtoul(f[0], NULL, 10),
+			(uint32_t)strtoul(f[1], NULL, 10), (time_t)strtoll(f[2], NULL, 10));
+		if (a) _remove_alloc(a);
+	} else {
+		return -1;
+	}
+	return 0;
+}
+
+static int _load_locked(void)
+{
+	char path[PATH_MAX], line[MQ_EVENT_MAX + 64];
+	FILE *fp;
+	snprintf(path, sizeof(path), "%s/%s", mq_state_dir, MQ_JOURNAL_NAME);
+	fp = fopen(path, "r");
+	if (!fp)
+		return errno == ENOENT ? 0 : -1;
+	while (fgets(line, sizeof(line), fp)) {
+		if (_replay_line(line)) {
+			fclose(fp);
+			return -1;
+		}
+	}
+	mq_ambiguous = mq_clock_bad;
+	for (mq_alloc_t *a = mq_allocs; a; a = a->next)
+		if (!a->committed) mq_ambiguous = true;
+	if (ferror(fp)) {
+		fclose(fp);
+		return -1;
+	}
+	fclose(fp);
+	return 0;
+}
+
+static int _reconcile_one_locked(struct job_record *job_ptr)
+{
+	uint64_t requested, gpu;
+	mq_alloc_t *a;
+	if (!job_ptr->details ||
+	    (!IS_JOB_RUNNING(job_ptr) && !IS_JOB_COMPLETING(job_ptr) &&
+	     !IS_JOB_CONFIGURING(job_ptr)))
+		return 0;
+	requested = monthly_quota_gpu_count(job_ptr->tres_req_cnt);
+	if (requested == UINT64_MAX)
+		return -1;
+	if (!requested)
+		return 0;
+	gpu = monthly_quota_gpu_count(job_ptr->tres_alloc_cnt);
+	if (gpu == UINT64_MAX || !gpu)
+		return -1;
+	if ((uint64_t)job_ptr->start_time > UINT64_MAX / MQ_NS)
+		return -1;
+	if ((uint64_t)job_ptr->start_time == 0)
+		return -1;
+	a = _find_alloc(job_ptr->user_id, job_ptr->job_id,
+			job_ptr->details->submit_time);
+	if (a) {
+		if (a->committed && a->gpu != gpu)
+			return -1; /* journal and restored allocation disagree */
+		if (!a->committed) {
+			a->gpu = gpu;
+			if (_append_locked("START_COMMIT", a->uid, a->job_id, a->submit,
+					   a->gpu, a->start_ns, 0, "-", 0, "-", "recovery"))
+				return -1;
+			a->committed = true;
+		}
+		return 0;
+	}
+	/* The controller restored an active allocation with no journal record. */
+	a = calloc(1, sizeof(*a));
+	if (!a || _append_locked("START_COMMIT", job_ptr->user_id, job_ptr->job_id,
+				 job_ptr->details->submit_time, gpu,
+				 (uint64_t)job_ptr->start_time * MQ_NS, 0, "-", 0,
+				 "recovered", "recovery")) {
+		free(a);
+		return -1;
+	}
+	a->uid = job_ptr->user_id;
+	a->job_id = job_ptr->job_id;
+	a->submit = job_ptr->details->submit_time;
+	a->gpu = gpu;
+	a->start_ns = (uint64_t)job_ptr->start_time * MQ_NS;
+	a->committed = true;
+	a->next = mq_allocs;
+	mq_allocs = a;
+	return 0;
+}
+
+static int _reconcile_recorded_locked(void)
+{
+	mq_alloc_t *a;
+	if (!mq_allocs)
+		return 0;
+	if (!job_list)
+		return -1;
+	for (a = mq_allocs; a; a = a->next) {
+		ListIterator itr;
+		struct job_record *job_ptr;
+		bool found = false;
+		if (!a->committed)
+			continue;
+		itr = list_iterator_create(job_list);
+		while ((job_ptr = (struct job_record *)list_next(itr))) {
+			if (job_ptr->job_id == a->job_id && job_ptr->user_id == a->uid &&
+			    job_ptr->details &&
+			    job_ptr->details->submit_time == a->submit &&
+			    (IS_JOB_RUNNING(job_ptr) || IS_JOB_COMPLETING(job_ptr) ||
+			     IS_JOB_CONFIGURING(job_ptr))) {
+				found = true;
+				break;
+			}
+		}
+		list_iterator_destroy(itr);
+		if (!found)
+			return -1;
+	}
+	return 0;
+}
+
+int monthly_quota_reconcile(void)
+{
+	ListIterator itr;
+	struct job_record *job_ptr;
+	int rc = 0;
+	pthread_mutex_lock(&mq_lock);
+	if (mq_enabled && mq_healthy) {
+		if (job_list) {
+			itr = list_iterator_create(job_list);
+			while ((job_ptr = list_next(itr)))
+				if (_reconcile_one_locked(job_ptr)) rc = -1;
+			list_iterator_destroy(itr);
+		}
+		if (_reconcile_recorded_locked()) {
+			mq_ambiguous = true;
+			rc = -1;
+		}
+		for (mq_alloc_t *a = mq_allocs; a; a = a->next)
+			if (!a->committed) mq_ambiguous = true;
+		if (rc) mq_healthy = false;
+		_checkpoint_locked();
+	}
+	pthread_mutex_unlock(&mq_lock);
+	return rc;
+}
+
+static int _secure_state_dir(void)
+{
+	struct stat st;
+	if (lstat(mq_state_dir, &st) || !S_ISDIR(st.st_mode))
+		return -1;
+	if ((st.st_mode & 077) || st.st_uid != geteuid())
+		return -1;
+	return 0;
+}
+
+static int _enabled_marker(void)
+{
+	char path[PATH_MAX];
+	snprintf(path, sizeof(path), "%s/enabled", mq_state_dir);
+	return access(path, F_OK) == 0;
+}
+
+static uint64_t _credit(uid_t uid, const char *month)
+{
+	mq_total_t *t = _total(uid, month, false);
+	return t ? t->credit_ns : 0;
+}
+
+static int _tier(uint64_t used, uint64_t credit)
+{
+	if (used < MQ_DEBUG_NS) return 3;
+	if (used < MQ_DEBUG_NS + MQ_IMPORTANT_NS) return 2;
+	if (used < _quota_limit(credit)) return 1;
+	return 0;
+}
+
+static int _decision_locked(struct job_record *job_ptr, uint64_t gpu, bool write_intent)
+{
+	char month[8];
+	uint64_t now, used, credit, limit;
+	mq_alloc_t *a;
+	if (!mq_enabled)
+		return 0;
+	if (gpu == UINT64_MAX || !gpu)
+		return gpu == UINT64_MAX ? 1 : 0;
+	if (!mq_healthy || mq_ambiguous)
+		return 1;
+	if (job_ptr->array_recs ||
+	    (job_ptr->array_task_id != NO_VAL))
+		return 1; /* unsupported new shape: fail closed */
+	if (IS_JOB_RUNNING(job_ptr) || IS_JOB_SUSPENDED(job_ptr))
+		return 1; /* resource resize/resume admission is unsupported */
+	now = _now_ns();
+	if (!now)
+		return 1;
+	_month_name(now, month);
+	used = _settled(job_ptr->user_id, month, now);
+	credit = _credit(job_ptr->user_id, month);
+	limit = _quota_limit(credit);
+	if (used >= limit)
+		return 1;
+	if (!write_intent)
+		return 0;
+	a = _find_alloc(job_ptr->user_id, job_ptr->job_id,
+			job_ptr->details ? job_ptr->details->submit_time : 0);
+	if (a)
+		return a->committed ? 0 : 1;
+	a = calloc(1, sizeof(*a));
+	if (!a || _append_locked("START_INTENT", job_ptr->user_id, job_ptr->job_id,
+				 job_ptr->details ? job_ptr->details->submit_time : 0,
+				 gpu, now, 0, month, 0, "-", "controller")) {
+		free(a);
+		mq_healthy = false;
+		return 1;
+	}
+	a->uid = job_ptr->user_id;
+	a->job_id = job_ptr->job_id;
+	a->submit = job_ptr->details ? job_ptr->details->submit_time : 0;
+	a->gpu = gpu;
+	a->start_ns = now;
+	a->next = mq_allocs;
+	mq_allocs = a;
+	_checkpoint_locked();
+	return 0;
+}
+
+int monthly_quota_preview(struct job_record *job_ptr, uint64_t gpu_count)
+{
+	int rc;
+	pthread_mutex_lock(&mq_lock);
+	rc = _decision_locked(job_ptr, gpu_count, false);
+	pthread_mutex_unlock(&mq_lock);
+	return rc;
+}
+
+int monthly_quota_admit(struct job_record *job_ptr, uint64_t gpu_count)
+{
+	int rc;
+	pthread_mutex_lock(&mq_lock);
+	rc = _decision_locked(job_ptr, gpu_count, true);
+	pthread_mutex_unlock(&mq_lock);
+	return rc;
+}
+
+void monthly_quota_commit(struct job_record *job_ptr, uint64_t gpu_count)
+{
+	mq_alloc_t *a;
+	pthread_mutex_lock(&mq_lock);
+	if (!mq_enabled ||
+	    (gpu_count == 0 && monthly_quota_gpu_count(job_ptr->tres_req_cnt) == 0)) {
+		pthread_mutex_unlock(&mq_lock);
+		return;
+	}
+	if (gpu_count == UINT64_MAX || !gpu_count) {
+		mq_healthy = false;
+		pthread_mutex_unlock(&mq_lock);
+		return;
+	}
+	a = _find_alloc(job_ptr->user_id, job_ptr->job_id,
+			job_ptr->details ? job_ptr->details->submit_time : 0);
+	if (!a || gpu_count == UINT64_MAX || !gpu_count) {
+		mq_healthy = false;
+		mq_ambiguous = true;
+		pthread_mutex_unlock(&mq_lock);
+		return;
+	}
+	if (!a->committed) {
+		a->gpu = gpu_count;
+		if (_append_locked("START_COMMIT", a->uid, a->job_id, a->submit,
+				   a->gpu, a->start_ns, 0, "-", 0, "-", "controller"))
+			mq_healthy = false;
+		else {
+			a->committed = true;
+			_checkpoint_locked();
+		}
+	}
+	pthread_mutex_unlock(&mq_lock);
+}
+
+static void _finish(struct job_record *job_ptr, const char *event)
+{
+	mq_alloc_t *a;
+	uint64_t now = _now_ns();
+	pthread_mutex_lock(&mq_lock);
+	a = _find_alloc(job_ptr->user_id, job_ptr->job_id,
+			job_ptr->details ? job_ptr->details->submit_time : 0);
+	if (a) {
+		if (!strcmp(event, "RELEASE") && a->committed &&
+		    _append_locked(event, a->uid, a->job_id, a->submit, a->gpu,
+				   a->start_ns, now, "-", 0, "-", "controller")) {
+			mq_healthy = false;
+		} else if (!strcmp(event, "RELEASE") && a->committed) {
+			if (_charge(a->uid, a->start_ns, now, a->gpu))
+				mq_healthy = false;
+			_remove_alloc(a);
+			_checkpoint_locked();
+		} else if (!strcmp(event, "ABORT")) {
+			if (_append_locked(event, a->uid, a->job_id, a->submit, a->gpu,
+					   a->start_ns, 0, "-", 0, "-", "controller"))
+				mq_healthy = false;
+			else {
+				_remove_alloc(a);
+				_checkpoint_locked();
+			}
+		}
+	}
+	pthread_mutex_unlock(&mq_lock);
+}
+
+void monthly_quota_abort(struct job_record *job_ptr) { _finish(job_ptr, "ABORT"); }
+void monthly_quota_release(struct job_record *job_ptr) { _finish(job_ptr, "RELEASE"); }
+
+uint32_t monthly_quota_priority(struct job_record *job_ptr, uint32_t base_priority)
+{
+	char month[8];
+	uint64_t now, used, credit;
+	int tier;
+	pthread_mutex_lock(&mq_lock);
+	if (!mq_enabled || !mq_healthy || mq_ambiguous) {
+		pthread_mutex_unlock(&mq_lock);
+		return base_priority;
+	}
+	now = _now_ns();
+	if (!now) {
+		mq_healthy = false;
+		mq_ambiguous = true;
+		pthread_mutex_unlock(&mq_lock);
+		return base_priority;
+	}
+	_month_name(now, month);
+	used = _settled(job_ptr->user_id, month, now);
+	credit = _credit(job_ptr->user_id, month);
+	if (used == UINT64_MAX) {
+		mq_healthy = false;
+		mq_ambiguous = true;
+		pthread_mutex_unlock(&mq_lock);
+		return base_priority;
+	}
+	tier = _tier(used, credit);
+	if (base_priority > MQ_PRIORITY_BASE_MASK) {
+		mq_healthy = false;
+		mq_ambiguous = true;
+		pthread_mutex_unlock(&mq_lock);
+		return base_priority;
+	}
+	pthread_mutex_unlock(&mq_lock);
+	return base_priority | ((uint32_t)tier << MQ_PRIORITY_SHIFT);
+}
+
+bool monthly_quota_pending(struct job_record *job_ptr)
+{
+	return job_ptr && job_ptr->state_desc &&
+		!strncmp(job_ptr->state_desc, "MonthlyQuota:", 13);
+}
+
+static int _write_response(int fd, const char *s)
+{
+	size_t left = strlen(s);
+	while (left) {
+		ssize_t n = write(fd, s, left);
+		if (n <= 0) return -1;
+		s += n; left -= (size_t)n;
+	}
+	return 0;
+}
+
+static void *_api_thread(void *unused)
+{
+	char line[2048], month[8], response[512];
+	(void)unused;
+	while (!mq_stop) {
+		int fd = accept(mq_listen_fd, NULL, NULL);
+		struct { pid_t pid; uid_t uid; gid_t gid; } peer;
+		socklen_t peer_len = sizeof(peer);
+		if (fd < 0) { if (errno == EINTR) continue; break; }
+		if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &peer_len) || peer.uid != 0) {
+			close(fd); continue;
+		}
+		ssize_t n = read(fd, line, sizeof(line) - 1);
+		if (n <= 0) { close(fd); continue; }
+		line[n] = 0;
+		pthread_mutex_lock(&mq_lock);
+		if (!strncmp(line, "SNAPSHOT ", 9)) {
+			uid_t uid = (uid_t)strtoul(line + 9, NULL, 10);
+			uint64_t now = _now_ns(), used, credit, limit;
+			if (!now) {
+				mq_healthy = false;
+				mq_ambiguous = true;
+				snprintf(response, sizeof(response), "ERR controller_unavailable\n");
+			} else {
+				_month_name(now, month);
+				used = _settled(uid, month, now);
+				credit = _credit(uid, month);
+				limit = _quota_limit(credit);
+				if (used == UINT64_MAX) {
+					mq_healthy = false;
+					mq_ambiguous = true;
+					snprintf(response, sizeof(response), "ERR controller_unavailable\n");
+				} else {
+					snprintf(response, sizeof(response), "OK %llu %u %s %llu %llu %llu %d %s\n",
+						 (unsigned long long)mq_seq, (unsigned)uid, month,
+						 (unsigned long long)used, (unsigned long long)credit,
+						 (unsigned long long)(used < limit ? limit - used : 0),
+						 _tier(used, credit), (mq_healthy && !mq_ambiguous) ? "ok" : "unknown");
+				}
+			}
+		} else if (!strncmp(line, "GRANT ", 6)) {
+			char app[160], month_in[16], reason[160];
+			unsigned uid, actor; unsigned long long seconds;
+			int count = sscanf(line + 6, "%159s %u %15s %llu %u %159s",
+					   app, &uid, month_in, &seconds, &actor, reason);
+			char current_month[8];
+			uint64_t grant_now = _now_ns();
+			if (!grant_now) {
+				mq_healthy = false;
+				mq_ambiguous = true;
+			}
+			if (grant_now)
+				_month_name(grant_now, current_month);
+			else
+				current_month[0] = 0;
+			(void)actor;
+			mq_total_t *t = count == 6 && !strcmp(month_in, current_month) ?
+				_total((uid_t)uid, month_in, true) : NULL;
+			if (count != 6 || !t || seconds == 0 || seconds > UINT64_MAX / MQ_NS ||
+			    !strcmp(month_in, "-")) {
+				mq_healthy = false;
+				snprintf(response, sizeof(response), "ERR controller_unavailable\n");
+			} else if (_grant_seen(app)) {
+				/* Retries return the same durable success without adding credit. */
+				snprintf(response, sizeof(response), "OK %llu\n",
+					 (unsigned long long)mq_seq);
+			} else if (UINT64_MAX - t->credit_ns < seconds * MQ_NS ||
+				   _append_locked("GRANT", (uid_t)uid, 0, 0, 0, 0, 0,
+						   month_in, seconds * MQ_NS, app, "api")) {
+				mq_healthy = false;
+				snprintf(response, sizeof(response), "ERR controller_unavailable\n");
+			} else {
+				t->credit_ns += seconds * MQ_NS;
+				_remember_grant(app);
+				snprintf(response, sizeof(response), "OK %llu\n", (unsigned long long)mq_seq);
+			}
+		} else {
+			snprintf(response, sizeof(response), "ERR invalid_command\n");
+		}
+		pthread_mutex_unlock(&mq_lock);
+		_write_response(fd, response);
+		close(fd);
+	}
+	return NULL;
+}
+
+int monthly_quota_init(void)
+{
+	char path[PATH_MAX];
+	struct stat state_st, marker_st;
+	const char *root = getenv("SLURM_MONTHLY_QUOTA_STATE");
+	const char *required_env = getenv("SLURM_MONTHLY_QUOTA_REQUIRED");
+	bool required = required_env && !strcmp(required_env, "1");
+	if (required_env && strcmp(required_env, "0") && strcmp(required_env, "1"))
+		return -1;
+	if (!root || !*root) root = MQ_STATE_DEFAULT;
+	if (strlen(root) >= sizeof(mq_state_dir)) return -1;
+	strncpy(mq_state_dir, root, sizeof(mq_state_dir) - 1);
+	mq_state_dir[sizeof(mq_state_dir) - 1] = 0;
+	mq_stop = 0;
+	mq_enabled = false;
+	/* No automatic creation: a missing state directory means disabled only
+	 * when activation was not explicitly required by service configuration. */
+	if (lstat(mq_state_dir, &state_st))
+		return (errno == ENOENT && !required) ? 0 : -1;
+	if (_secure_state_dir()) return -1;
+	if (snprintf(path, sizeof(path), "%s/enabled", mq_state_dir) >= (int)sizeof(path))
+		return -1;
+	if (lstat(path, &marker_st))
+		return (errno == ENOENT && !required) ? 0 : -1;
+	if (!S_ISREG(marker_st.st_mode) || marker_st.st_uid != geteuid() ||
+	    (marker_st.st_mode & 077)) return -1;
+	mq_enabled = true;
+	mq_clock_bad = false;
+	mq_healthy = (_clock_fence_init() == 0);
+	mq_ambiguous = !mq_healthy;
+	pthread_mutex_lock(&mq_lock);
+	if (_load_locked()) mq_healthy = false;
+	snprintf(path, sizeof(path), "%s/%s", mq_state_dir, MQ_JOURNAL_NAME);
+	mq_journal_fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
+	if (mq_journal_fd >= 0) {
+		struct stat st;
+		if (fstat(mq_journal_fd, &st) || !S_ISREG(st.st_mode) ||
+		    (st.st_mode & 077) || st.st_uid != geteuid()) {
+			close(mq_journal_fd);
+			mq_journal_fd = -1;
+		}
+	}
+	if (mq_journal_fd < 0) mq_healthy = false;
+	pthread_mutex_unlock(&mq_lock);
+	if (!mq_enabled)
+		return 0;
+	snprintf(path, sizeof(path), "%s/%s", mq_state_dir, MQ_SOCKET_NAME);
+	unlink(path);
+	mq_listen_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (mq_listen_fd < 0) return -1;
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+	strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+	if (bind(mq_listen_fd, (struct sockaddr *)&addr, sizeof(addr)) ||
+	    chmod(path, 0600) || listen(mq_listen_fd, 8) ||
+	    pthread_create(&mq_thread, NULL, _api_thread, NULL)) {
+		close(mq_listen_fd); mq_listen_fd = -1; return -1;
+	}
+	return 0;
+}
+
+void monthly_quota_fini(void)
+{
+	mq_stop = 1;
+	if (mq_listen_fd >= 0) {
+		shutdown(mq_listen_fd, SHUT_RDWR);
+		close(mq_listen_fd); mq_listen_fd = -1;
+		pthread_join(mq_thread, NULL);
+	}
+	if (mq_journal_fd >= 0) { fsync(mq_journal_fd); close(mq_journal_fd); mq_journal_fd = -1; }
+}
