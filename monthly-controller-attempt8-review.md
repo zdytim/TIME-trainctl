@@ -8,3 +8,5 @@ Source: monthly-controller-u20-result/j-0959cd9eefdd4e9e94a7/8/outputs/strict-mo
 4. Scheduling allocation WAL+fence+checkpoint synchronous disk writes may stall under controller locks; characterize/design bounded IO and crash semantics. Non-durable preview timestamps create reboot/clock-regression uncertainty that must fail closed.
 
 Stay on u20 Slurm19; official verified source provided in work/mac-slurm-19-source.tar.gz. No tests or training, no deploy/service modification, credentials or unrequested host changes. Isolated compile and static review permitted. User requires git commit before deployment. Sibling outputs only; report residual blockers without overstating safety.
+
+5. Recovery ordering: patch reconciles before acct_db_conn/assoc_mgr_init on native Slurm19; GPU TRES lookup may be unavailable and grant socket may accept calls before recovery barrier. u20's accounting_storage=none and configured AccountingStorageTRES did not include GPU at last check. Verify real TRES mapping, order and socket readiness; fail closed until recovery is complete and do not claim GPU scheduling functional without evidence.
