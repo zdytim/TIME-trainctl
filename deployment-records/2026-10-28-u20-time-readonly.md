@@ -1,0 +1,4 @@
+# u20 time CLI and MCP read-only preview
+
+Source commit: b6e75f0. Target: u20 account u20, 2026-10-28 Asia/Shanghai.
+Deployed to /home/u20/.local/share/time/preview-b6e75f0/; created non-root wrappers /home/u20/.local/bin/timectl and time-mcp. Existing programs verified absent beforehand. Initial wrapper newline error repaired before health check. Read-only `timectl whoami` authenticated to existing broker and returned uid 1000 username u20. No Slurm, backend, system accounts or daemon changed. No behavioral tests run. MCP protocol compatibility not confirmed. Writes are intentionally disabled, new monthly enforcement not active. Other accounts have not been installed. Rollback removes only these exact two newly created wrappers and the exact preview directory after verifying they still match this release.
