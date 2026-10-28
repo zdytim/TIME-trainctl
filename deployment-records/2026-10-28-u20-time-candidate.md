@@ -1,0 +1,4 @@
+# u20 time CLI/MCP candidate deployment
+
+Source commit: f20edf7. Target u20 account u20. 2026-10-28 Asia/Shanghai.
+Copied committed candidate to /home/u20/.local/share/time/candidate-f20edf7; replaced only the two user wrappers timectl and time-mcp after exact comparison with b6e75f0 preview; prior wrappers copied to /home/u20/.local/share/time/backup-before-f20edf7/. Read-only whoami health returned authenticated u20 uid 1000. No scheduler, broker or accounts changed; no training or behavioral tests performed. CLI submit and cancel available, legacy non-idempotent creation disabled; MCP mutation tools remain disabled. MCP client protocol compatibility and actual training workflows are unverified. Monthly controller remains disabled/uninstalled. Rollback: restore both exact wrapper files from backup to /home/u20/.local/bin/ after verifying ownership and contents; preserve state and backups.
