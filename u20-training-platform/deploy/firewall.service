@@ -1,0 +1,13 @@
+[Unit]
+Description=Keep the training scheduler ports local
+Before=slurmctld.service slurmd.service
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/pro6000d-loopback-firewall start
+ExecStop=/usr/local/libexec/pro6000d-loopback-firewall stop
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

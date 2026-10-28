@@ -1,0 +1,3 @@
+# SUPERSEDED. User requires strict pre-allocation gating. DO NOT INCLUDE.
+# Historical example disabled intentionally; never enable for this requirement.
+# required /usr/local/lib/pro6000d-training/monthly_gate_spank.so

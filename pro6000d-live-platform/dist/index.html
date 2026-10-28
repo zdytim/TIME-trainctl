@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>训练管理</title>
+  <link rel="stylesheet" href="vendor/patternfly.min.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body data-mode="production">
+  <div id="login" hidden></div>
+  <div id="app" hidden>
+    <header class="topbar">
+      <span class="brand-mark" aria-hidden="true">▣</span><strong>训练管理</strong>
+      <span class="crumb">pro6000d 训练平台</span><span id="connection" class="tag amber">正在连接</span>
+      <button id="notifications" class="icon-button" aria-label="站内通知">通知 <b id="notification-count" hidden>0</b></button>
+      <span id="identity" class="identity"></span><button id="logout" class="pf-c-button pf-m-link">退出</button>
+    </header>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="host"><strong>训练与资源</strong><span id="host-state">读取设备状态</span></div>
+        <nav aria-label="训练平台导航">
+          <button data-page="overview" class="navitem">概览</button>
+          <button data-page="training" class="navitem active">训练管理</button>
+          <button data-page="storage" class="navitem">存储</button>
+          <button data-page="accounts" class="navitem">账户与额度</button>
+          <button data-page="metrics" class="navitem">性能监控</button>
+          <button data-page="logs" class="navitem">系统日志</button>
+          <button data-page="rules" class="navitem" hidden>调度规则</button>
+          <button data-page="applications" class="navitem" id="applications-nav">我的申请</button>
+        </nav>
+        <div class="sidefooter"><span id="last-updated">尚未连接</span></div>
+      </aside>
+      <main id="main" class="content" aria-live="polite"><div class="empty">正在读取训练平台…</div></main>
+    </div>
+  </div>
+  <div id="overlay"></div>
+  <script src="app.js"></script>
+</body>
+</html>

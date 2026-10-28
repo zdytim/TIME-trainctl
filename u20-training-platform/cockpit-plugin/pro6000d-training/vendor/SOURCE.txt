@@ -1,0 +1,4 @@
+PatternFly 4.224.5
+Source: https://registry.npmjs.org/@patternfly/patternfly/-/patternfly-4.224.5.tgz
+License: MIT
+Official components: https://v4-archive.patternfly.org/v4/

@@ -1,0 +1,26 @@
+[Unit]
+Description=Training management API with kernel UID authentication
+After=munge.service slurmctld.service
+
+[Service]
+Type=simple
+User=root
+Group=pro6000d-training
+UMask=0077
+RuntimeDirectory=pro6000d-training
+RuntimeDirectoryMode=0755
+ExecStart=/usr/bin/python3 /usr/local/lib/pro6000d-training/pro6000d-training-api.py --config /etc/pro6000d-training/config.json
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/pro6000d-training /run/pro6000d-training
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

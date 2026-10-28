@@ -1,0 +1,8 @@
+{
+  "version": 0,
+  "name": "pro6000d-training",
+  "requires": {"cockpit": "*"},
+  "priority": 10,
+  "menu": {"index": {"label": "训练管理", "order": 35}},
+  "content-security-policy": "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+}

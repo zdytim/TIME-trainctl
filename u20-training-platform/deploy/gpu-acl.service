@@ -1,0 +1,12 @@
+[Unit]
+Description=Restore scoped GPU access policy for training accounts
+After=systemd-udev-settle.service
+Before=slurmd.service pro6000d-training.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/pro6000d-gpu-acl
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
