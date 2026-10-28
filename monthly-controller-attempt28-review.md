@@ -1,0 +1,8 @@
+# u20 controller attempt28/17 independent static review
+
+Strict gate is still deliberately disabled. Static review of monthly-controller-u20-result/j-0959cd9eefdd4e9e94a7/28/outputs/strict-monthly-quota-19.05.5-u20-attempt17 finds blockers:
+
+1. C:1084–1086 UNKNOWN with no matching allocation uses original job start, not mq_migration_cutover_ns; RESOLVE_UNKNOWN C:1295–1304 later charges from that start. Clip verified pre-cutover allocations to persisted cutover and mark unknown evidence fail closed; do not erase real accounting.
+2. C:1058–1076 `_job_has_gpu_request` returns false when tres_req_cnt NULL. If allocation absent, unknown callback returns without durable UNKNOWN, treating missing evidence as CPU zero. Distinguish proven CPU from unknown and freeze on uncertainty.
+3. GPU TRES position is cached at startup C:98–106. Reconcile/map-change validation occurs only during controller startup patch:26, not necessarily after live reconfigure/association mapping changes. Runtime changes can reinterpret resource counts. Under proper Slurm locking, invalidate cache and freeze allocations on configuration changes until safely rebuilt, or revalidate atomically at actual decision. Handle typed GRES.
+4. Allocation linearization, physical cleanup evidence, bounded scheduler I/O, runtime recovery, production ABI/PAM/munge and behavior validation remain unresolved. Never activate. No tests or service mutations allowed.
