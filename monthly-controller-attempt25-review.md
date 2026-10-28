@@ -1,0 +1,7 @@
+# Independent review: attempt25 u20 Slurm19 controller
+
+Scope: monthly-controller-u20-result/j-0959cd9eefdd4e9e94a7/25/outputs/strict-monthly-quota-19.05.5-u20-attempt15. Static source review only; no behavioral test/deploy. Strict gate remains disabled (`MQ_STRICT_INTEGRATION_PROVEN=0`), as claimed by source, not proof of installed status.
+
+1. Candidate patch treats successful `select_g_job_fini` as proof of physical GPU release and can release accounting in down/no-epilog branches before termination RPC. This is insufficient: Slurm19 slurmd req.c around 5482–5509 may send completion before container_g_delete and failure can only be logged. No trusted evidence of process/device cleanup or durable recovery; insufficient evidence must be UNKNOWN, not release.
+2. Patch modifies `select/cons_tres` rm_job_res/select_p_job_fini error semantics unconditionally, so deploying that plugin could change existing jobs even while monthly quota disabled. On the other hand tools/build-controller.sh builds only slurmctld and not select_cons_tres.so, so deploying its artifact alone would not contain the claimed error propagation. Neither production route is ready; require API/ABI review, exact matching builds, disabled-mode behavior equivalence, preserve existing workflows, and rollback.
+3. Strict allocation linearization and bounded durable scheduler I/O remain explicitly unresolved. Do not enable. Isolated compile missing production PAM/munge remains insufficient.
