@@ -1,0 +1,16 @@
+{
+  "state_db": "/var/lib/u20-training/state.sqlite3",
+  "job_script_dir": "/var/lib/u20-training/jobs",
+  "socket_path": "/run/u20-training/backend.sock",
+  "socket_group": "u20-training",
+  "training_group": "u20-training",
+  "admin_group": "u20-admin",
+  "partition": "REPLACE_WITH_VERIFIED_U20_PARTITION",
+  "admission_plugin": true,
+  "admission_plugin_path": "/etc/slurm-llnl/job_submit.lua",
+  "monthly_quota": {
+    "enabled": false,
+    "controller_socket": "/var/lib/slurm/monthly-quota/controller.sock",
+    "design_note": "Enable only after review, commit, exact installed Slurm 19.05.5 validation, and recovery approval."
+  }
+}

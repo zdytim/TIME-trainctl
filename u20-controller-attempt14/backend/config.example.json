@@ -1,0 +1,32 @@
+{
+  "state_db": "/var/lib/pro6000d-training/state.sqlite3",
+  "job_script_dir": "/var/lib/pro6000d-training/jobs",
+  "socket_path": "/run/pro6000d-training/backend.sock",
+  "socket_group": "pro6000d-training",
+  "training_group": "pro6000d-training",
+  "admin_group": "pro6000d-admin",
+  "job_group": "pro6000d-gpu",
+  "partition": "gpu",
+  "max_requested_gpu": 1,
+  "capacity": {"gpu": 1, "cpu": 32, "memory_mb": 112000},
+  "max_job_minutes": 4320,
+  "jobcomp_log": "/var/log/slurm/jobcomp.log",
+  "admission_plugin": true,
+  "admission_plugin_path": "/etc/slurm-llnl/job_submit.lua",
+  "user_roots": ["/home/{username}", "/srv/pro6000d/users/{username}"],
+  "default_quota": {"gpu_limit": 1, "concurrent_gpu_limit": 1, "active_job_limit": 8},
+  "qos": {
+    "debug": {"max_minutes": 60},
+    "normal": {"max_minutes": 1440},
+    "long": {"max_minutes": 4320}
+  },
+  "temporary_authorizations": {
+    "enabled": true,
+    "design_note": "Root-only admission; each approval binds one canonical job. Expiry is the Slurm submission deadline and does not kill running jobs."
+  },
+  "monthly_quota": {
+    "enabled": false,
+    "controller_socket": "/var/lib/slurm/monthly-quota/controller.sock",
+    "design_note": "Enable only after the versioned slurmctld artifact is activated and recovery is reviewed; the controller is authoritative."
+  }
+}
