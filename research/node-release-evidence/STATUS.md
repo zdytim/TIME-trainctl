@@ -1,0 +1,7 @@
+# Node release evidence research status
+
+This is a disabled research prototype, not a deployed or integrated quota gate. It is retained as the latest research snapshot; older snapshots remain in Git history. The user's monthly quota requirement does not by itself require proof of a physical GPU reset: a simpler design may rely on Slurm's trusted job lifecycle and GRES/device isolation, with conservative handling of failed or unknown nodes. That design still needs rigorous admission, accounting and crash recovery analysis and production verification. The independent follow-up is specified in `monthly-slurm19-simplification-task.md`.
+
+The source has no production witness, no Slurm integration, and no physical GPU cleanup verification; `durable_backend_ready()` unconditionally disables its API. A static review also identified a potential cycle if the authenticated envelope includes a signature over a chain head that is itself derived from the entire authenticated envelope. No tests or deployment were performed.
+
+The Slurm 19 `sacctmgr` manual documents that GrpTRESMins can kill running jobs when an aggregate limit is reached and GrpTRESRunMins reserves based on time limits. Neither directly implements the requested actual usage accounting while allowing running jobs to finish. An external polling hold alone also cannot guarantee that no GPU is allocated before the hold takes effect.

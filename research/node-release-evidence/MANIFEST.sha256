@@ -1,0 +1,9 @@
+# RELEASE_EVIDENCE_ENABLED=0
+# No Slurm integration; no trustworthy production cleanup proof.
+# No tests, deployment, services, credentials, or runtime data.
+0c936cca596154a87274a014a1636093eee31d7b328954cd8da695009c28806b  DESIGN.md
+0cfc2009f9aaa0db14befad705dc325071245428b8b9128b4eeb1ccfc49ca46b  LOCAL_CAPABILITIES.md
+863f5ce07accc79b2feb80317421230e1735e7ccaa9c67b47a78b5a4d809e14d  REPORT.md
+6bb0eed7b7e4cf3dbd14ab4aac82b384500b7d2c5a997d47b1933b995f2ced7e  Makefile
+5702d0ca619caaf9d4837943e4d4b314eaad1849c3b8f16ebd0381edfa1fbc2b  include/release_evidence.h
+2919dcea14354e41a8f6dc837cdde7e84d7ec3fc1f1b432b1011068a1af60b6f  src/release_evidence.c
