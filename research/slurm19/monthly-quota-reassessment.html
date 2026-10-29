@@ -1,0 +1,766 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>月度额度门控：Slurm 19.05.5 × TIME 最小可行性再评估</title>
+  <style>
+    :root {
+      --ink: #17212b;
+      --muted: #5e6b78;
+      --faint: #eef2f5;
+      --line: #d7e0e7;
+      --paper: #ffffff;
+      --canvas: #f5f7f9;
+      --navy: #12324a;
+      --blue: #1e6f9f;
+      --cyan: #dff3f6;
+      --green: #1e7656;
+      --green-bg: #e7f5ee;
+      --amber: #9a5d00;
+      --amber-bg: #fff3d8;
+      --red: #9d3030;
+      --red-bg: #fff0ef;
+      --violet: #654596;
+      --violet-bg: #f1ecfb;
+      --shadow: 0 12px 30px rgba(21, 42, 60, .08);
+      --radius: 14px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--canvas);
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.65;
+    }
+    a { color: var(--blue); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+    a:hover { color: var(--navy); }
+    code, pre, .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: .91em;
+    }
+    code {
+      background: #edf2f5;
+      border: 1px solid #e1e7eb;
+      border-radius: 5px;
+      padding: .08em .34em;
+      overflow-wrap: anywhere;
+    }
+    .container { width: min(1180px, calc(100% - 36px)); margin: 0 auto; }
+    .site-head {
+      color: #f5fbff;
+      background:
+        radial-gradient(circle at 88% 12%, rgba(73, 181, 192, .28), transparent 28%),
+        linear-gradient(132deg, #102c42 0%, #173d58 58%, #1b5966 100%);
+      padding: 48px 0 42px;
+    }
+    .eyebrow {
+      text-transform: uppercase;
+      letter-spacing: .12em;
+      font-size: .72rem;
+      font-weight: 750;
+      color: #a8e0e3;
+    }
+    h1, h2, h3 { line-height: 1.2; margin: 0; letter-spacing: -.025em; }
+    h1 { font-size: clamp(2rem, 4vw, 3.45rem); max-width: 900px; margin-top: 10px; }
+    .dek { max-width: 820px; color: #d5e7ee; font-size: 1.08rem; margin: 17px 0 0; }
+    .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 24px; }
+    .badge {
+      display: inline-flex; align-items: center; gap: 7px;
+      border: 1px solid rgba(255,255,255,.23);
+      background: rgba(255,255,255,.10);
+      border-radius: 999px; padding: 5px 11px;
+      color: #eefbfc; font-size: .82rem;
+    }
+    .badge strong { color: #fff; }
+    .top-nav {
+      position: sticky; top: 0; z-index: 10;
+      background: rgba(255,255,255,.94);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--line);
+      box-shadow: 0 3px 12px rgba(23, 45, 62, .04);
+    }
+    .nav-inner { display: flex; gap: 14px; align-items: center; overflow-x: auto; min-height: 48px; }
+    .top-nav a {
+      white-space: nowrap; color: var(--muted); text-decoration: none;
+      font-size: .83rem; padding: 13px 2px 11px;
+      border-bottom: 2px solid transparent;
+    }
+    .top-nav a:hover { color: var(--navy); border-color: var(--blue); }
+    main { padding: 30px 0 70px; }
+    section { scroll-margin-top: 70px; margin-top: 42px; }
+    section:first-child { margin-top: 0; }
+    .section-kicker {
+      color: var(--blue); font-weight: 800; font-size: .76rem;
+      letter-spacing: .1em; text-transform: uppercase; margin-bottom: 8px;
+    }
+    h2 { color: var(--navy); font-size: clamp(1.5rem, 2.5vw, 2.15rem); }
+    h3 { font-size: 1.12rem; color: var(--navy); }
+    .lead { color: var(--muted); max-width: 850px; margin: 10px 0 22px; }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .card, .panel {
+      background: var(--paper); border: 1px solid var(--line);
+      border-radius: var(--radius); box-shadow: var(--shadow);
+    }
+    .card { padding: 21px 22px; }
+    .panel { padding: 25px; }
+    .verdict {
+      border: 1px solid #a8d2d6;
+      border-left: 6px solid var(--blue);
+      background: linear-gradient(120deg, #f0fbfc, #fff);
+      padding: 22px 24px; border-radius: var(--radius); box-shadow: var(--shadow);
+    }
+    .verdict .label, .callout .label {
+      display: inline-block; font-size: .72rem; letter-spacing: .08em;
+      text-transform: uppercase; font-weight: 850; color: var(--blue);
+      margin-bottom: 5px;
+    }
+    .verdict p { margin: 7px 0 0; font-size: 1.06rem; }
+    .flag {
+      display: inline-flex; align-items: center; gap: 7px; border-radius: 999px;
+      padding: 3px 9px; font-size: .74rem; font-weight: 800; vertical-align: 2px;
+    }
+    .flag.red { color: var(--red); background: var(--red-bg); border: 1px solid #efc0bd; }
+    .flag.green { color: var(--green); background: var(--green-bg); border: 1px solid #b8ddc9; }
+    .flag.amber { color: var(--amber); background: var(--amber-bg); border: 1px solid #eed49e; }
+    .flag.violet { color: var(--violet); background: var(--violet-bg); border: 1px solid #d8c9ef; }
+    .stat {
+      padding: 17px 18px; border-radius: 12px; background: #fff;
+      border: 1px solid var(--line);
+    }
+    .stat .number { color: var(--navy); font-size: 1.55rem; font-weight: 850; letter-spacing: -.04em; }
+    .stat .caption { color: var(--muted); font-size: .86rem; margin-top: 3px; }
+    .callout { padding: 17px 19px; border-radius: 11px; border: 1px solid; margin: 17px 0; }
+    .callout p:last-child { margin-bottom: 0; }
+    .callout.blue { background: #eff8fb; border-color: #b9dfe6; }
+    .callout.amber { background: var(--amber-bg); border-color: #eed49e; }
+    .callout.red { background: var(--red-bg); border-color: #efc0bd; }
+    .callout.green { background: var(--green-bg); border-color: #b8ddc9; }
+    .callout.violet { background: var(--violet-bg); border-color: #d8c9ef; }
+    .callout strong { color: var(--navy); }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); }
+    table { width: 100%; border-collapse: collapse; min-width: 760px; }
+    th, td { text-align: left; vertical-align: top; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+    th { background: #f1f5f7; color: var(--navy); font-size: .8rem; letter-spacing: .025em; }
+    td { font-size: .91rem; }
+    tr:last-child td { border-bottom: 0; }
+    tbody tr:hover td { background: #fbfdfe; }
+    .tight td, .tight th { padding: 9px 11px; }
+    .waterfall {
+      display: flex; height: 58px; border-radius: 11px; overflow: hidden;
+      border: 1px solid var(--line); margin: 18px 0 8px; background: #f4f6f7;
+    }
+    .waterfall > div {
+      display: flex; align-items: center; justify-content: center; text-align: center;
+      font-size: .78rem; font-weight: 800; padding: 6px; color: #fff;
+    }
+    .waterfall .debug { flex: 5; background: #3d8d99; }
+    .waterfall .important { flex: 100; background: #4b6fa6; }
+    .waterfall .normal { flex: 500; background: #7c6a9d; }
+    .waterfall .debt { flex: 55; background: #b85d59; min-width: 105px; }
+    .legend { display: flex; flex-wrap: wrap; gap: 12px; color: var(--muted); font-size: .82rem; }
+    .dot { width: 10px; height: 10px; display: inline-block; border-radius: 50%; margin-right: 5px; }
+    .equation {
+      background: #172a39; color: #e8f4f6; border-radius: 10px;
+      padding: 15px 18px; overflow-x: auto; font-size: .91rem; line-height: 1.75;
+    }
+    .equation .accent { color: #9be0dc; }
+    .source-note { color: var(--muted); font-size: .84rem; }
+    .source-note a { white-space: nowrap; }
+    .option-title { display: flex; align-items: flex-start; gap: 10px; }
+    .option-no {
+      flex: 0 0 auto; width: 28px; height: 28px; border-radius: 8px;
+      display: grid; place-items: center; color: #fff; background: var(--blue);
+      font-weight: 850; font-size: .84rem;
+    }
+    .option-card p { color: var(--muted); font-size: .9rem; }
+    .option-card ul, .card ul, .panel ul { padding-left: 1.2em; margin: 10px 0 0; }
+    li + li { margin-top: 5px; }
+    .recommended { border-color: #8ec6cf; box-shadow: 0 14px 36px rgba(24, 112, 137, .14); }
+    .recommended .option-no { background: var(--green); }
+    .svg-wrap {
+      background: #fbfdfe; border: 1px solid var(--line); border-radius: 12px;
+      padding: 12px; overflow-x: auto;
+    }
+    svg { display: block; width: 100%; min-width: 850px; height: auto; }
+    .svg-label { font-family: ui-sans-serif, sans-serif; font-size: 14px; fill: #173247; }
+    .svg-small { font-family: ui-sans-serif, sans-serif; font-size: 11px; fill: #5e6b78; }
+    .milestones { display: grid; grid-template-columns: repeat(7, minmax(115px, 1fr)); gap: 0; margin: 22px 0 18px; }
+    .mile { position: relative; padding: 14px 9px 4px; text-align: center; }
+    .mile::before {
+      content: ""; position: absolute; top: 25px; left: 0; right: 0; height: 3px; background: #c9dce2;
+    }
+    .mile:first-child::before { left: 50%; }
+    .mile:last-child::before { right: 50%; }
+    .mile .circle {
+      position: relative; z-index: 1; margin: 0 auto 9px; width: 27px; height: 27px;
+      display: grid; place-items: center; border-radius: 50%; background: var(--blue);
+      color: #fff; font-size: .75rem; font-weight: 850; border: 4px solid var(--canvas);
+    }
+    .mile strong { display: block; color: var(--navy); font-size: .8rem; line-height: 1.25; }
+    .mile span { color: var(--muted); font-size: .7rem; }
+    .phase { border-top: 3px solid var(--blue); }
+    .phase.green-line { border-top-color: var(--green); }
+    .phase.amber-line { border-top-color: #cb8a21; }
+    .phase.red-line { border-top-color: var(--red); }
+    .phase .phase-meta { color: var(--blue); font-size: .74rem; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; }
+    .phase p { font-size: .9rem; color: var(--muted); }
+    .phase .files { font-size: .8rem; color: #405462; }
+    .risk-high { color: var(--red); font-weight: 800; }
+    .risk-med { color: var(--amber); font-weight: 800; }
+    .risk-low { color: var(--green); font-weight: 800; }
+    details { border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+    details + details { margin-top: 9px; }
+    summary { cursor: pointer; padding: 13px 15px; color: var(--navy); font-weight: 750; }
+    details > div { padding: 0 15px 15px; color: var(--muted); }
+    .two-col-list { columns: 2; column-gap: 34px; }
+    .two-col-list li { break-inside: avoid; }
+    .footer {
+      margin-top: 46px; padding-top: 20px; border-top: 1px solid var(--line);
+      color: var(--muted); font-size: .82rem;
+    }
+    .small { font-size: .84rem; color: var(--muted); }
+    .nowrap { white-space: nowrap; }
+    @media (max-width: 800px) {
+      .container { width: min(100% - 24px, 1180px); }
+      .site-head { padding: 35px 0 31px; }
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      .panel { padding: 18px; }
+      .milestones { grid-template-columns: repeat(4, 1fr); row-gap: 12px; }
+      .mile:nth-child(4)::before { right: 50%; }
+      .mile:nth-child(5)::before { left: 50%; }
+      .two-col-list { columns: 1; }
+    }
+    @media print {
+      .top-nav { display: none; }
+      body { background: #fff; }
+      .card, .panel, .verdict { box-shadow: none; }
+      section { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <header class="site-head">
+    <div class="container">
+      <div class="eyebrow">架构复核 · Slurm 19.05.5 · TIME</div>
+      <h1>月度额度门控：重新评估最小可行实现</h1>
+      <p class="dek">以“每用户每月 GPU·小时、水位式额度、运行中可欠额、未启动不得分配 GPU”为边界，回到真实 Slurm 控制器调用链，判断什么能做、什么还不能证明。</p>
+      <div class="badges">
+        <span class="badge"><strong>结论状态</strong> 未上线 / 未启用</span>
+        <span class="badge"><strong>审计方式</strong> 只读源码与现有交付</span>
+        <span class="badge"><strong>验证约束</strong> 未运行测试、模拟或服务动作</span>
+        <span class="badge"><strong>推荐方向</strong> slurmctld 统一准入 + 持久账本</span>
+      </div>
+    </div>
+  </header>
+
+  <nav class="top-nav" aria-label="报告导航">
+    <div class="container nav-inner">
+      <a href="#decision">结论</a>
+      <a href="#contract">额度契约</a>
+      <a href="#evidence">现状证据</a>
+      <a href="#options">方案比较</a>
+      <a href="#callgraph">调用链</a>
+      <a href="#scenarios">边界场景</a>
+      <a href="#plan">实施分期</a>
+      <a href="#recovery">故障关闭</a>
+      <a href="#validation">启用前验证</a>
+    </div>
+  </nav>
+
+  <main class="container">
+    <section id="decision">
+      <div class="section-kicker">01 · 先给决定</div>
+      <h2>不要再扩展独立释放证据原型；把权威放回 slurmctld</h2>
+      <div class="verdict">
+        <span class="label">推荐的最小可行方向</span>
+        <p><strong>在 19.05.5 的控制器公共调度入口建立月度准入事务，保留 <code>select/cons_tres</code>、GRES 与现有 cgroup 设备控制；用控制器内的持久账本做即时额度权威，SlurmDBD/sacct 只做历史对账。</strong> 这比改写 select/GRES 或继续轮询平台数据库更接近真实需求，也能覆盖普通用户的直接 Slurm 路径。</p>
+        <p><span class="flag red">尚未证明</span> 当前源码与现有 TIME 实现都不能证明“GPU 分配前绝不越额开始”。要取得这个性质，必须补上<strong>持久意图 → 资源提交 → 成功/失败结算</strong>的线性化协议，并审计所有提交、resize、requeue、backfill 与恢复路径。</p>
+      </div>
+      <div class="grid-3" style="margin-top:16px">
+        <div class="stat"><div class="number">605</div><div class="caption">基础月额度：5 + 100 + 500 GPU·小时</div></div>
+        <div class="stat"><div class="number">0</div><div class="caption">normal 余额精确为零时，新的 GPU allocation</div></div>
+        <div class="stat"><div class="number">不杀在跑</div><div class="caption">额度耗尽只阻止新启动；运行代价进入欠额</div></div>
+      </div>
+      <div class="callout amber">
+        <span class="label">本次交付边界</span>
+        <p>没有提交独立代码补丁：当前授权工作区没有可安全修改的 u20 Slurm 源码副本，u20 实际配置/二进制也未得到现场证据；而原子提交点尚未被证明。贸然复制历史原型会把“设计草案”伪装成可上线代码。历史交付保持原样，本报告是只读评估，不是上线批准。</p>
+      </div>
+    </section>
+
+    <section id="contract">
+      <div class="section-kicker">02 · 先固定语义</div>
+      <h2>额度模型：精确计量，明确水位，允许运行中跨界</h2>
+      <p class="lead">以下按用户给出的字面契约建模：水位顺序为 <strong>debug → important → normal</strong>，额度是用户级、自然月级的 GPU·小时总消耗，而不是三个互相独立且可任意挑选的 QoS 上限。若“debug/important/normal”其实是作业分类而不是累计水位，需在实施前另行定稿。</p>
+
+      <div class="waterfall" aria-label="额度水位示意">
+        <div class="debug">debug<br>5 h</div>
+        <div class="important">important<br>100 h</div>
+        <div class="normal">normal<br>500 h</div>
+        <div class="debt">欠额<br>继续计费</div>
+      </div>
+      <div class="legend">
+        <span><i class="dot" style="background:#3d8d99"></i>第一水位</span>
+        <span><i class="dot" style="background:#4b6fa6"></i>第二水位</span>
+        <span><i class="dot" style="background:#7c6a9d"></i>最后水位</span>
+        <span><i class="dot" style="background:#b85d59"></i>运行中超出后的债务</span>
+      </div>
+
+      <div class="equation" style="margin-top:18px">
+        <span class="accent">usage_m(t)</span> = 已结算区间 + Σ(正在占用的 GPU 数 × (t − 区间开始))，并在 Asia/Shanghai 月界切分<br>
+        <span class="accent">available_m(t)</span> = 尚未消耗的水位 + 已生效追加额度 − 欠额；精确为 0 时不得开始新的 GPU allocation<br>
+        <span class="accent">debt_m</span> = 运行作业继续占用导致的超出量；追加额度先减少 debt_m，再形成可用余额
+      </div>
+
+      <div class="table-wrap" style="margin-top:18px">
+        <table class="tight">
+          <thead><tr><th>契约句子</th><th>控制器应记录的事实</th><th>不能偷换成</th></tr></thead>
+          <tbody>
+            <tr><td>按 GPU 数乘以占用时间</td><td>以实际分配的 GPU TRES 数量 × 逻辑资源占用区间；不能只读请求字符串或 walltime 预测。</td><td>按 CPU、节点数、提交时长或 sacct 最终报表估算。</td></tr>
+            <tr><td>额度依次耗尽使用下一级</td><td>每个用户/月的消费游标按固定顺序跨越水位；水位跨越需可重放、可审计。</td><td>让用户通过改 QOS、comment 或 API 参数任意选择更宽的桶。</td></tr>
+            <tr><td>normal 耗尽后运行中继续</td><td>运行代数保持打开区间，继续累积 GPU·小时并形成该月欠额；不因 quota 触发取消或抢占。</td><td>到上限杀作业，或把未来作业的预估 walltime 先扣掉。</td></tr>
+            <tr><td>尚未运行保持排队</td><td>最终资源提交前再次检查；额度不足返回可重试的 accounting-policy pending reason，不进入 GRES allocation。</td><td>只在平台 UI 隐藏按钮，或在节点侧启动后再由 SPANK 拒绝。</td></tr>
+            <tr><td>追加额度先抵扣欠额</td><td>追加事件带月份、数量、授权主体、幂等键；先结清 debt，再增加余额。</td><td>直接修改 Python 快照或让用户自己传入一个 grant 标记。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout blue">
+        <strong>需要在实施前写入契约的三个选择：</strong> “important” 是否是水位还是作业优先级；GPU 是否只计 <code>gres/gpu</code> 还是包含 typed GPU/MIG；超级用户代提交是否对目标 <code>job_ptr-&gt;user_id</code> 计费。推荐初版采用单集群、无 typed GPU、所有普通作业按目标用户计费，并对未支持的 resize/pack/heterogeneous 申请保持 pending，而不是放行。
+      </div>
+    </section>
+
+    <section id="evidence">
+      <div class="section-kicker">03 · 已核对的现状</div>
+      <h2>TIME 有入口和数据展示，但没有 Slurm 权威准入</h2>
+      <p class="lead">下面区分了“已看到的源文件/历史交付”和“不能推断的现场事实”。已知的 pro6000d 快照不能冒充 u20 配置。</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>证据层</th><th>看到的内容</th><th>对需求的结论</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><strong>TIME 月度模块</strong><br><code>backend/monthly_quota.py</code></td>
+              <td>明确是 staged；<code>enabled=false</code>、<code>enforcement_ready=false</code>；轮询 sacct、分月结算、展示欠额，但没有 Slurm 控制器内的最终资源准入。</td>
+              <td><span class="flag red">不能阻止</span> 已处于 PENDING 的 Slurm 作业随后获得 GPU；不能作为即时 authority。</td>
+            </tr>
+            <tr>
+              <td><strong>TIME Lua 提交钩子</strong><br><code>backend/job_submit.lua</code></td>
+              <td>对非 root 的提交要求平台生成的 comment token，并限制普通用户修改资源字段。</td>
+              <td><span class="flag amber">仅防御纵深</span>；它不是月度账本，也不应是唯一信任边界。插件未加载、替代 RPC、内部/管理员路径必须另行覆盖。</td>
+            </tr>
+            <tr>
+              <td><strong>已知 pro6000d 快照</strong><br><code>source-input/server-source/etc/slurm/*</code></td>
+              <td>看到 <code>select/cons_tres</code>、<code>task/cgroup</code>、GRES GPU、SlurmDBD 与 QoS；QoS 有 debug/normal/long，没有 important。</td>
+              <td>说明现有资源分配/设备隔离可复用；不能证明这就是 u20，也不能把 <code>long</code> 静默当成 <code>important</code>。</td>
+            </tr>
+            <tr>
+              <td><strong>u20 现场</strong></td>
+              <td>本次沙箱没有可验证的 u20 实际 Slurm 源码、二进制构建参数、cgroup/GRES/auth 配置；历史文档与快照仅作设计输入。</td>
+              <td><span class="flag red">不能宣称</span> 已匹配 u20、可编译、可加载或可恢复。</td>
+            </tr>
+            <tr>
+              <td><strong>干净官方源码</strong><br>19.05.5 tag</td>
+              <td>审阅了 commit <code>78e9cfab783aeed0da68ea25532a3f35114d4072</code> 的控制器、backfill、cons_tres、GRES 与请求处理路径。</td>
+              <td>可以定位最小改动面；还不能替代实际编译、插件加载和并发/故障验证。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="source-note" style="margin-top:12px">保留的历史 contract 与 attempt25 交付明确写着“design / disabled / not production”，本次未改动、未复制其中的独立释放证据代码，也未读取无关日志或凭据。</p>
+    </section>
+
+    <section id="options">
+      <div class="section-kicker">04 · 方案比较</div>
+      <h2>四个位置都能“看到”作业，但只有一个接近权威准入</h2>
+      <p class="lead">“最小”不是文件最少，而是最少引入一套互相矛盾的权威。下表把修改位置、信任边界和不能满足之处放在一起。</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th style="width:18%">方案</th><th style="width:22%">主要修改位置</th><th style="width:20%">信任边界</th><th style="width:20%">可以解决</th><th style="width:20%">明确不能/尚不能解决</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>1 · TIME 外部轮询 / Lua / API</strong><br><span class="flag red">不作为 authority</span></td>
+              <td>平台 Python、sacct、job_submit/modify Lua、UI/API。</td>
+              <td>平台数据库、轮询时点、插件是否加载；Slurm 控制器仍是另一套状态机。</td>
+              <td>展示余额、生成平台 job token、事后对账、在提交层减少误用。</td>
+              <td>不能原子地阻止已有 PENDING 作业启动；轮询有延迟；直接 Slurm、backfill、管理员/内部路径可能绕开；无法承诺并发下不超发。</td>
+            </tr>
+            <tr>
+              <td><strong>2 · 原生 SlurmDBD / QoS / accounting limits</strong><br><span class="flag amber">只可部分复用</span></td>
+              <td>association/QOS、<code>GrpTRESMins</code>、<code>MaxTRESMins</code>、<code>DenyOnLimit</code>/<code>Safe</code> 等配置与现有 accounting policy。</td>
+              <td>SlurmDBD/assoc_mgr 的 usage 与限制计算。</td>
+              <td>已有的关联、作业数、TRES、运行限制；减少自定义代码。</td>
+              <td>不能直接表达本契约的水位转移、运行中欠额、追加先抵债、Asia/Shanghai 月切分和精确即时闸门；u20 若为 <code>accounting_storage/none</code> 更没有可靠历史来源。<code>Safe</code> 类“预估是否能完成”也不是“额度耗尽后运行中继续”的同义词。</td>
+            </tr>
+            <tr class="recommended">
+              <td><strong>3 · slurmctld 公共调度入口 + 持久账本</strong><br><span class="flag green">推荐</span></td>
+              <td><code>node_scheduler.c:select_nodes</code>；<code>acct_policy.c/h</code>；<code>job_mgr.c</code> 的开始/释放/requeue/resize；<code>job_scheduler.c</code>、backfill；<code>proc_req.c</code>；<code>controller.c/state_save.c</code>；<code>Makefile.am</code>。</td>
+              <td>Slurm 认证后的 <code>job_ptr-&gt;user_id</code>、控制器锁、实际分配 TRES、同步 WAL/恢复状态；root/admin 是否豁免必须显式定策。</td>
+              <td>一个公共 gate 可覆盖普通直接 Slurm、主调度、backfill 和 immediate；保留 cons_tres/GRES/cgroup；能实现运行中欠额而不杀作业。</td>
+              <td>19.05.5 没有现成的跨账本/GRES 原子事务；必须补两阶段意图与结果、全部生命周期和恢复。未完成源码审计与验证前，严格 no-overquota-start 仍是 <strong>未证明</strong>。</td>
+            </tr>
+            <tr>
+              <td><strong>4 · 改 select / GRES / cgroup</strong><br><span class="flag red">不作为主闸门</span></td>
+              <td><code>select/cons_tres/select_cons_tres.c</code>、<code>common/gres.c</code>、task/cgroup、gres.conf。</td>
+              <td>节点资源位图、GRES 消耗和设备可见性；不天然拥有用户/月/追加额度/管理员目标身份。</td>
+              <td>准确维护资源占用；现有 cgroup/GRES 可做设备隔离。</td>
+              <td>不能独立处理月度账本、direct RPC、requeue/resize、恢复与幂等 grant；不同 SelectType 不共用；资源插件调用失败时不等于有可回滚的配额事务；也不提供物理 GPU reset 证明。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="grid-2" style="margin-top:17px">
+        <div class="card option-card">
+          <div class="option-title"><div class="option-no">A</div><h3>为什么不把 SPANK 当门</h3></div>
+          <p>SPANK/prolog/epilog 位于执行或节点侧，适合启动后最后一道保护或清理记录，太晚才知道 Slurm 已分配了资源。它不能满足“尚未运行的作业不分配 GPU”，也不能代替控制器内的并发线性化。</p>
+        </div>
+        <div class="card option-card">
+          <div class="option-title"><div class="option-no">B</div><h3>为什么保留现有 GRES/cgroup</h3></div>
+          <p>Slurm 已有的 GRES 计数与 cgroup 设备约束是资源/隔离边界，不是额度 authority。除非实际源码审计发现无法取得 allocated GPU TRES，否则不应为了月度门控重写它们。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="callgraph">
+      <div class="section-kicker">05 · 19.05.5 调用链</div>
+      <h2>最有价值的插点在资源提交前，但它不是现成的原子点</h2>
+      <p class="lead">源码审阅给出了一个很小的公共覆盖面：直接资源申请最终走 <code>job_allocate → _select_nodes_parts → select_nodes</code>；主调度和 backfill 也直接调用 <code>select_nodes</code>。因此 gate 应在控制器公共路径，而不是只在平台 API 或节点侧。</p>
+      <div class="svg-wrap">
+        <svg viewBox="0 0 1150 395" role="img" aria-labelledby="flow-title flow-desc">
+          <title id="flow-title">Slurm 19.05.5 月度额度闸门建议位置</title>
+          <desc id="flow-desc">多个入口汇聚到 select_nodes；test_only 只读，真实路径在 GRES 和资源提交前进行月度额度事务。</desc>
+          <defs>
+            <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L9,3 z" fill="#6d8794"></path>
+            </marker>
+            <marker id="red-arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L9,3 z" fill="#b6534e"></path>
+            </marker>
+          </defs>
+          <rect x="18" y="28" width="185" height="54" rx="10" fill="#e9f3f6" stroke="#9dcbd4"/>
+          <text x="110" y="51" text-anchor="middle" class="svg-label">直接 RPC / salloc</text>
+          <text x="110" y="69" text-anchor="middle" class="svg-small">REQUEST_RESOURCE_ALLOCATION</text>
+          <rect x="18" y="112" width="185" height="54" rx="10" fill="#e9f3f6" stroke="#9dcbd4"/>
+          <text x="110" y="135" text-anchor="middle" class="svg-label">主调度</text>
+          <text x="110" y="153" text-anchor="middle" class="svg-small">job_scheduler.c</text>
+          <rect x="18" y="196" width="185" height="54" rx="10" fill="#e9f3f6" stroke="#9dcbd4"/>
+          <text x="110" y="219" text-anchor="middle" class="svg-label">backfill / reservation</text>
+          <text x="110" y="237" text-anchor="middle" class="svg-small">_start_job / test probes</text>
+          <rect x="18" y="280" width="185" height="54" rx="10" fill="#e9f3f6" stroke="#9dcbd4"/>
+          <text x="110" y="303" text-anchor="middle" class="svg-label">内部/管理员路径</text>
+          <text x="110" y="321" text-anchor="middle" class="svg-small">pack / federation / update</text>
+          <path d="M203 55 C235 55 238 127 267 145" fill="none" stroke="#6d8794" stroke-width="2" marker-end="url(#arrow)"/>
+          <path d="M203 139 L267 145" fill="none" stroke="#6d8794" stroke-width="2" marker-end="url(#arrow)"/>
+          <path d="M203 223 C235 223 238 163 267 153" fill="none" stroke="#6d8794" stroke-width="2" marker-end="url(#arrow)"/>
+          <path d="M203 307 C235 307 238 180 267 160" fill="none" stroke="#6d8794" stroke-width="2" marker-end="url(#arrow)"/>
+          <rect x="267" y="112" width="190" height="69" rx="10" fill="#dff3f6" stroke="#5cabb5" stroke-width="2"/>
+          <text x="362" y="138" text-anchor="middle" class="svg-label">job_allocate /</text>
+          <text x="362" y="157" text-anchor="middle" class="svg-label">_select_nodes_parts</text>
+          <text x="362" y="174" text-anchor="middle" class="svg-small">job/node write locks</text>
+          <path d="M457 146 L520 146" fill="none" stroke="#6d8794" stroke-width="2" marker-end="url(#arrow)"/>
+          <rect x="520" y="112" width="190" height="69" rx="10" fill="#dff3f6" stroke="#5cabb5" stroke-width="2"/>
+          <text x="615" y="138" text-anchor="middle" class="svg-label">select_nodes()</text>
+          <text x="615" y="157" text-anchor="middle" class="svg-small">select + candidate TRES</text>
+          <text x="615" y="174" text-anchor="middle" class="svg-small">test_only / real</text>
+          <path d="M710 130 L780 75" fill="none" stroke="#6d8794" stroke-width="2" marker-end="url(#arrow)"/>
+          <path d="M710 164 L780 220" fill="none" stroke="#b6534e" stroke-width="2" marker-end="url(#red-arrow)"/>
+          <rect x="780" y="30" width="185" height="70" rx="10" fill="#eef2f5" stroke="#a9b9c3"/>
+          <text x="872" y="56" text-anchor="middle" class="svg-label">test_only / will-run</text>
+          <text x="872" y="75" text-anchor="middle" class="svg-small">只读；不扣、不持久化</text>
+          <rect x="760" y="184" width="225" height="88" rx="10" fill="#fff0ef" stroke="#b6534e" stroke-width="2"/>
+          <text x="872" y="211" text-anchor="middle" class="svg-label" fill="#8d2f2f">月度 admission txn</text>
+          <text x="872" y="231" text-anchor="middle" class="svg-small">durable intent + final check</text>
+          <text x="872" y="249" text-anchor="middle" class="svg-small">必须先于 GRES/资源副作用</text>
+          <path d="M985 228 L1043 228" fill="none" stroke="#b6534e" stroke-width="2" marker-end="url(#red-arrow)"/>
+          <rect x="1043" y="184" width="94" height="88" rx="10" fill="#f1ecfb" stroke="#bda8dd"/>
+          <text x="1090" y="211" text-anchor="middle" class="svg-label">bb_g_</text>
+          <text x="1090" y="229" text-anchor="middle" class="svg-label">job_begin</text>
+          <text x="1090" y="248" text-anchor="middle" class="svg-small">select/GRES</text>
+          <text x="1090" y="263" text-anchor="middle" class="svg-small">allocate</text>
+          <path d="M872 272 L872 329" fill="none" stroke="#6d8794" stroke-width="2" marker-end="url(#arrow)"/>
+          <rect x="760" y="329" width="225" height="48" rx="10" fill="#e7f5ee" stroke="#8bc8aa"/>
+          <text x="872" y="359" text-anchor="middle" class="svg-label">RUNNING + open interval</text>
+        </svg>
+      </div>
+      <div class="grid-2" style="margin-top:17px">
+        <div class="card">
+          <h3>源码支持的事实</h3>
+          <ul>
+            <li><code>node_scheduler.c:select_nodes</code> 先做 pre-select，再由 <code>_get_req_features</code> 得到候选资源；随后按候选节点数构造 TRES 计数。</li>
+            <li>该函数在约 post-select 位置调用现有 <code>acct_policy_job_runnable_post_select</code>；之后才执行 <code>_preempt_jobs</code>，再进入 <code>bb_g_job_begin</code>、<code>select_g_job_begin</code>、<code>JOB_RUNNING</code>、<code>allocate_nodes</code>。</li>
+            <li><code>test_only</code> 在实际资源提交前返回；因此任何月度账本写入都必须排除 test-only。</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>源码尚未支持的证明</h3>
+          <ul>
+            <li>候选选择结果、账本 durable commit、GRES 变更和节点 allocation 不是一个现成的 ACID 事务。</li>
+            <li><code>select/cons_tres</code> 内调用 <code>gres_plugin_job_alloc</code> 会改变资源状态；该调用的错误并不自动变成跨账本回滚。</li>
+            <li>所以“在 post-select 做一次检查”是好插点，但单独它不是 no-overquota-start 的证明。</li>
+          </ul>
+        </div>
+      </div>
+      <p class="source-note" style="margin-top:12px">对应源码：<a href="https://github.com/SchedMD/slurm/blob/slurm-19-05-5-1/src/slurmctld/node_scheduler.c">node_scheduler.c</a>、<a href="https://github.com/SchedMD/slurm/blob/slurm-19-05-5-1/src/slurmctld/job_mgr.c">job_mgr.c</a>、<a href="https://github.com/SchedMD/slurm/blob/slurm-19-05-5-1/src/slurmctld/job_scheduler.c">job_scheduler.c</a>、<a href="https://github.com/SchedMD/slurm/blob/slurm-19-05-5-1/src/plugins/sched/backfill/backfill.c">backfill.c</a>、<a href="https://github.com/SchedMD/slurm/blob/slurm-19-05-5-1/src/plugins/select/cons_tres/select_cons_tres.c">select_cons_tres.c</a>。</p>
+    </section>
+
+    <section id="scenarios">
+      <div class="section-kicker">06 · 边界场景</div>
+      <h2>不把“正常路径通过”误写成“所有路径已覆盖”</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th style="width:17%">场景</th><th style="width:27%">19.05.5 的风险点</th><th style="width:36%">推荐处理</th><th style="width:20%">当前结论</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><strong>并发主调度 / RPC</strong></td>
+              <td>主调度持有 job/node 写锁；直接资源 RPC 也进入写锁；但若账本另有未协调的锁，两个请求可同时看到余额。</td>
+              <td>把 admission 与最终候选 TRES 检查放入同一控制器锁序；账本锁顺序固定；不允许跨锁释放后复用 permit；提交前再检查一次。</td>
+              <td><span class="risk-med">可设计</span><br>现状未证明</td>
+            </tr>
+            <tr>
+              <td><strong>抢占</strong></td>
+              <td><code>select_nodes</code> 在 post-select 后可能调用 <code>_preempt_jobs</code>；若 quota check 太晚，额度不足的作业已经触发副作用。</td>
+              <td>在 preemption 前完成只读资格和可持久化 hold；quota 拒绝不得触发抢占。初版不因额度耗尽抢占正在运行的作业；保留既有抢占策略需单独审计。</td>
+              <td><span class="risk-high">高风险</span><br>必须验证</td>
+            </tr>
+            <tr>
+              <td><strong>backfill / WILL_RUN</strong></td>
+              <td>backfill 有 speculative test、reservation 预测，并会暂时释放/重新取得锁；预测与真实启动之间余额可变。</td>
+              <td>所有 test-only/WILL_RUN 只读；只在 <code>_start_job → select_nodes(false)</code> 建立一次真实事务；yield 后不带旧 permit，最终重新检查。</td>
+              <td><span class="risk-high">高风险</span><br>必须验证</td>
+            </tr>
+            <tr>
+              <td><strong>普通用户直接调用 Slurm</strong></td>
+              <td>Lua token 只在提交层；direct <code>salloc</code>、资源 RPC、pack/internal 路径不应依赖平台 API。</td>
+              <td>以 Slurm 认证后的 <code>job_ptr-&gt;user_id</code> 为计费身份，以实际 allocated GPU TRES 为数量；公共 gate 覆盖所有真实启动路径，不信任 comment。</td>
+              <td><span class="risk-low">方向可行</span><br>需全路径审计</td>
+            </tr>
+            <tr>
+              <td><strong>管理员直提 / 代用户</strong></td>
+              <td>superuser 可在 RPC 中 override <code>user_id</code>；<code>REQUEST_UPDATE_JOB</code> 可改变作业字段；root 本身是 Slurm 信任根。</td>
+              <td>明确 admin 是否豁免。若代用户，按最终目标 <code>job_ptr-&gt;user_id</code> 计费；GPU 增量 resize 先过同一 gate。不能承诺阻止可信 root 停服务或篡改控制器。</td>
+              <td><span class="risk-med">策略待定</span><br>非普通用户旁路</td>
+            </tr>
+            <tr>
+              <td><strong>崩溃 / 重启 / 主备</strong></td>
+              <td>Slurm state save 是异步周期保存；账本写入与 GRES/节点副作用可能落在不同时间点；主备若看不到同一 journal 会分叉。</td>
+              <td>启动先处于 RECOVERING，WAL 重放和活动 job 对账完成后才开放新 allocation；意图结果不明时保留运行作业、阻止新作业；共享/复制 durable journal，否则不开放。</td>
+              <td><span class="risk-high">高风险</span><br>必须故障验证</td>
+            </tr>
+            <tr>
+              <td><strong>结算 / epilog</strong></td>
+              <td><code>job_epilog_complete</code> 会推进节点状态与 requeue，但没有可信的物理 GPU 清理证明；sacct 是历史面。</td>
+              <td>按 Slurm 逻辑资源 ownership 结束结算；COMPLETING/仍占节点继续计费。未知释放只保守保持 open/debt 并挡新 allocation，不假称硬件已 reset。</td>
+              <td><span class="risk-med">可设计</span><br>物理清理另题</td>
+            </tr>
+            <tr>
+              <td><strong>跨月运行</strong></td>
+              <td>作业不应因月界被杀或重启；单一 job generation 的区间跨越两个账期。</td>
+              <td>在 Asia/Shanghai 月界切分区间；旧月结算、新月开启；月份/时钟写入事件；追加额度绑定月份，先抵该月 debt。</td>
+              <td><span class="risk-med">可设计</span><br>需时钟验证</td>
+            </tr>
+            <tr>
+              <td><strong>requeue / resize / array / hetero / pack / suspend</strong></td>
+              <td><code>batch_requeue_fini</code> 会把下一次运行重置成新的 accounting record；resize 有 pre/post accounting；pack/array 有批量和部分成功语义。</td>
+              <td>每个 allocation generation 有唯一 id；释放/重分配分别结算。初版无法完整覆盖的形态必须保持 pending/拒绝，不能悄悄走无 gate 的路径。</td>
+              <td><span class="risk-high">高风险</span><br>未完成即不得宣称全覆盖</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="plan">
+      <div class="section-kicker">07 · 推荐实施</div>
+      <h2>分阶段做一个小的控制器补丁，而不是第二套调度器</h2>
+      <p class="lead">推荐方案的“最小”版本保留 Slurm 的节点选择与设备隔离，仅新增一个版本绑定的 controller 模块和生命周期调用。任何阶段都默认关闭；阶段完成不等于可以上线。</p>
+      <div class="milestones" aria-label="实施阶段">
+        <div class="mile"><div class="circle">0</div><strong>现场基线</strong><span>只读</span></div>
+        <div class="mile"><div class="circle">1</div><strong>账本</strong><span>离线核心</span></div>
+        <div class="mile"><div class="circle">2</div><strong>准入</strong><span>公共入口</span></div>
+        <div class="mile"><div class="circle">3</div><strong>生命周期</strong><span>释放/resize</span></div>
+        <div class="mile"><div class="circle">4</div><strong>队列</strong><span>优先级/backfill</span></div>
+        <div class="mile"><div class="circle">5</div><strong>恢复</strong><span>grant/HA</span></div>
+        <div class="mile"><div class="circle">6</div><strong>启用</strong><span>另行批准</span></div>
+      </div>
+      <div class="grid-2">
+        <div class="card phase">
+          <div class="phase-meta">阶段 0 · 现场基线与契约</div>
+          <h3>先确认 u20 真正运行的是什么</h3>
+          <p>只读取得精确 Slurm 版本/构建、<code>SelectType</code>、<code>SchedulerType</code>、AccountingStorage、GRES/cgroup 版本、state save 位置、插件加载顺序、主备形态和现有运行作业；定稿水位语义、admin 规则、typed GPU 规则。</p>
+          <p class="files">涉及：配置清单、<code>slurmctld -V</code> 输出、源码/ABI 对应关系。当前未做现场变更。</p>
+        </div>
+        <div class="card phase green-line">
+          <div class="phase-meta">阶段 1 · 可重放账本</div>
+          <h3>整数单位 + 幂等事件 + 同步 WAL</h3>
+          <p>新增 <code>src/slurmctld/monthly_quota.[ch]</code>，并在 <code>src/slurmctld/Makefile.am</code> 纳入构建。记录 cluster、uid、month、job id、allocation generation、GPU 数、墙钟锚点、intent/commit/release、grant 与序列号；用 GPU-seconds 或更细整数，不用浮点。</p>
+          <p class="files">账本必须在资源副作用前 durable；已有周期 state save 只能做快照，不能替代 admission WAL。默认开关为 false。</p>
+        </div>
+        <div class="card phase green-line">
+          <div class="phase-meta">阶段 2 · 公共最终准入</div>
+          <h3>在 post-select、preemption 前建立事务</h3>
+          <p>在 <code>node_scheduler.c:select_nodes</code> 中保留 pre-select 的纯读检查；候选 bitmap 和计划 GPU TRES 已知后，执行 <code>prepare</code>（持久 intent/hold），失败返回 accounting-policy pending。必须先在该版本源码中证明计划值与最终 <code>tres_alloc_cnt</code> 一致；否则要增加窄的 pre-commit select 回调。确认没有副作用后，才允许进入 <code>bb_g_job_begin</code>、<code>select_g_job_begin</code>、<code>allocate_nodes</code>；成功后将 intent 转 active。</p>
+          <p class="files">不得把 permit 带过 backfill 的 lock yield；每次真实启动都最终 recheck。若 select/GRES 部分失败无法回滚，进入 AMBIGUOUS，宁可挡新 allocation。</p>
+        </div>
+        <div class="card phase amber-line">
+          <div class="phase-meta">阶段 3 · 生命周期完整性</div>
+          <h3>让计费区间跟着 ownership，而不是跟着 UI 状态</h3>
+          <p>在 <code>job_mgr.c</code> 的所有 <code>deallocate_nodes</code> 调用、<code>job_epilog_complete</code>、<code>batch_requeue_fini</code>、失败节点处理、suspend/resume 和 <code>select_g_job_resized</code> 周围关闭/开启 generation；在 resize 增量提交前再次准入。</p>
+          <p class="files">结算使用实际 <code>tres_alloc_cnt</code>；COMPLETING 仍占用就继续计费。没有可靠结束点时不能提前释放额度。</p>
+        </div>
+        <div class="card phase amber-line">
+          <div class="phase-meta">阶段 4 · 调度顺序</div>
+          <h3>单独解决优先级，不把水位塞进 priority 位</h3>
+          <p>在 <code>job_scheduler.c</code> 与 backfill 中刷新可运行性和 pending reason；月界/追加后使旧 queue 失效。不要把 tier 直接 OR 进 <code>job_ptr-&gt;priority</code>，也不要假定现有 <code>PriorityWeightQOS</code> 能表达水位转移。初版不因额度触发抢占。</p>
+          <p class="files">若需要“debug/important/normal”作为排队优先级，先定义可信字段和与既有 fairshare/nice/reservation 的排序关系。</p>
+        </div>
+        <div class="card phase red-line">
+          <div class="phase-meta">阶段 5 · 恢复、追加与管理</div>
+          <h3>先关门恢复，再开放新 allocation</h3>
+          <p>在 <code>controller.c</code> 完成 job/assoc state load 后、调度/RPC 线程开放前 replay WAL 并核对活动 job；在 <code>state_save.c</code> 触发快照但不把异步保存当提交。追加额度采用管理员认证、月份绑定、幂等键和审计事件；平台 API 只投影/请求，不成为准入 authority。</p>
+          <p class="files">如果主备没有同一 durable journal，启动后保持 RECOVERING；已有作业继续，新的作业保持 pending。</p>
+        </div>
+        <div class="card phase red-line" style="grid-column: 1 / -1">
+          <div class="phase-meta">阶段 6 · 另行批准的启用</div>
+          <h3>只在实际验证通过后切换默认开关</h3>
+          <p>编译、静态检查、配置语法/插件加载、隔离 staging 并发与故障验证、恢复演练、观测和回滚方案全部完成后，才由变更流程决定是否启用。当前交付不包含修改配置、重启、部署或上线。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="proof">
+      <div class="section-kicker">08 · 证明边界</div>
+      <h2>“GPU 分配前禁止越额开始”目前只能写成待证明性质</h2>
+      <div class="callout red">
+        <span class="label">判定</span>
+        <p><strong>当前：NOT PROVEN。</strong> 仅有 Python/sacct/Lua、仅有 stock QoS、或在 <code>select_nodes</code> 前做一次余额检查，都不能推出该性质。并发调度、backfill 重新取锁、GRES/节点资源提交、进程崩溃和恢复都会留下竞态窗口。</p>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <h3>要取得可辩护的证明，至少需要</h3>
+          <ol>
+            <li>所有真正开始 GPU allocation 的入口都经过同一版本的 gate；test-only 不写账。</li>
+            <li>在任何会改变全局资源状态的调用前，按固定锁序持久化 intent，并把 intent 计入并发余额。</li>
+            <li>准入使用最终实际 TRES，或使用已被源码证明与最终 <code>tres_alloc_cnt</code> 必然相等的 pre-commit 计算；不能只用用户请求或 walltime 估计。</li>
+            <li>资源提交成功/失败/结果不明有明确的 commit、abort、ambiguous 三态；不能把异常当成功或当释放。</li>
+            <li>重启能从 durable journal 与 Slurm active job state 重建同一事实；不能只依赖 sacct 的最终记录。</li>
+            <li>数组、pack、heterogeneous、resize、requeue、suspend、预留和管理员 override 的行为已覆盖，或明确 fail closed。</li>
+          </ol>
+        </div>
+        <div class="card">
+          <h3>目前不能写成“已解决”的句子</h3>
+          <ul>
+            <li>“现有 TIME gate 已防止普通用户绕过”——它仍是提交层防御。</li>
+            <li>“现有 cgroup/GRES 已证明 GPU 被物理清理/重置”——它们证明的是逻辑资源与设备可见性边界。</li>
+            <li>“账本写入后就不会超发”——若资源提交失败/崩溃时没有两阶段结果，仍可能漂移。</li>
+            <li>“主调度通过就覆盖 backfill”——backfill 有自己的 test/start、锁 yield 和 pack/array 分支。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="cleanup">
+      <div class="section-kicker">09 · 物理清理问题</div>
+      <h2>本额度需求不依赖“物理 GPU 清理/重置证明”</h2>
+      <div class="callout green">
+        <span class="label">直接回答</span>
+        <p>按目前给出的业务契约，必须证明的是<strong>谁在什么时候拥有多少 GPU，以及新 allocation 是否在额度边界前被准入</strong>；没有要求证明驱动器、显存、进程 FD 或硬件上下文已被清零。因此不应把“物理 reset 证明”偷偷升级为本项目的必要安全条件。</p>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <h3>现有机制能支持什么</h3>
+          <ul>
+            <li>GRES/cons_tres 记录逻辑 GPU 资源；<code>gres.conf</code> 与 task/cgroup 可限制作业看到的设备。</li>
+            <li>控制器可以在逻辑 allocation 结束时关闭 GPU·小时区间；如果释放状态未知，可以保守阻止后续新 allocation。</li>
+            <li>这些足以支持本额度 gate 的资源计量边界，但不等于硬件清洗或内存保密证明。</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>什么时候才需要另立安全项目</h3>
+          <ul>
+            <li>如果威胁模型要求防止恶意用户读取前一作业残留显存/上下文。</li>
+            <li>如果平台必须证明 cgroup、设备节点、PID/FD、驱动上下文在释放后全部清理。</li>
+            <li>那是节点侧隔离、驱动能力和证据采集项目；本报告不声称历史原型已解决，也不把它作为月度配额启用前的无依据门槛。</li>
+          </ul>
+        </div>
+      </div>
+      <p class="source-note" style="margin-top:12px">官方说明可参见 <a href="https://slurm.schedmd.com/gres.html">GRES</a>、<a href="https://slurm.schedmd.com/gres.conf.html">gres.conf</a> 与 <a href="https://slurm.schedmd.com/cgroups.html">cgroup</a> 文档；它们描述资源/设备控制，不提供本项目所需的月度账本或物理 reset attestation。</p>
+    </section>
+
+    <section id="recovery">
+      <div class="section-kicker">10 · 高风险故障关闭</div>
+      <h2>故障时只关闭“新分配”，不影响正在运行的作业</h2>
+      <p class="lead">这是最符合用户优先级的恢复原则：不为了修复账本而主动杀作业；当事实不完整时牺牲新作业的可用性，直到可重放和对账完成。</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>状态/触发</th><th>允许的动作</th><th>禁止的动作</th><th>恢复条件</th></tr></thead>
+          <tbody>
+            <tr><td><strong>OFF</strong><br>默认关闭</td><td>Slurm 按原行为运行；账本模块只可读取或不加载。</td><td>不能暗中改变已有调度语义。</td><td>显式变更、完整验证、另行批准。</td></tr>
+            <tr><td><strong>RECOVERING</strong><br>启动/主备切换</td><td>保留并观察已运行作业；新 GPU allocation 返回 pending。</td><td>不能依据不完整快照扣款或取消运行作业。</td><td>WAL 序列连续、活动 generation 与 job state/GRES 对账完成。</td></tr>
+            <tr><td><strong>AMBIGUOUS</strong><br>intent 有、结果不明</td><td>把相关 job/用户/月标成未知并保守计入；阻止新的 allocation。</td><td>不能假设“没启动”而释放 hold，也不能直接重放资源提交。</td><td>从控制器状态、节点状态和人工审计得到唯一结果；以幂等事件收敛。</td></tr>
+            <tr><td><strong>DEGRADED</strong><br>fsync/存储/时钟/锁错误</td><td>现有作业继续；新作业保持 pending，并给出可诊断 reason。</td><td>不能回退到 sacct 轮询或平台 API 放行。</td><td>存储可写、时钟锚点有效、journal 校验通过后重新 reconcile。</td></tr>
+            <tr><td><strong>UNKNOWN RELEASE</strong><br>epilog/节点失败</td><td>继续计费至可靠的逻辑 ownership 结束；必要时形成 debt。</td><td>不能把 epilog 返回或节点 idle 直接宣称为物理 reset 证明。</td><td>拿到可验证的 Slurm 资源释放事实；否则由管理员按审计事件解决。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout blue">
+        <strong>锁与 I/O 的取舍：</strong>为保证“不超发”而同步 durable 写入会增加 slurmctld 调度延迟；把 I/O 异步化又会破坏线性化。推荐先用单控制器、短事件、固定大小/可校验 WAL 做明确的同步边界，测量后再优化；不要把网络 HTTP、sacct 或平台数据库调用塞进控制器锁内。
+      </div>
+    </section>
+
+    <section id="validation">
+      <div class="section-kicker">11 · 启用前必须验证</div>
+      <h2>用户当前禁止测试，所以本交付不能给上线绿灯</h2>
+      <p class="lead">用户允许只读检查与语法检查，但明确禁止运行测试/模拟、修改服务、重启、部署。这个限制本身不会阻止架构评估，却阻止对并发和故障性质作生产级承诺。</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>启用前检查</th><th>必须证明什么</th><th>本次状态</th></tr></thead>
+          <tbody>
+            <tr><td>u20 现场基线与配置/插件语法</td><td>源码 tag、二进制 ABI、select/scheduler、cgroup/GRES、accounting、主备和 state path 与补丁完全匹配。</td><td><span class="flag amber">未执行现场检查</span></td></tr>
+            <tr><td>编译、静态审阅、差分审阅</td><td>默认关闭可编译；锁序无死锁；test-only 无写入；所有 error path 都能 abort/ambiguous；没有偷偷改服务配置。</td><td><span class="flag amber">未运行</span>（当前没有可安全改的 u20 源码）</td></tr>
+            <tr><td>隔离 staging 并发</td><td>主调度 + backfill + direct RPC 在余额边界同时启动时不双发；preemption 不在 quota denial 前发生；跨月精确。</td><td><span class="flag red">用户禁止</span></td></tr>
+            <tr><td>故障/恢复演练</td><td>intent 前后、select/GRES 返回错误、进程崩溃、节点失联、主备切换、时钟回拨、journal 损坏都保持 fail closed 且不杀运行作业。</td><td><span class="flag red">用户禁止</span></td></tr>
+            <tr><td>形态覆盖</td><td>array、heterogeneous、pack、resize、suspend、requeue、reservation、admin submit/update 不存在无 gate 路径。</td><td><span class="flag amber">未验证</span></td></tr>
+            <tr><td>上线后对账与回滚</td><td>grant 幂等、debt 抵扣、月界切分、监控告警、只关闭新 allocation 的回滚开关均可用。</td><td><span class="flag amber">未设计成可运行配置</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout red">
+        <strong>对上线的实际影响：</strong>在这些验证未授权并完成前，不能声称“普通用户无法越额开始”、不能启用 strict gate，也不能把历史静态检查或 disabled prototype 当作当前构建证明。安全的当前状态是继续保持 <code>enforcement_ready=false</code> / 默认关闭；运行中的作业不受本次评估影响。
+      </div>
+    </section>
+
+    <section id="not-doing">
+      <div class="section-kicker">12 · 明确不做</div>
+      <h2>避免把范围重新膨胀成另一套安全系统</h2>
+      <div class="grid-3">
+        <div class="card"><h3>不做服务动作</h3><p class="small">不改 slurm.conf/cgroup/GRES/TIME 配置，不重启，不部署，不启动测试或模拟，不提交/推送/自动 commit。</p></div>
+        <div class="card"><h3>不做旁路 authority</h3><p class="small">不建立平台 ALLOW socket，不让 sacct、Python 快照或 comment token 成为最终准入，不把 SPANK 当资源分配前的闸门。</p></div>
+        <div class="card"><h3>不做无依据安全扩展</h3><p class="small">不把物理 GPU reset、显存清洗、PIDFD 证明等历史原型要求宣称为本额度契约的一部分，也不宣称它们已解决。</p></div>
+      </div>
+      <div class="panel" style="margin-top:18px">
+        <h3>源码与规范参考</h3>
+        <ul class="two-col-list">
+          <li><a href="https://github.com/SchedMD/slurm/tree/slurm-19-05-5-1">Slurm 19.05.5 source tag</a></li>
+          <li><a href="https://slurm.schedmd.com/select_design.html">Select plugin design</a></li>
+          <li><a href="https://slurm.schedmd.com/resource_limits.html">Resource limits / TRES</a></li>
+          <li><a href="https://slurm.schedmd.com/priority_multifactor.html">Multifactor priority</a></li>
+          <li><a href="https://slurm.schedmd.com/sacctmgr.html#OPT_NoDecay">NoDecay / usage controls</a></li>
+          <li><a href="https://slurm.schedmd.com/slurmctld.html">slurmctld state/recovery context</a></li>
+          <li><a href="https://github.com/SchedMD/slurm/blob/slurm-19-05-5-1/src/slurmctld/proc_req.c">proc_req.c</a></li>
+          <li><a href="https://github.com/SchedMD/slurm/blob/slurm-19-05-5-1/src/slurmctld/acct_policy.c">acct_policy.c</a></li>
+        </ul>
+      </div>
+    </section>
+
+    <div class="footer">
+      <p><strong>交付记录：</strong>本页为离线、自包含 HTML 评估报告，保存于当前授权工作区的 <code>monthly-quota-slurm19-reassessment.html</code>。审阅对象包括干净的 Slurm 19.05.5 源码 tag、现有 TIME staged 源文件和历史 disabled contract/attempt25 说明；未读取秘密、日志或符号链接，未修改历史交付。</p>
+      <p><strong>一句话结论：</strong>推荐 controller-side gate + durable ledger，保留 select/GRES/cgroup；但在实际源码补丁、全路径审计、故障恢复验证完成前，严格“GPU 分配前禁止越额开始”仍然是 <span class="flag red">NOT PROVEN</span>。</p>
+    </div>
+  </main>
+</body>
+</html>
