@@ -1,0 +1,9 @@
+# RELEASE_EVIDENCE_ENABLED=0
+# No Slurm integration and no trustworthy production cleanup proof.
+# External high-water, cryptographic chain, scheduler atomicity, and GPU witness are unimplemented.
+d134a6f6dcce66c01fd414fa668fd88aaaf3e54c5ed41860b6576051351ac964  ./DESIGN.md
+ea24e234208fe8a6e0cfe8ee9d3f4ac405814f90ecd206f47533260daed95cfa  ./LOCAL_CAPABILITIES.md
+6bb0eed7b7e4cf3dbd14ab4aac82b384500b7d2c5a997d47b1933b995f2ced7e  ./Makefile
+b7b4fbc93ee9dd2065c88ac9888aa2618b9832d45bc379f64246ba731bc922b5  ./REPORT.md
+c5fa6ba6a79767d0c400f58d4001b660ca2edde86cc2e739ebd31b6e25e6ff23  ./include/release_evidence.h
+e66fce0701086156747e9e5ca63b0215fe8b8779b0dd884cb43f6ca5c3ab093a  ./src/release_evidence.c
