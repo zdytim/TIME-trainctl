@@ -1,0 +1,3 @@
+# Freeze deliverables for review
+
+The previous completed task said artifacts are in workspace but outputs auto-export only has result.md. Copy only your own finalized DESIGN.md, LOCAL_CAPABILITIES.md, Makefile, include/release_evidence.h and src/release_evidence.c into the dispatcher-approved sibling outputs directory, under `release-evidence-prototype/`. Do not include symlinks, binaries, credentials, runtime data, upstream source or unrelated files. Include manifest with SHA-256 and a clear statement RELEASE_EVIDENCE_ENABLED=0, no Slurm integration/no trustworthy proof production. No tests/deploy/services. Preserve previous evidence; output report and no unsupported claims.
