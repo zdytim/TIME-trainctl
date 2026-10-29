@@ -1,0 +1,8 @@
+# RELEASE_EVIDENCE_ENABLED=0
+# No Slurm integration and no trustworthy production cleanup proof.
+737543e2658b36578d9a80e5c87433cfc352e64a21bdfc9a8a4cba564bfc5a6e  ./DESIGN.md
+ea24e234208fe8a6e0cfe8ee9d3f4ac405814f90ecd206f47533260daed95cfa  ./LOCAL_CAPABILITIES.md
+6bb0eed7b7e4cf3dbd14ab4aac82b384500b7d2c5a997d47b1933b995f2ced7e  ./Makefile
+1f34c002a0cb505cc073be5cd8221ba66165e75285eb827c693eea621ab34e88  ./REPORT.md
+d2cae2704687456bf3591322f04d28b63fd1fa7b463728563cdc59169254506b  ./include/release_evidence.h
+a4e32bf0be627bc48bd136320c68d3171db5c022aaa7a2edb6d7cbf1922bb40d  ./src/release_evidence.c
