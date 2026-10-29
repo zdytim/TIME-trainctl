@@ -1,0 +1,7 @@
+# SHA-256 manifest for release-evidence-prototype-reviewed
+# RELEASE_EVIDENCE_ENABLED=0; disabled and not integrated; no trustworthy production proof.
+a534973961f326f39a0a7786debefe9d3fe125ef90a717580f8234084e15122a  DESIGN.md
+daa37e71285070f5ba760731b3b1fea4ce8ed1f9bfadf2bb28baadfa2ae6dbdc  LOCAL_CAPABILITIES.md
+6bb0eed7b7e4cf3dbd14ab4aac82b384500b7d2c5a997d47b1933b995f2ced7e  Makefile
+d71edce99a1e0442008b5d5dd7281fddbb7a921190b2234f164d0b75543891b3  include/release_evidence.h
+2ef1cce905335234a88a1a761a89b8cff609068194fd431d8f7cc790f49b4b60  src/release_evidence.c
