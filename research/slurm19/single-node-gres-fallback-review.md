@@ -1,0 +1,7 @@
+# Staged fallback for u20 without GPU accounting TRES
+
+u20's live Slurm 19 uses `accounting_storage/none` and does not report a GPU TRES. The previous candidate rejected all GPU jobs in that configuration. Source inspection shows the cons_tres selector records `gres_cnt_node_select` and `total_gres` for the chosen nodes, and Slurm's own `gres_set_job_tres_cnt` uses that total when a TRES exists. The backend's normal submission uses untyped `--gres gpu:N`.
+
+When no GPU TRES exists, this staged fallback supports only one untyped GPU record with a per-node request on exactly one selected node. Before admission it requires the selected-node count to agree with the per-node request and `total_gres`; after allocation and on recovery it requires the recorded single-node allocation to agree with both. Missing fields, other request forms, multi-node shapes and mismatches fail closed. The existing TRES path is unchanged. This candidate does not enable typed, shared, multi-node or heterogeneous jobs, and is not a general replacement for Slurm accounting.
+
+The source inspection cannot establish that every Slurm 19 test-only/backfill path populates the selection arrays or that every lifecycle path preserves the expected count. An absent or inconsistent value would queue jobs rather than establish correctness. Actual allocation, cgroup isolation, counting, crash recovery, direct-submission bypass and the strict exhausted-queue invariant still need isolated and later controlled validation. The candidate remains disabled and uninstalled; no tests or jobs were run.

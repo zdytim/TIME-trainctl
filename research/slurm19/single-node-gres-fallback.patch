@@ -1,0 +1,75 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -1,9 +1,9 @@
+ /*****************************************************************************\
+  *  monthly_quota.c - controller-side monthly GPU quota admission ledger
+  *
+- *  The ledger is intentionally conservative.  It accounts only the exact
+- *  untyped gres/gpu TRES, stores GPU-seconds plus nanoseconds, and refuses
+- *  every shape for which the 19.05.5 controller cannot provide a stable
++ *  The ledger is intentionally conservative. It accounts exact untyped
++ *  GPU counts, stores GPU-seconds plus nanoseconds, and refuses every shape
++ *  for which the 19.05.5 controller cannot provide a stable
+  *  allocation identity or a proven rollback boundary.
+ \*****************************************************************************/
+ 
+@@ -28,6 +28,7 @@
+ 
+ #include "src/common/assoc_mgr.h"
+ #include "src/common/gres.h"
++#include "src/common/job_resources.h"
+ #include "src/common/macros.h"
+ #include "src/common/xassert.h"
+ #include "src/common/xmalloc.h"
+@@ -649,8 +650,49 @@
+ 		return -1;
+ 	}
+ 	if (pos < 0) {
+-		*why = "untyped gres/gpu TRES is unavailable";
+-		return -1;
++		/* Slurm 19 without an accounting provider can omit gpu TRES.
++		 * Support only the exact single-node per-node GPU shape here.
++		 * Before allocation, require the selector's count at the chosen
++		 * node to agree with both the request and its aggregate. After
++		 * allocation/recovery, require the recorded allocation to agree.
++		 * Any unsupported or unclear shape remains pending. */
++		uint64_t count;
++		int index;
++		bitstr_t *nodes = job_ptr->job_resrcs ?
++			job_ptr->job_resrcs->node_bitmap : NULL;
++
++		if (!gpu_state->gres_per_node || gpu_state->gres_per_job ||
++		    gpu_state->gres_per_socket || gpu_state->gres_per_task) {
++			*why = "GPU request shape needs accounting TRES";
++			return -1;
++		}
++		if (allocated) {
++			if (gpu_state->node_cnt != 1 || !gpu_state->gres_cnt_node_alloc) {
++				*why = "single-node GPU allocation is not provable";
++				return -1;
++			}
++			count = gpu_state->gres_cnt_node_alloc[0];
++		} else {
++			if (!nodes || bit_set_count(nodes) != 1 ||
++			    !gpu_state->gres_cnt_node_select ||
++			    gpu_state->total_node_cnt != (uint32_t)bit_size(nodes)) {
++				*why = "single-node GPU selection is not provable";
++				return -1;
++			}
++			index = bit_ffs(nodes);
++			if (index < 0 || (uint32_t)index >= gpu_state->total_node_cnt) {
++				*why = "selected GPU node is unavailable";
++				return -1;
++			}
++			count = gpu_state->gres_cnt_node_select[index];
++		}
++		if (!count || count != gpu_state->gres_per_node ||
++		    count != gpu_state->total_gres) {
++			*why = "GPU selection or allocation count mismatch";
++			return -1;
++		}
++		*gpu_count = count;
++		return 1;
+ 	}
+ 	if (allocated)
+ 		*gpu_count = gpu_state->total_gres;
