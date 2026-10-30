@@ -46,6 +46,7 @@ int main(int argc, char **argv)
     close(fd);
     if (argc == 4 && !strcmp(argv[1], "grant")) return strcmp(buf, "OK\n") != 0;
     if (argc == 4 && !strcmp(argv[1], "grant-conflict")) return strcmp(buf, "ERROR unavailable_or_invalid\n") != 0;
+    if (argc == 2 && !strcmp(argv[1], "root-unavailable")) return strcmp(buf, "ERROR unavailable_or_invalid\n") != 0;
     if (strncmp(buf, "OK ", 3)) return 1;
     cursor = buf + 3;
     for (int i = 0; i < 17; i++) {

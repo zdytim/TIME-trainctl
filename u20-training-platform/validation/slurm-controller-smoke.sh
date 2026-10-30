@@ -56,7 +56,14 @@ else
     printf 'U20MQ1|HEADER|1\n' > "$base/state/monthly-quota.wal"
     printf 'U20MQ1|CHECKPOINT|0\n' > "$base/state/monthly-quota.checkpoint"
 fi
-if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4; then
+if test "${TIME_EXHAUSTED_TEST:-0}" = 7; then
+    case "${TIME_CORRUPT_KIND:-missing}" in
+        missing) rm "$base/state/monthly-quota.checkpoint" ;;
+        truncated) printf 'U20MQ1|1|PREPARE' >> "$base/state/monthly-quota.wal" ;;
+        *) exit 2 ;;
+    esac
+fi
+if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7; then
     if test "$gpu_count" = 4; then
         touch "$base/fakegpu0" "$base/fakegpu1" "$base/fakegpu2" "$base/fakegpu3"
         printf 'NodeName=time-test Name=gpu File=%s/fakegpu[0-3]\n' "$base" > "$base/gres.conf"
@@ -65,7 +72,8 @@ if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 
         printf 'NodeName=time-test Name=gpu File=%s/fakegpu\n' "$base" > "$base/gres.conf"
     fi
 fi
-chmod 600 "$base/state/monthly-quota.wal" "$base/state/monthly-quota.checkpoint"
+chmod 600 "$base/state/monthly-quota.wal"
+if test -f "$base/state/monthly-quota.checkpoint"; then chmod 600 "$base/state/monthly-quota.checkpoint"; fi
 munged --force --foreground --key-file="$base/munge.key" --socket=/run/munge/munge.socket.2 \
     --pid-file="$base/munge.pid" --log-file="$base/log/munge.log" --seed-file="$base/seed" &
 munge_pid=$!
@@ -113,6 +121,8 @@ for _ in $(seq 1 50); do
                 /validation/quota-socket-query root
             elif test "$TIME_EXHAUSTED_TEST" = 4; then
                 TIME_EXPECT_TIER=2 /validation/quota-socket-query root-tier
+            elif test "$TIME_EXHAUSTED_TEST" = 7; then
+                /validation/quota-socket-query root-unavailable
             else
                 /validation/quota-socket-query root-eligible
             fi
@@ -130,7 +140,12 @@ for _ in $(seq 1 50); do
             sleep 3
             scontrol show job "$job" > "$base/log/job.out"
             cat "$base/log/job.out"
-            if test "$TIME_EXHAUSTED_TEST" = 1; then
+            if test "$TIME_EXHAUSTED_TEST" = 7; then
+                grep -q 'JobState=PENDING' "$base/log/job.out"
+                grep -Eq 'NodeList=\(null\)' "$base/log/job.out"
+                grep -q 'MonthlyGpuQuota:ledger_recovering_or_unavailable' "$base/log/job.out"
+                echo 'PASS: damaged ledger leaves GPU job unallocated'
+            elif test "$TIME_EXHAUSTED_TEST" = 1; then
                 grep -q 'JobState=PENDING' "$base/log/job.out"
                 grep -Eq 'NodeList=\(null\)' "$base/log/job.out"
                 grep -q 'MonthlyGpuQuota:monthly_capacity_exhausted' "$base/log/job.out"
