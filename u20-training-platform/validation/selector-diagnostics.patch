@@ -1,7 +1,7 @@
 diff --git a/src/slurmctld/monthly_quota.c b/src/slurmctld/monthly_quota.c
 --- a/src/slurmctld/monthly_quota.c
 +++ b/src/slurmctld/monthly_quota.c
-@@ -725,6 +725,12 @@ static int _job_gpu_count(struct job_record *job_ptr, uint64_t *tres_cnt,
+@@ -725,6 +725,11 @@ static int _job_gpu_count(struct job_record *job_ptr, uint64_t *tres_cnt,
  			if (!nodes || bit_set_count(nodes) != 1 ||
  			    !gpu_state->gres_cnt_node_select || !gpu_state->gres_bit_select ||
  			    gpu_state->total_node_cnt != (uint32_t)bit_size(nodes)) {
