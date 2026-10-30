@@ -4,11 +4,11 @@
   "capability_server_state": "unknown_without_capabilities_endpoint",
   "cli": "timectl",
   "dependencies": [],
-  "file_count": 15,
+  "file_count": 16,
   "files": [
     {
       "path": "README.md",
-      "sha256": "315025e5cef15713246ddb9dde7fcc022a9dd8b0ddbb0270b67c93b3d7b2bd9a",
+      "sha256": "c25ebbfd0fa3491284912d0a8d61a44302c15251fd43fc132a3fd34f92cadac8",
       "mode": "0o600"
     },
     {
@@ -38,7 +38,7 @@
     },
     {
       "path": "docs/SECURITY.md",
-      "sha256": "d4c88c962c0779ceb62f819ecb9c840c38c33665b7926b4831d7e3a01fdc0624",
+      "sha256": "b175f105475fb5c0826b7fcc55ddd5f76f786173a075026bb61e39dffe35d561",
       "mode": "0o600"
     },
     {
@@ -48,7 +48,7 @@
     },
     {
       "path": "installer.py",
-      "sha256": "aabafd4ec8cd70c7e11948fd889972f843705cfaf776edca4218a88e392c7e7b",
+      "sha256": "6ae535f63102841420037f1c15ed5abb98bd5546492c9cc18458cdde94a35b2d",
       "mode": "0o755"
     },
     {
@@ -72,6 +72,11 @@
       "mode": "0o755"
     },
     {
+      "path": "time_mcp_confirm.py",
+      "sha256": "2d6f95534ba28913a76f5e8078f241c6ce09e1df284eda569d9b71d920967613",
+      "mode": "0o644"
+    },
+    {
       "path": "timectl.py",
       "sha256": "6ecc5869bc0d81f5419e5b94ad8758ab5c7ab6c89b7168086082cd8d9415f7af",
       "mode": "0o755"
@@ -83,7 +88,7 @@
     }
   ],
   "mcp": "time-mcp",
-  "mcp_mutations": "read_only_by_default_host_consent_adapter_staged",
+  "mcp_mutations": "read_only_by_default_terminal_confirmation_host_staged",
   "monthly_enforcement_claim": false,
   "python_compatibility": "Python 3.8+",
   "review_status": "gpu_quota_tools_staged_static_only",

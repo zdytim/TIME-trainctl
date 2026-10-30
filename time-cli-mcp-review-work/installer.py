@@ -17,7 +17,7 @@ import uuid
 
 
 VERSION = "0.1.0"
-PAYLOAD = ("time_core.py", "time_consent.py", "timectl.py", "time_mcp.py", "installer.py")
+PAYLOAD = ("time_core.py", "time_consent.py", "timectl.py", "time_mcp.py", "time_mcp_confirm.py", "installer.py")
 
 
 def assert_no_symlink_components(path):
@@ -113,7 +113,7 @@ def install(args):
     share_dir = prefix / "share" / "time-cli-mcp"
     manifest_path = share_dir / "manifest.json"
     version_dir = prefix / ("lib/time-cli-mcp-%s" % VERSION)
-    targets = [bin_dir / "timectl", bin_dir / "time-mcp",
+    targets = [bin_dir / "timectl", bin_dir / "time-mcp", bin_dir / "time-mcp-confirm",
                bin_dir / "time-cli-mcp-uninstall", bin_dir / "time-cli-mcp-rollback",
                version_dir, manifest_path]
     for target in targets:
@@ -142,13 +142,15 @@ def install(args):
         created_wrappers.append(bin_dir / "timectl")
         write_file(bin_dir / "time-mcp", wrapper(version_dir / "time_mcp.py"))
         created_wrappers.append(bin_dir / "time-mcp")
+        write_file(bin_dir / "time-mcp-confirm", wrapper(version_dir / "time_mcp_confirm.py"))
+        created_wrappers.append(bin_dir / "time-mcp-confirm")
         write_file(bin_dir / "time-cli-mcp-uninstall",
                    wrapper(version_dir / "installer.py", "uninstall", manifest_path))
         created_wrappers.append(bin_dir / "time-cli-mcp-uninstall")
         write_file(bin_dir / "time-cli-mcp-rollback",
                    wrapper(version_dir / "installer.py", "rollback", manifest_path))
         created_wrappers.append(bin_dir / "time-cli-mcp-rollback")
-        files = [bin_dir / "timectl", bin_dir / "time-mcp",
+        files = [bin_dir / "timectl", bin_dir / "time-mcp", bin_dir / "time-mcp-confirm",
                  bin_dir / "time-cli-mcp-uninstall", bin_dir / "time-cli-mcp-rollback"]
         files.extend(version_dir / name for name in PAYLOAD)
         manifest = {
@@ -209,6 +211,7 @@ def load_manifest(path):
     expected = {
         prefix / "bin" / "timectl",
         prefix / "bin" / "time-mcp",
+        prefix / "bin" / "time-mcp-confirm",
         prefix / "bin" / "time-cli-mcp-uninstall",
         prefix / "bin" / "time-cli-mcp-rollback",
     }
