@@ -53,6 +53,7 @@ for _ in $(seq 1 50); do
        grep -Eq '^Slurmctld\(primary\) at .* is UP' "$base/log/ping.out" &&
        kill -0 "$controller_pid" 2>/dev/null; then
         cat "$base/log/ping.out"
+        /validation/quota-socket-query
         echo 'PASS: isolated controller responds with a fresh ledger'
         kill "$controller_pid" 2>/dev/null || true
         wait "$controller_pid" 2>/dev/null || true
