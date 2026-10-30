@@ -17,6 +17,7 @@ PATCHES = (
     "u20-broker-month-retry-fix.patch",
     "u20-broker-grant-month-notice-fix.patch",
     "u20-broker-console-monthly-view.patch",
+    "u20-broker-probe-privileges.patch",
 )
 
 

@@ -1,0 +1,23 @@
+--- a/pro6000d-training-api.py
++++ b/pro6000d-training-api.py
+@@ -473,0 +474,17 @@
++    def gpu_probe_argv(self, executable: str) -> List[str]:
++        """Never invoke NVIDIA tooling with root's device-changing privileges."""
++        argv = [executable, "-q", "-x"]
++        if os.geteuid() != 0:
++            return argv
++        name = self.config.get("gpu_probe_user")
++        if not isinstance(name, str) or not name:
++            raise ValueError("未配置非特权 GPU 监控账户")
++        try:
++            user = pwd.getpwnam(name)
++        except KeyError:
++            raise ValueError("GPU 监控账户不存在")
++        if user.pw_uid <= 0:
++            raise ValueError("GPU 监控账户不能是 root")
++        return ["/usr/bin/setpriv", "--reuid", str(user.pw_uid), "--regid", str(user.pw_gid),
++                "--clear-groups"] + argv
++
+@@ -479 +496 @@
+-        process = subprocess.Popen([executable, "-q", "-x"], stdin=subprocess.DEVNULL,
++        process = subprocess.Popen(self.gpu_probe_argv(executable), stdin=subprocess.DEVNULL,
