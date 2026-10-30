@@ -75,7 +75,11 @@ def main():
     parser.add_argument("--archive", required=True, type=pathlib.Path)
     parser.add_argument("--output", required=True, type=pathlib.Path)
     parser.add_argument("--build", action="store_true", help="configure and compile src in the isolated directory")
+    parser.add_argument("--layout", choices=("isolated", "u20-release-candidate"), default="isolated",
+                        help="u20 layout embeds prospective system paths; never installs or starts it")
     args = parser.parse_args()
+    if args.layout != "isolated" and not args.build:
+        raise ValueError("a non-isolated layout requires --build")
     repo = pathlib.Path(__file__).resolve().parents[2]
     archive = args.archive.resolve(strict=True)
     output = args.output.absolute()
@@ -92,9 +96,20 @@ def main():
         subprocess.run(["patch", "--batch", "--forward", "-p1", "-i", str(patch)],
                        cwd=str(source), check=True)
     if args.build:
-        configure = ["./configure", "--prefix=" + str(output / "stage"),
-                     "--sysconfdir=" + str(output / "etc"),
-                     "--localstatedir=" + str(output / "var")]
+        if args.layout == "u20-release-candidate":
+            # These are embedded path strings only. Do not create or install
+            # into them, and do not run this candidate against a live system.
+            prefix = "/opt/time/slurm19-" + revision[:12]
+            sysconfdir, localstatedir = "/etc/slurm-llnl", "/var"
+            print("WARNING: candidate embeds live u20 config path; do not execute it", flush=True)
+        else:
+            prefix = str(output / "stage")
+            sysconfdir, localstatedir = str(output / "etc"), str(output / "var")
+        print("build layout:", args.layout, "prefix:", prefix,
+              "sysconfdir:", sysconfdir, "localstatedir:", localstatedir, flush=True)
+        configure = ["./configure", "--prefix=" + prefix,
+                     "--sysconfdir=" + sysconfdir,
+                     "--localstatedir=" + localstatedir]
         with (output / "configure.log").open("xb") as log:
             subprocess.run(configure, cwd=str(source), stdout=log, stderr=subprocess.STDOUT, check=True)
         with (output / "build.log").open("xb") as log:

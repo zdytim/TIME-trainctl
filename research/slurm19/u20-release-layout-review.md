@@ -1,0 +1,5 @@
+# Staged u20 release-layout build mode
+
+The normal candidate builder deliberately embeds isolated directories. The new explicit `--layout u20-release-candidate --build` mode instead configures a versioned `/opt/time/slurm19-<project-commit-prefix>` runtime prefix, `/etc/slurm-llnl` as the configuration directory and `/var` as local state. The build output remains under the caller's new user-owned output directory; the script does not install, create or alter the embedded system paths and does not execute the resulting controller.
+
+This mode is preparation only. Because the candidate embeds a live configuration path, never run it against production as a validation shortcut. A release still needs a root-owned bundle, explicit library and plugin resolution, package compatibility, a protected maintenance procedure and exact rollback. No release layout is proof of these properties, nor of quota behavior or readiness. The default isolated layout remains unchanged for any authorized container validation.
