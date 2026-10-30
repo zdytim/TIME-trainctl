@@ -5,6 +5,9 @@ test "${TIME_ISOLATED_VALIDATION:-}" = 1
 test -f /.dockerenv
 base=/tmp/time-isolated
 prefix=${TIME_VALIDATION_PREFIX:-/opt/time/slurm19-2f57b3225733}
+gpu_count=${TIME_FAKE_GPU_COUNT:-1}
+case "$gpu_count" in 1|4) ;; *) echo 'Only 1 or 4 synthetic GPUs supported' >&2; exit 2;; esac
+export TIME_EXPECT_GPUS="$gpu_count"
 mkdir -p "$base/state" "$base/spool" "$base/log" /run/munge
 chmod 700 "$base" "$base/state" "$base/spool" /run/munge
 dd if=/dev/urandom of="$base/munge.key" bs=1024 count=1 status=none
@@ -35,7 +38,7 @@ ProctrackType=proctrack/linuxproc
 TaskPlugin=task/none
 AccountingStorageType=accounting_storage/none
 GresTypes=gpu
-NodeName=time-test CPUs=2 RealMemory=256 State=UNKNOWN Gres=gpu:1
+NodeName=time-test CPUs=2 RealMemory=256 State=UNKNOWN Gres=gpu:$gpu_count
 PartitionName=normal Nodes=time-test Default=YES State=UP
 EOF
 if test "${TIME_EXHAUSTED_TEST:-0}" = 1; then
@@ -49,8 +52,13 @@ else
     printf 'U20MQ1|CHECKPOINT|0\n' > "$base/state/monthly-quota.checkpoint"
 fi
 if test "${TIME_EXHAUSTED_TEST:-0}" != 0; then
-    touch "$base/fakegpu"
-    printf 'NodeName=time-test Name=gpu File=%s/fakegpu\n' "$base" > "$base/gres.conf"
+    if test "$gpu_count" = 4; then
+        touch "$base/fakegpu0" "$base/fakegpu1" "$base/fakegpu2" "$base/fakegpu3"
+        printf 'NodeName=time-test Name=gpu File=%s/fakegpu[0-3]\n' "$base" > "$base/gres.conf"
+    else
+        touch "$base/fakegpu"
+        printf 'NodeName=time-test Name=gpu File=%s/fakegpu\n' "$base" > "$base/gres.conf"
+    fi
 fi
 chmod 600 "$base/state/monthly-quota.wal" "$base/state/monthly-quota.checkpoint"
 munged --force --foreground --key-file="$base/munge.key" --socket=/run/munge/munge.socket.2 \
@@ -82,7 +90,7 @@ for _ in $(seq 1 50); do
             if ! grep -q 'State=IDLE' "$base/log/node.out"; then
                 cat "$base/log/slurmd.out" "$base/log/node.out"; exit 1
             fi
-            job=$(sbatch --parsable --time=00:01:00 --gres=gpu:1 --chdir="$base" --output="$base/slurm-%j.out" --wrap='sleep 30')
+            job=$(sbatch --parsable --time=00:01:00 --gres="gpu:$gpu_count" --chdir="$base" --output="$base/slurm-%j.out" --wrap='sleep 30')
             sleep 3
             scontrol show job "$job" > "$base/log/job.out"
             cat "$base/log/job.out"
@@ -99,7 +107,14 @@ for _ in $(seq 1 50); do
                     exit 1
                 fi
                 sleep 2
-                /validation/quota-socket-query root-active
+                first=$(/validation/quota-socket-query root-active)
+                sleep 2
+                second=$(/validation/quota-socket-query root-active)
+                printf '%s\n%s\n' "$first" "$second"
+                printf '%s\n%s\n' "$first" "$second" | awk -v g="$gpu_count" '
+                    NR == 1 { u=$4; un=$5; t=$16; tn=$17; next }
+                    NR == 2 { du=($4-u)*1000000000+($5-un); dt=($16-t)*1000000000+($17-tn);
+                              if (dt <= 0 || du != g*dt) exit 1; print "PASS: GPU-time multiplier " g }'
                 echo 'PASS: eligible synthetic user starts a GPU job'
             fi
             kill "$node_pid" 2>/dev/null || true
