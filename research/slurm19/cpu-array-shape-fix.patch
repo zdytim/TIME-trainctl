@@ -1,0 +1,26 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -605,11 +605,6 @@
+ 	*why = NULL;
+ 	if (job_ptr->pack_job_id || job_ptr->pack_job_list) {
+ 		*why = "pack/heterogeneous job";
+-		return -1;
+-	}
+-	if (job_ptr->array_job_id || job_ptr->array_recs ||
+-	    (job_ptr->array_task_id != NO_VAL)) {
+-		*why = "job arrays are not supported";
+ 		return -1;
+ 	}
+ 	if (job_ptr->fed_details || (job_ptr->clusters && job_ptr->clusters[0])) {
+@@ -637,6 +632,11 @@
+ 		}
+ 		return 0;
+ 	}
++	if (job_ptr->array_job_id || job_ptr->array_recs ||
++	    (job_ptr->array_task_id != NO_VAL)) {
++		*why = "job arrays are not supported";
++		return -1;
++	}
+ 	if (gpu_state->type_name) {
+ 		*why = "typed GPU or MIG allocation";
+ 		return -1;
