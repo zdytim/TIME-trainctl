@@ -1,0 +1,111 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -1114,6 +1114,76 @@
+ 			  monthly_quota_tier_t *tier)
+ {
+ 	return monthly_quota_tiers_at(&uid, 1, sec, nsec, tier);
++}
++
++/* Subtraction uses integer GPU-seconds and the existing nanosecond borrow. */
++static int _amount_subtract(const mq_amount_t *a, const mq_amount_t *b,
++			    mq_amount_t *out)
++{
++	mq_time_t from = { .sec = b->sec, .nsec = b->nsec };
++	mq_time_t to = { .sec = a->sec, .nsec = a->nsec };
++	return _duration(&from, &to, out);
++}
++
++int monthly_quota_snapshot(uid_t uid, monthly_quota_snapshot_t *out)
++{
++	monthly_quota_snapshot_t result;
++	mq_time_t now;
++	mq_amount_t used, grant = {0}, capacity = {0}, remainder = {0};
++	mq_month_record_t *record;
++	mq_active_record_t *active;
++	int rc = -1;
++
++	if (!out || (uid_t)(uint32_t)uid != uid)
++		return -1;
++	memset(&result, 0, sizeof(result));
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || !mq_reconciled || _now(&now) ||
++	    _month_key(&now, &result.month) ||
++	    _project_usage((uint32_t)uid, result.month, &now, &used) ||
++	    _tier_locked(uid, &now, &result.tier))
++		goto out;
++	record = _find_month((uint32_t)uid, result.month, false);
++	if (record)
++		grant = record->grants;
++	capacity.sec = MQ_CAPACITY_GPU_SECONDS;
++	if (_amount_add_amount(&capacity, &grant))
++		goto out;
++	if (_amount_cmp(&capacity, &used) >= 0) {
++		if (_amount_subtract(&capacity, &used, &remainder))
++			goto out;
++		result.remaining.sec = remainder.sec;
++		result.remaining.nsec = remainder.nsec;
++	} else {
++		if (_amount_subtract(&used, &capacity, &remainder))
++			goto out;
++		result.overage.sec = remainder.sec;
++		result.overage.nsec = remainder.nsec;
++	}
++	for (active = mq_active; active; active = active->next) {
++		if (active->uid != (uint32_t)uid)
++			continue;
++		if (!active->committed || result.active_allocation_count == UINT32_MAX ||
++		    UINT64_MAX - result.active_gpu_count < active->gpu_count)
++			goto out;
++		result.active_allocation_count++;
++		result.active_gpu_count += active->gpu_count;
++	}
++	result.uid = uid;
++	result.observed_sec = now.sec;
++	result.observed_nsec = now.nsec;
++	result.wal_sequence = mq_seq;
++	result.used.sec = used.sec;
++	result.used.nsec = used.nsec;
++	result.granted.sec = grant.sec;
++	result.granted.nsec = grant.nsec;
++	result.capacity.sec = capacity.sec;
++	result.capacity.nsec = capacity.nsec;
++	*out = result;
++	rc = 0;
++out:
++	pthread_mutex_unlock(&mq_lock);
++	return rc;
+ }
+ 
+ static int _check_shape_and_quota(struct job_record *job_ptr,
+--- a/src/slurmctld/monthly_quota.h
++++ b/src/slurmctld/monthly_quota.h
+@@ -25,6 +25,29 @@
+ 	MONTHLY_QUOTA_EXHAUSTED = 3
+ } monthly_quota_tier_t;
+ 
++/* A projected view, not an allocation authorization. `wal_sequence` is a
++ * durable event position, not a cache key for continuously changing usage. */
++typedef struct {
++	uint64_t sec;
++	uint32_t nsec;
++} monthly_quota_amount_t;
++
++typedef struct {
++	uid_t uid;
++	uint32_t month; /* Asia/Shanghai YYYYMM */
++	uint64_t observed_sec;
++	uint32_t observed_nsec;
++	uint64_t wal_sequence;
++	monthly_quota_tier_t tier;
++	monthly_quota_amount_t used, granted, capacity, remaining, overage;
++	uint64_t active_gpu_count;
++	uint32_t active_allocation_count;
++} monthly_quota_snapshot_t;
++
++/* Call only inside slurmctld. Future transport must authenticate the caller.
++ * Returns -1 and leaves output unchanged when disabled/unhealthy/unknown. */
++extern int monthly_quota_snapshot(uid_t uid, monthly_quota_snapshot_t *out);
++
+ /* Atomic read-only snapshot at a supplied realtime value. Failure leaves
+  * output unchanged; success does not reserve resources. */
+ extern int monthly_quota_tiers_at(const uid_t *uids, size_t count,
