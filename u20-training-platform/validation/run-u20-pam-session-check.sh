@@ -30,6 +30,10 @@ for name in "$positive" "$negative"; do
 done
 printf 'session required pam_exec.so type=open_session quiet %s\n' "$guard" >> "/etc/pam.d/$positive"
 printf '%s\n' 'session required pam_exec.so type=open_session quiet /bin/false' >> "/etc/pam.d/$negative"
+# Give the close-session stack a module that returns PAM_SUCCESS even when the
+# open-session-only guard is skipped; it cannot override a required failure.
+printf '%s\n' 'session required pam_permit.so' >> "/etc/pam.d/$positive"
+printf '%s\n' 'session required pam_permit.so' >> "/etc/pam.d/$negative"
 # Dedicated transient units have bounded lifetimes and are collected afterwards.
 systemd-run --quiet --wait --collect --pipe --unit="$positive" --property=RuntimeMaxSec=15 \
     /usr/bin/python3 "$probe" "$positive" timzhang allow
