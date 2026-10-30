@@ -1,0 +1,15 @@
+--- a/src/slurmctld/node_scheduler.c
++++ b/src/slurmctld/node_scheduler.c
+@@ -3020,6 +3020,12 @@
+ 		int quota_rc = monthly_quota_begin(job_ptr, tres_req_cnt);
+ 		if (quota_rc < 0) {
+ 			error_code = ESLURM_ACCOUNTING_POLICY;
++			/* No allocation has been committed. Do not leave tentative
++			 * timestamps on an unstarted, still-pending job. */
++			job_ptr->start_time = 0;
++			job_ptr->time_last_active = 0;
++			job_ptr->end_time = 0;
++			last_job_update = now;
+ 			goto cleanup;
+ 		} else if (quota_rc > 0) {
+ 			quota_held = true;
