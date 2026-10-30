@@ -116,7 +116,7 @@ def main():
             subprocess.run(["nice", "-n", "19", "make", "-j2", "-C", "src"], cwd=str(source),
                            stdout=log, stderr=subprocess.STDOUT, check=True)
         binary = source / "src/slurmctld/.libs/slurmctld"
-        print("isolated controller SHA-256:", digest(binary), flush=True)
+        print("candidate controller SHA-256:", digest(binary), flush=True)
     print("Candidate only; no system installation or quota activation was performed.")
 
 
