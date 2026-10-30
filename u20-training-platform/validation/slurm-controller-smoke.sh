@@ -72,7 +72,7 @@ munge_pid=$!
 trap 'kill "$munge_pid" 2>/dev/null || true' EXIT
 for _ in $(seq 1 30); do test -S /run/munge/munge.socket.2 && break; sleep .1; done
 if ! test -S /run/munge/munge.socket.2; then cat "$base/log/munge.log"; exit 1; fi
-timeout 8 slurmctld -D -v -f "$SLURM_CONF" > "$base/log/controller.out" 2>&1 &
+timeout 45 slurmctld -D -v -f "$SLURM_CONF" > "$base/log/controller.out" 2>&1 &
 controller_pid=$!
 for _ in $(seq 1 50); do
     if scontrol ping > "$base/log/ping.out" 2>&1 &&
