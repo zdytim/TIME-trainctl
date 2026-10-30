@@ -1,0 +1,5 @@
+--- a/pro6000d-training-api.py
++++ b/pro6000d-training-api.py
+@@ -46 +46 @@
+-SAFE_ENV = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
++SAFE_ENV = re.compile(r"^[A-Za-z0-9/][A-Za-z0-9_.:/-]{0,127}$")

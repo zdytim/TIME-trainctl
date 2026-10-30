@@ -2,6 +2,9 @@
 +++ b/pro6000d-training-api.py
 @@ -13 +12,0 @@
 -from monthly_quota import MonthlyLedger, month_now
+@@ -46 +45 @@
+-SAFE_ENV = re.compile(r"^[A-Za-z0-9/][A-Za-z0-9_.:/-]{0,127}$")
++SAFE_ENV = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
 @@ -224,2 +222,0 @@
 -        self.monthly = MonthlyLedger(self)
 -

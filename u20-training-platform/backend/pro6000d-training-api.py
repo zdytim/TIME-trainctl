@@ -43,7 +43,7 @@ DEFAULT_CONFIG = "/etc/pro6000d-training/config.json"
 DEFAULT_SOCKET = "/run/pro6000d-training/backend.sock"
 ACTIVE_STATES = ("WAITING_QUOTA", "SUBMITTING", "PENDING", "RUNNING", "COMPLETING", "SUSPENDED")
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
-SAFE_ENV = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
+SAFE_ENV = re.compile(r"^[A-Za-z0-9/][A-Za-z0-9_.:/-]{0,127}$")
 
 
 class ApiError(Exception):
