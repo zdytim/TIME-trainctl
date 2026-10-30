@@ -29,6 +29,7 @@ PATCHES = (
     "gres-device-bitmap-fix.patch", "backfill-exhausted-skip.patch", "wal-bounded-line-fix.patch",
     "public-gres-api-fix.patch", "calendar-year-fix.patch", "selector-count-only-fix.patch",
     "cpu-only-queue-failure-fix.patch",
+    "stale-control-socket-fix.patch",
 )
 
 # u20's live configuration requires these plugins.  A successful compiler

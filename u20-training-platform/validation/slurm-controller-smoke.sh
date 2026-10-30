@@ -65,6 +65,10 @@ if test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8;
     esac
     corrupt_wal_hash=$(sha256sum "$base/state/monthly-quota.wal" | cut -d' ' -f1)
 fi
+if test "${TIME_EXHAUSTED_TEST:-0}" = 11; then
+    printf 'preserve-me\n' > "$base/state/time-quota.sock"
+    chmod 600 "$base/state/time-quota.sock"
+fi
 if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8 || test "${TIME_EXHAUSTED_TEST:-0}" = 9 || test "${TIME_EXHAUSTED_TEST:-0}" = 10; then
     if test "$gpu_count" = 4; then
         touch "$base/fakegpu0" "$base/fakegpu1" "$base/fakegpu2" "$base/fakegpu3"
@@ -89,7 +93,12 @@ for _ in $(seq 1 50); do
        grep -Eq '^Slurmctld\(primary\) at .* is UP' "$base/log/ping.out" &&
        kill -0 "$controller_pid" 2>/dev/null; then
         cat "$base/log/ping.out"
-        if test "${TIME_EXHAUSTED_TEST:-0}" = 5 || test "${TIME_EXHAUSTED_TEST:-0}" = 6; then
+        if test "${TIME_EXHAUSTED_TEST:-0}" = 11; then
+            test -f "$base/state/time-quota.sock"
+            test "$(cat "$base/state/time-quota.sock")" = preserve-me
+            grep -q 'monthly quota control socket unavailable' "$base/log/controller.out"
+            echo 'PASS: unrelated regular file was preserved'
+        elif test "${TIME_EXHAUSTED_TEST:-0}" = 5 || test "${TIME_EXHAUSTED_TEST:-0}" = 6; then
             /validation/quota-socket-query grant 20 grant-one
             /validation/quota-socket-query grant 20 grant-one
             /validation/quota-socket-query grant-conflict 24 grant-one
@@ -194,10 +203,10 @@ for _ in $(seq 1 50); do
                         sleep .1
                     done
                     if test "$ready" != 1; then cat "$base/log/controller-crash-restart.out"; exit 1; fi
-                    grep -q 'monthly quota control socket unavailable' "$base/log/controller-crash-restart.out"
-                    echo 'OBSERVED: stale socket blocks quota API after abrupt controller termination'
+                    grep -q 'removed verified stale control socket' "$base/log/controller-crash-restart.out"
+                    /validation/quota-socket-query root-active
                     scontrol show job "$job" | grep -q 'JobState=RUNNING'
-                    echo 'PASS: isolated running job survives abrupt controller restart'
+                    echo 'PASS: isolated job, accounting, and quota socket recover after abrupt restart'
                 elif test "$TIME_EXHAUSTED_TEST" = 9; then
                     sleep 2
                     /validation/quota-socket-query root-active

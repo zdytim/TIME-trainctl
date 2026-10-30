@@ -1,0 +1,83 @@
+diff --git a/src/slurmctld/monthly_quota.c b/src/slurmctld/monthly_quota.c
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -1755,6 +1755,18 @@
+ 	return 0;
+ }
+ 
++/* A stale control socket is recoverable only while this controller owns
++ * a healthy reconciled ledger and its exclusive WAL/checkpoint locks. */
++bool monthly_quota_control_recovery_ready(void)
++{
++	bool ready;
++	pthread_mutex_lock(&mq_lock);
++	ready = mq_enabled && mq_healthy && mq_reconciled &&
++		(mq_fd >= 0) && (mq_checkpoint_fd >= 0);
++	pthread_mutex_unlock(&mq_lock);
++	return ready;
++}
++
+ bool monthly_quota_enabled(void)
+ {
+ 	bool enabled;
+diff --git a/src/slurmctld/monthly_quota.h b/src/slurmctld/monthly_quota.h
+--- a/src/slurmctld/monthly_quota.h
++++ b/src/slurmctld/monthly_quota.h
+@@ -91,6 +91,7 @@
+ extern int monthly_quota_control_start(void);
+ extern void monthly_quota_control_stop(void);
+ extern void monthly_quota_fini(void);
++extern bool monthly_quota_control_recovery_ready(void);
+ extern bool monthly_quota_enabled(void);
+ 
+ /*
+diff --git a/src/slurmctld/monthly_quota_control.c b/src/slurmctld/monthly_quota_control.c
+--- a/src/slurmctld/monthly_quota_control.c
++++ b/src/slurmctld/monthly_quota_control.c
+@@ -134,6 +134,31 @@
+ 	return NULL;
+ }
+ 
++/* Only remove an owned, private socket that refuses connections and has
++ * not changed identity. The state directory is owned by the service user;
++ * an adversary with that same UID remains outside this trust boundary. */
++static int recover_stale_socket(struct sockaddr_un *addr)
++{
++	struct stat before, after;
++	int probe, result, saved_errno;
++	if (lstat(socket_path, &before))
++		return errno == ENOENT ? 0 : -1;
++	if (!monthly_quota_control_recovery_ready() || !S_ISSOCK(before.st_mode) ||
++	    before.st_uid != geteuid() || (before.st_mode & 0077)) return -1;
++	probe = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
++	if (probe < 0) return -1;
++	result = connect(probe, (struct sockaddr *)addr, sizeof(*addr));
++	saved_errno = errno;
++	close(probe);
++	if (result == 0 || saved_errno != ECONNREFUSED) return -1;
++	if (lstat(socket_path, &after) || !S_ISSOCK(after.st_mode) ||
++	    after.st_uid != geteuid() || (after.st_mode & 0077) ||
++	    after.st_dev != before.st_dev || after.st_ino != before.st_ino) return -1;
++	if (unlink(socket_path)) return -1;
++	info("monthly quota: removed verified stale control socket");
++	return 0;
++}
++
+ int monthly_quota_control_start(void)
+ {
+ 	struct sockaddr_un addr = {0};
+@@ -146,11 +171,11 @@
+ 	rc = snprintf(socket_path, sizeof(socket_path), "%s/time-quota.sock",
+ 		      slurmctld_conf.state_save_location);
+ 	if (rc < 0 || (size_t)rc >= sizeof(socket_path)) return -1;
+-	/* Never unlink an existing path: recovery of a stale socket is manual. */
++	addr.sun_family = AF_UNIX;
++	memcpy(addr.sun_path, socket_path, strlen(socket_path) + 1);
++	if (recover_stale_socket(&addr)) return -1;
+ 	listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+ 	if (listener < 0) return -1;
+-	addr.sun_family = AF_UNIX;
+-	memcpy(addr.sun_path, socket_path, strlen(socket_path) + 1);
+ 	if (bind(listener, (struct sockaddr *)&addr, sizeof(addr))) goto fail;
+ 	if (lstat(socket_path, &sock) || !S_ISSOCK(sock.st_mode) ||
+ 	    sock.st_uid != geteuid()) goto fail_path;
