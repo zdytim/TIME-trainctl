@@ -1,0 +1,26 @@
+diff --git a/src/slurmctld/job_scheduler.c b/src/slurmctld/job_scheduler.c
+--- a/src/slurmctld/job_scheduler.c
++++ b/src/slurmctld/job_scheduler.c
+@@ -1977,6 +1977,22 @@
+ 		return -1;
+ 	if (!monthly_quota_enabled())
+ 		return 1;
++	/* An entirely GRES-free queue has no GPU tier ordering to refresh.
++	 * Any GRES at all keeps the conservative fail-closed path. */
++	if (!current->job_ptr->gres_list ||
++	    !list_count(current->job_ptr->gres_list)) {
++		bool cpu_only_queue = true;
++		iter = list_iterator_create(job_queue);
++		while ((rec = list_next(iter))) {
++			if (rec->job_ptr->gres_list && list_count(rec->job_ptr->gres_list)) {
++				cpu_only_queue = false;
++				break;
++			}
++		}
++		list_iterator_destroy(iter);
++		if (cpu_only_queue)
++			return 1;
++	}
+ 	count = (size_t)list_count(job_queue) + 1;
+ 	if (gettimeofday(&now, NULL) || now.tv_sec < 0)
+ 		return -1;

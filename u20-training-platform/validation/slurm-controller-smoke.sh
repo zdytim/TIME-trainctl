@@ -151,7 +151,7 @@ for _ in $(seq 1 50); do
             cat "$base/log/job.out"
             if test "$TIME_EXHAUSTED_TEST" = 8; then
                 grep -q 'JobState=RUNNING' "$base/log/job.out"
-                echo 'PASS: CPU-only job runs alone with a damaged ledger'
+                echo "PASS: CPU-only job runs alone with ledger fixture ${TIME_CORRUPT_KIND:-missing}"
             elif test "$TIME_EXHAUSTED_TEST" = 7; then
                 grep -q 'JobState=PENDING' "$base/log/job.out"
                 grep -Eq 'NodeList=\(null\)' "$base/log/job.out"
