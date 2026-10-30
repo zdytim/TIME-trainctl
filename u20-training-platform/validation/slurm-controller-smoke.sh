@@ -171,6 +171,25 @@ controller=(slurmctld)
 if test "${TIME_WITNESS:-0}" = 1; then
     controller=(/opt/py310/bin/python3 /validation/time-quota-anchor-exec.py "$prefix/sbin/slurmctld")
 fi
+if test "${TIME_WITNESS_DAEMON:-0}" = 1; then
+    test "${TIME_WITNESS:-0}" = 1 && test "$service_user" = slurm
+    "${controller[@]}" -f "$SLURM_CONF" > "$base/log/controller-launch.out" 2>&1
+    for _ in $(seq 1 100); do
+        if scontrol ping > "$base/log/ping.out" 2>&1 &&
+           grep -Eq '^Slurmctld\(primary\) at .* is UP' "$base/log/ping.out" &&
+           test -S "$base/state/time-quota.sock" && test -s "$base/state/slurmctld.pid"; then
+            daemon_pid=$(cat "$base/state/slurmctld.pid")
+            test "$(ps -o uid= -p "$daemon_pid" | tr -d ' ')" = "$(id -u slurm)"
+            /validation/quota-socket-query root-eligible
+            scontrol shutdown
+            echo 'PASS: daemonized slurmctld retained witness through privilege drop'
+            exit 0
+        fi
+        sleep .1
+    done
+    cat "$base/log/controller-launch.out" "$base/log/ping.out" "$base/state/slurmctld.log" 2>/dev/null || true
+    exit 1
+fi
 timeout 45 "${controller[@]}" -D -v -f "$SLURM_CONF" > "$base/log/controller.out" 2>&1 &
 controller_pid=$!
 for _ in $(seq 1 50); do
