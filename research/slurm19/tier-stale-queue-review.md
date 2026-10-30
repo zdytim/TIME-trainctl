@@ -1,0 +1,5 @@
+# Staged tier snapshot freshness check
+
+`tier-stale-queue-fix.patch` follows the staged tier scheduler integration. Before examining each popped queue item, the candidate ordinary, backfill and builtin schedulers compare that item and all remaining queue entries with one fresh locked ledger tier snapshot. A changed tier ends the current pass and queues another scheduling cycle; an unavailable or inconsistent snapshot ends the pass without spinning. The next cycle rebuilds the queue. The existing final quota admission check remains independent and authoritative for exhaustion.
+
+This deliberately conservative candidate may also pause CPU-only scheduling if the ledger is unavailable, and the all-remaining-entries check has quadratic worst-case queue cost. A tier can still change after this check and before final allocation; lock/yield, backfill reservation, scheduling fairness and scalability need further design and behavior validation. This patch does not prove strict priority ordering or safe deployment. No tests or training jobs were run.

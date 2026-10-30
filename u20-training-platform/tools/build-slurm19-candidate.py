@@ -23,7 +23,7 @@ PATCHES = (
     "grant-global-id-fix.patch", "controller-read-snapshot.patch", "cpu-array-shape-fix.patch",
     "controller-local-bridge.patch", "controller-local-bridge-io-fix.patch",
     "selector-ambiguous-fix.patch", "replay-identity-fix.patch", "unhealthy-release-fix.patch",
-    "grant-scheduler-wakeup.patch",
+    "grant-scheduler-wakeup.patch", "tier-stale-queue-fix.patch",
 )
 
 
