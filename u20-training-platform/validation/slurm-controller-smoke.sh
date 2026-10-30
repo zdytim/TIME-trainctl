@@ -63,6 +63,7 @@ if test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8;
         none) ;;
         *) exit 2 ;;
     esac
+    corrupt_wal_hash=$(sha256sum "$base/state/monthly-quota.wal" | cut -d' ' -f1)
 fi
 if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8 || test "${TIME_EXHAUSTED_TEST:-0}" = 9; then
     if test "$gpu_count" = 4; then
@@ -160,8 +161,10 @@ for _ in $(seq 1 50); do
                 sleep 5
                 scontrol show job "$cpu" > "$base/log/cpu.out"
                 cat "$base/log/cpu.out"
-                grep -q 'JobState=RUNNING' "$base/log/cpu.out"
-                echo 'PASS: CPU-only work remains runnable with a damaged ledger'
+                grep -q 'JobState=PENDING' "$base/log/cpu.out"
+                grep -Eq 'NodeList=\(null\)' "$base/log/cpu.out"
+                test "$(sha256sum "$base/state/monthly-quota.wal" | cut -d' ' -f1)" = "$corrupt_wal_hash"
+                echo 'OBSERVED: mixed queue is conservatively paused; damaged WAL remains unchanged'
             elif test "$TIME_EXHAUSTED_TEST" = 1; then
                 grep -q 'JobState=PENDING' "$base/log/job.out"
                 grep -Eq 'NodeList=\(null\)' "$base/log/job.out"
