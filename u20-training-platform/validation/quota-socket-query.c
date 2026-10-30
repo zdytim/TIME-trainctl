@@ -7,7 +7,7 @@
 #include <string.h>
 #include <time.h>
 
-int main(void)
+int main(int argc, char **argv)
 {
     struct sockaddr_un addr = {0};
     char buf[1024];
@@ -25,7 +25,9 @@ int main(void)
     if (fd < 0 || connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         perror("isolated quota socket"); return 1;
     }
-    if (write(fd, "SNAP 1001\n", 10) != 10) { perror("snapshot write"); return 1; }
+    const char *request = argc == 2 && !strcmp(argv[1], "root") ? "SNAP 0\n" : "SNAP 1001\n";
+    size_t len = strlen(request);
+    if (write(fd, request, len) != (ssize_t)len) { perror("snapshot write"); return 1; }
     count = read(fd, buf, sizeof(buf) - 1);
     if (count <= 0) { perror("snapshot read"); return 1; }
     buf[count] = '\0';
@@ -43,6 +45,9 @@ int main(void)
     if (fields[0] != (unsigned long long)((civil.tm_year + 1900) * 100 + civil.tm_mon + 1)) {
         fprintf(stderr, "quota month does not match snapshot timestamp\n");
         return 1;
+    }
+    if (argc == 2 && !strcmp(argv[1], "root") && fields[1] != 3) {
+        fprintf(stderr, "synthetic user is not exhausted\n"); return 1;
     }
     return 0;
 }

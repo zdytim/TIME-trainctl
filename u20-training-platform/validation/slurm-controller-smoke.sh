@@ -20,6 +20,7 @@ AuthType=auth/munge
 CredType=cred/munge
 SlurmctldPort=16817
 SlurmdPort=16818
+SlurmdParameters=config_overrides
 StateSaveLocation=$base/state
 SlurmdSpoolDir=$base/spool
 SlurmctldPidFile=$base/slurmctld.pid
@@ -37,8 +38,18 @@ GresTypes=gpu
 NodeName=time-test CPUs=2 RealMemory=256 State=UNKNOWN Gres=gpu:1
 PartitionName=normal Nodes=time-test Default=YES State=UP
 EOF
-printf 'U20MQ1|HEADER|1\n' > "$base/state/monthly-quota.wal"
-printf 'U20MQ1|CHECKPOINT|0\n' > "$base/state/monthly-quota.checkpoint"
+if test "${TIME_EXHAUSTED_TEST:-0}" = 1; then
+    now=$(date +%s)
+    start=$((now - 544500))
+    test "$(date -u -d "@$((now + 28800))" +%Y%m)" = "$(date -u -d "@$((start + 28800))" +%Y%m)"
+    printf 'U20MQ1|HEADER|1\nU20MQ1|1|PREPARE|900000|0|1|4|%s|0\nU20MQ1|2|COMMIT|900000|1\nU20MQ1|3|RELEASE|900000|1|%s|0\n' "$start" "$now" > "$base/state/monthly-quota.wal"
+    printf 'U20MQ1|CHECKPOINT|3\n' > "$base/state/monthly-quota.checkpoint"
+    touch "$base/fakegpu"
+    printf 'NodeName=time-test Name=gpu File=%s/fakegpu\n' "$base" > "$base/gres.conf"
+else
+    printf 'U20MQ1|HEADER|1\n' > "$base/state/monthly-quota.wal"
+    printf 'U20MQ1|CHECKPOINT|0\n' > "$base/state/monthly-quota.checkpoint"
+fi
 chmod 600 "$base/state/monthly-quota.wal" "$base/state/monthly-quota.checkpoint"
 munged --force --foreground --key-file="$base/munge.key" --socket=/run/munge/munge.socket.2 \
     --pid-file="$base/munge.pid" --log-file="$base/log/munge.log" --seed-file="$base/seed" &
@@ -53,7 +64,30 @@ for _ in $(seq 1 50); do
        grep -Eq '^Slurmctld\(primary\) at .* is UP' "$base/log/ping.out" &&
        kill -0 "$controller_pid" 2>/dev/null; then
         cat "$base/log/ping.out"
-        /validation/quota-socket-query
+        if test "${TIME_EXHAUSTED_TEST:-0}" = 1; then
+            /validation/quota-socket-query root
+            slurmd -D -f "$SLURM_CONF" > "$base/log/slurmd.out" 2>&1 &
+            node_pid=$!
+            for _ in $(seq 1 100); do
+                if scontrol show node time-test > "$base/log/node.out" 2>&1 &&
+                   grep -q 'State=IDLE' "$base/log/node.out"; then break; fi
+                sleep .1
+            done
+            if ! grep -q 'State=IDLE' "$base/log/node.out"; then
+                cat "$base/log/slurmd.out" "$base/log/node.out"; exit 1
+            fi
+            job=$(sbatch --parsable --time=00:01:00 --gres=gpu:1 --wrap='sleep 1')
+            sleep 3
+            scontrol show job "$job" > "$base/log/job.out"
+            cat "$base/log/job.out"
+            grep -q 'JobState=PENDING' "$base/log/job.out"
+            grep -Eq 'NodeList=\(null\)' "$base/log/job.out"
+            grep -q 'MonthlyGpuQuota' "$base/log/job.out"
+            echo 'PASS: exhausted synthetic user remains pending without a node allocation'
+            kill "$node_pid" 2>/dev/null || true
+        else
+            /validation/quota-socket-query
+        fi
         echo 'PASS: isolated controller responds with a fresh ledger'
         kill "$controller_pid" 2>/dev/null || true
         wait "$controller_pid" 2>/dev/null || true
