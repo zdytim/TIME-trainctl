@@ -1,0 +1,23 @@
+diff --git a/src/slurmctld/monthly_quota.c b/src/slurmctld/monthly_quota.c
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -723,6 +723,6 @@ static int _job_gpu_count(struct job_record *job_ptr, uint64_t *tres_cnt,
+ 		} else {
+ 			if (!nodes || bit_set_count(nodes) != 1 ||
+-			    !gpu_state->gres_cnt_node_select || !gpu_state->gres_bit_select ||
++			    !gpu_state->gres_cnt_node_select ||
+ 			    gpu_state->total_node_cnt != (uint32_t)bit_size(nodes)) {
+ 				*why = "single-node GPU selection is not provable";
+ 				return -1;
+@@ -735,8 +735,9 @@ static int _job_gpu_count(struct job_record *job_ptr, uint64_t *tres_cnt,
+ 				return -1;
+ 			}
+ 			count = gpu_state->gres_cnt_node_select[index];
+-			if (!gpu_state->gres_bit_select[index] ||
+-			    count != (uint64_t)bit_set_count(gpu_state->gres_bit_select[index])) {
++			if (gpu_state->gres_bit_select &&
++			    (!gpu_state->gres_bit_select[index] ||
++			     count != (uint64_t)bit_set_count(gpu_state->gres_bit_select[index]))) {
+ 				*why = "GPU selection bitmap disagrees with count";
+ 				return -1;
+ 			}
