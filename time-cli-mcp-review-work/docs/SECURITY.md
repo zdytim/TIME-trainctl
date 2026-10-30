@@ -15,7 +15,7 @@
   `client_request_id`.
 - MCP defaults to read-only because AI-supplied `confirm`/`user_intent` fields
   are not independent human consent. A staged inherited-socket adapter for
-  submit and cancel requires a trustworthy host; the staged terminal launcher
+  training and application actions requires a trustworthy host; the staged terminal launcher
   only offers confirmation when it has a controlling terminal.
   Any integration must supply a host-issued, action-bound, one-shot consent
   token out of band. Tool arguments contain no impersonation field. Logs are

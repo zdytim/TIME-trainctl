@@ -8,7 +8,7 @@
   "files": [
     {
       "path": "README.md",
-      "sha256": "c25ebbfd0fa3491284912d0a8d61a44302c15251fd43fc132a3fd34f92cadac8",
+      "sha256": "0e73e8a0ad88c58457f2e275ba0b41211bc5925baa91bd4fab6de587be13bd15",
       "mode": "0o600"
     },
     {
@@ -38,7 +38,7 @@
     },
     {
       "path": "docs/SECURITY.md",
-      "sha256": "b175f105475fb5c0826b7fcc55ddd5f76f786173a075026bb61e39dffe35d561",
+      "sha256": "cf41946b3658c737a39587f2d81cff255a4410bd43d2f72f0e9d8c47ef678aa9",
       "mode": "0o600"
     },
     {
@@ -68,12 +68,12 @@
     },
     {
       "path": "time_mcp.py",
-      "sha256": "d18d5d245638f7eff412717ce8e849ccbfadc59f3a32dc282ecc5b7088a9c3db",
+      "sha256": "6b3cfc9fc75e6b74450715b58356dc522c1f0e6614b30affb41df6be16d30857",
       "mode": "0o755"
     },
     {
       "path": "time_mcp_confirm.py",
-      "sha256": "2d6f95534ba28913a76f5e8078f241c6ce09e1df284eda569d9b71d920967613",
+      "sha256": "2da32127dac99326846e306378e50e2b2a6a753e62a7636485989a1fbeaf0e24",
       "mode": "0o644"
     },
     {

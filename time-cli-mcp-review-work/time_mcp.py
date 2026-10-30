@@ -88,11 +88,11 @@ TOOLS = [
                                 required=["job_id", "confirm", "user_intent"])},
     {"name": "time_list_requests", "description": "List broker resource applications visible to this user.",
      "inputSchema": obj_schema({})},
-    {"name": "time_create_request", "description": "Create a user-authorized temporary or quota application; monthly capability is unknown and this mutation is withheld.",
+    {"name": "time_create_request", "description": "Create an idempotent monthly GPU-hour application after host approval; requires advertised server support.",
      "inputSchema": obj_schema({
-         "kind": {"type": "string", "enum": ["temporary_job", "quota_change", "monthly_gpu_hours"]},
+         "kind": {"type": "string", "enum": ["monthly_gpu_hours"]},
          "requested": {"type": "object"}, "reason": STRING,
-         **MUTATION_AUTH}, required=["kind", "reason", "confirm", "user_intent"])},
+         **MUTATION_AUTH}, required=["kind", "requested", "reason", "confirm", "user_intent"])},
     {"name": "time_decide_request", "description": "Make an explicit administrator-authorized application decision.",
      "inputSchema": obj_schema({
          "application_id": STRING,
@@ -100,6 +100,9 @@ TOOLS = [
          "decision_reason": STRING, "approved": {"type": "object"},
          "valid_minutes": INTEGER, **MUTATION_AUTH},
          required=["application_id", "action", "confirm", "user_intent"])},
+    {"name": "time_reconcile_grant", "description": "Reconcile one previously approved monthly grant; administrator and host approval required.",
+     "inputSchema": obj_schema({"application_id": STRING, **MUTATION_AUTH},
+                                required=["application_id", "confirm", "user_intent"])},
     {"name": "time_preview_quota", "description": "Preview an existing administrator quota change route.",
      "inputSchema": obj_schema({"scope": {"type": "string", "enum": ["default", "user"]},
                                  "uid": INTEGER, "quota": {"type": "object"},
@@ -121,13 +124,14 @@ TOOLS = [
 
 MUTATION_TOOL_NAMES = {
     "time_submit_job", "time_cancel_job", "time_create_request",
-    "time_decide_request", "time_apply_quota", "time_apply_rules",
+    "time_decide_request", "time_reconcile_grant", "time_apply_quota", "time_apply_rules",
     "time_preview_quota", "time_preview_rules",
 }
 
-# Only submit and cancel have a staged host-consent adapter. Other mutation
-# paths remain absent until their own API and consent contracts are ready.
-HOST_CONSENT_TOOLS = {"time_submit_job", "time_cancel_job"}
+# Only the following operations have staged host-consent support. Other
+# mutations remain absent until their API and consent contracts are ready.
+HOST_CONSENT_TOOLS = {"time_submit_job", "time_cancel_job", "time_create_request",
+                      "time_decide_request", "time_reconcile_grant"}
 
 
 def require_intent(args, expected):
@@ -252,15 +256,30 @@ class Server(object):
             return response_envelope(True, self.read("GET", "/api/v1/applications"))
         if name == "time_create_request":
             require_intent(args, "create_request")
-            if args.get("kind") == "monthly_gpu_hours":
-                raise TimeError("feature_not_enabled", "monthly quota enforcement is disabled; monthly applications are unavailable", status=409)
-            body = {"kind": args.get("kind"), "requested": args.get("requested", {}),
-                    "reason": args.get("reason", "")}
-            data, request_id, outcome = self.mutate(
-                "POST", "/api/v1/applications", {
-                    **body, "confirm": args.get("confirm"),
-                    "user_intent": args.get("user_intent")},
-                "create_request", 15)
+            if args.get("kind") != "monthly_gpu_hours":
+                raise TimeError("feature_not_supported", "only idempotent monthly applications are supported", status=409)
+            discovered = discover_server_capabilities(self.client).get("capabilities", {})
+            capability = discovered.get("monthly_requests", {}) if isinstance(discovered, dict) else {}
+            if not isinstance(capability, dict) or capability.get("available") is not True or capability.get("idempotency") != "owner-request-id-v1":
+                raise TimeError("feature_not_enabled", "server has not advertised idempotent monthly applications", status=409)
+            requested = args.get("requested")
+            if not isinstance(requested, dict) or set(requested) - {"gpu_hours", "month", "client_request_id"}:
+                raise TimeError("invalid_arguments", "requested must contain monthly hours, month and optional request ID", status=400)
+            hours, month = requested.get("gpu_hours"), requested.get("month")
+            if (isinstance(hours, bool) or not isinstance(hours, int) or not 1 <= hours <= 100000 or
+                    isinstance(month, bool) or not isinstance(month, int) or not 197001 <= month <= 999912 or not 1 <= month % 100 <= 12):
+                raise TimeError("invalid_arguments", "invalid GPU hours or YYYYMM month", status=400)
+            reason = args.get("reason")
+            if not isinstance(reason, str) or not 5 <= len(reason.strip()) <= 2000:
+                raise TimeError("invalid_arguments", "reason must be 5 to 2000 characters", status=400)
+            request_id = requested.get("client_request_id") or self.ledger.new_id()
+            if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9-]{8,80}", request_id):
+                raise TimeError("invalid_arguments", "invalid client request ID", status=400)
+            body = {"kind": "monthly_gpu_hours", "requested": {"gpu_hours": hours, "month": month,
+                    "client_request_id": request_id}, "reason": reason.strip(),
+                    "confirm": args.get("confirm"), "user_intent": args.get("user_intent")}
+            data, _, outcome = self.mutate("POST", "/api/v1/applications", body,
+                                            "create_request", 15, request_id=request_id)
             return response_envelope(True, data, request_id=request_id, outcome=outcome)
         if name == "time_decide_request":
             require_intent(args, "decide_request")
@@ -270,6 +289,17 @@ class Server(object):
             data, request_id, outcome = self.mutate(
                 "POST", "/api/v1/applications/%s/decision" % require_identifier(args, "application_id"),
                 body, "decide_request", 15)
+            return response_envelope(True, data, request_id=request_id, outcome=outcome)
+        if name == "time_reconcile_grant":
+            require_intent(args, "reconcile_grant")
+            discovered = discover_server_capabilities(self.client).get("capabilities", {})
+            capability = discovered.get("monthly_requests", {}) if isinstance(discovered, dict) else {}
+            if not isinstance(capability, dict) or capability.get("reconcile") != "application-grant-v1":
+                raise TimeError("feature_not_enabled", "server has not advertised monthly grant reconciliation", status=409)
+            aid = require_identifier(args, "application_id")
+            body = {"confirm": args.get("confirm"), "user_intent": args.get("user_intent")}
+            data, request_id, outcome = self.mutate("POST", "/api/v1/applications/%s/grant-reconcile" % aid,
+                                                     body, "reconcile_grant", 15)
             return response_envelope(True, data, request_id=request_id, outcome=outcome)
         if name == "time_preview_quota":
             body = {key: args[key] for key in ("scope", "uid", "quota", "inherit") if key in args}

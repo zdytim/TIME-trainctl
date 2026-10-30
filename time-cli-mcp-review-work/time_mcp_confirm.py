@@ -31,7 +31,10 @@ def validate(raw):
             not isinstance(action["path"], str)):
         raise ValueError("invalid consent fields")
     path = action["path"]
-    if path != "/api/v1/jobs" and not re.fullmatch(r"/api/v1/jobs/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}/cancel", path):
+    allowed = (path in ("/api/v1/jobs", "/api/v1/applications") or
+               re.fullmatch(r"/api/v1/jobs/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}/cancel", path) or
+               re.fullmatch(r"/api/v1/applications/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}/(decision|grant-reconcile)", path))
+    if not allowed:
         raise ValueError("unsupported action")
     canonical = json.dumps(action, ensure_ascii=False, sort_keys=True,
                            separators=(",", ":"), allow_nan=False).encode("utf-8")
