@@ -65,7 +65,7 @@ if test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8;
     esac
     corrupt_wal_hash=$(sha256sum "$base/state/monthly-quota.wal" | cut -d' ' -f1)
 fi
-if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8 || test "${TIME_EXHAUSTED_TEST:-0}" = 9; then
+if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8 || test "${TIME_EXHAUSTED_TEST:-0}" = 9 || test "${TIME_EXHAUSTED_TEST:-0}" = 10; then
     if test "$gpu_count" = 4; then
         touch "$base/fakegpu0" "$base/fakegpu1" "$base/fakegpu2" "$base/fakegpu3"
         printf 'NodeName=time-test Name=gpu File=%s/fakegpu[0-3]\n' "$base" > "$base/gres.conf"
@@ -177,7 +177,28 @@ for _ in $(seq 1 50); do
                     cat "$base/state/monthly-quota.wal"
                     exit 1
                 fi
-                if test "$TIME_EXHAUSTED_TEST" = 9; then
+                if test "$TIME_EXHAUSTED_TEST" = 10; then
+                    sleep 2
+                    /validation/quota-socket-query root-active
+                    child=$(ps -o pid= --ppid "$controller_pid" | tr -d ' ')
+                    test -n "$child" && test "$(ps -o comm= -p "$child")" = slurmctld
+                    kill -KILL "$child"
+                    wait "$controller_pid" 2>/dev/null || true
+                    test -S "$base/state/time-quota.sock"
+                    timeout 45 slurmctld -D -v -f "$SLURM_CONF" > "$base/log/controller-crash-restart.out" 2>&1 &
+                    controller_pid=$!
+                    ready=0
+                    for _ in $(seq 1 80); do
+                        if scontrol ping > "$base/log/ping-restart.out" 2>&1 &&
+                           grep -Eq '^Slurmctld\(primary\) at .* is UP' "$base/log/ping-restart.out"; then ready=1; break; fi
+                        sleep .1
+                    done
+                    if test "$ready" != 1; then cat "$base/log/controller-crash-restart.out"; exit 1; fi
+                    grep -q 'monthly quota control socket unavailable' "$base/log/controller-crash-restart.out"
+                    echo 'OBSERVED: stale socket blocks quota API after abrupt controller termination'
+                    scontrol show job "$job" | grep -q 'JobState=RUNNING'
+                    echo 'PASS: isolated running job survives abrupt controller restart'
+                elif test "$TIME_EXHAUSTED_TEST" = 9; then
                     sleep 2
                     /validation/quota-socket-query root-active
                     scontrol shutdown
