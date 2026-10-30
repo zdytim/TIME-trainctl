@@ -34,9 +34,15 @@ printf '%s\n' 'session required pam_exec.so type=open_session quiet /bin/false' 
 # open-session-only guard is skipped; it cannot override a required failure.
 printf '%s\n' 'session required pam_permit.so' >> "/etc/pam.d/$positive"
 printf '%s\n' 'session required pam_permit.so' >> "/etc/pam.d/$negative"
+before=$(loginctl list-sessions --no-legend | awk '$2 == 1001 { print $1 }' | sort)
 # Dedicated transient units have bounded lifetimes and are collected afterwards.
 systemd-run --quiet --wait --collect --pipe --unit="$positive" --property=RuntimeMaxSec=15 \
     /usr/bin/python3 "$probe" "$positive" timzhang allow
 systemd-run --quiet --wait --collect --pipe --unit="$negative" --property=RuntimeMaxSec=15 \
     /usr/bin/python3 "$probe" "$negative" timzhang deny
+after=$(loginctl list-sessions --no-legend | awk '$2 == 1001 { print $1 }' | sort)
+if test "$before" != "$after"; then
+    echo 'Session set changed; inspect without terminating any user session' >&2
+    exit 1
+fi
 echo 'PASS: temporary PAM session stack allowed the staged guard and rejected a failing guard'

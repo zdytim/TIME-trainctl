@@ -33,7 +33,8 @@ finally:
     # pam_systemd may have created a scope before a later module denied open.
     close_status = lib.pam_close_session(handle, 0)
     if close_status:
-        print('pam_close_session failed: %d' % close_status, file=sys.stderr)
+        print('pam_close_session returned %d after %s open' %
+              (close_status, 'successful' if opened else 'denied'), file=sys.stderr)
     lib.pam_end(handle, status)
-if close_status:
+if close_status and (opened or close_status != 6):
     raise SystemExit('session cleanup failed')
