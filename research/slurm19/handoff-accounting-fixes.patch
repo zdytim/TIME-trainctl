@@ -1,0 +1,124 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -759,8 +759,12 @@
+ 		return 0;
+ 	}
+ 
+-	if (!strcmp(event, "RELEASE") || !strcmp(event, "SUSPEND") ||
+-	    !strcmp(event, "RESUME")) {
++	/* Prior drafts recorded zero GPU occupancy for suspended jobs although
++	 * cons_tres retains their GRES. Refuse those legacy journals; their
++	 * historical charges cannot be reconstructed safely from this record. */
++	if (!strcmp(event, "SUSPEND") || !strcmp(event, "RESUME"))
++		return -1;
++	if (!strcmp(event, "RELEASE")) {
+ 		if (field_count != 7 || _parse_u32(fields[3], &job_id) ||
+ 		    _parse_u64(fields[4], &generation) ||
+ 		    _parse_u64(fields[5], &to.sec) ||
+@@ -775,17 +779,7 @@
+ 		if (_charge_interval(active, &active->anchor, &to))
+ 			return -1;
+ 		active->anchor = to;
+-		if (!strcmp(event, "RELEASE")) {
+-			_remove_active(active);
+-		} else if (!strcmp(event, "SUSPEND")) {
+-			if (!active->gpu_count)
+-				return -1;
+-			active->gpu_count = 0;
+-		} else {
+-			if (active->gpu_count || !active->base_gpu)
+-				return -1;
+-			active->gpu_count = active->base_gpu;
+-		}
++		_remove_active(active);
+ 		return 0;
+ 	}
+ 
+@@ -1001,7 +995,7 @@
+ 		_set_pending_reason(job_ptr, why ? why : "unsupported job shape");
+ 		return -1;
+ 	}
+-	if (!_now(&now) || _month_key(&now, &month)) {
++	if (_now(&now) || _month_key(&now, &month)) {
+ 		_set_pending_reason(job_ptr, "clock or month conversion unavailable");
+ 		return -1;
+ 	}
+@@ -1245,62 +1239,16 @@
+ 
+ void monthly_quota_suspend(struct job_record *job_ptr, bool indefinite)
+ {
+-	mq_active_record_t *active;
+-	mq_time_t now;
+-
+-	if (!job_ptr || !indefinite)
+-		return;
+-	pthread_mutex_lock(&mq_lock);
+-	if (!mq_enabled || !mq_healthy) {
+-		pthread_mutex_unlock(&mq_lock);
+-		return;
+-	}
+-	active = _find_active_job(job_ptr->job_id);
+-	if (!active || !active->gpu_count) {
+-		pthread_mutex_unlock(&mq_lock);
+-		return;
+-	}
+-	if (_now(&now) || _append_event("SUSPEND|%u|%" PRIu64 "|%" PRIu64
+-					"|%u", active->job_id, active->generation,
+-					 now.sec, now.nsec) ||
+-	    _charge_interval(active, &active->anchor, &now)) {
+-		_mark_unhealthy("SUSPEND could not be durably settled");
+-		pthread_mutex_unlock(&mq_lock);
+-		return;
+-	}
+-	active->anchor = now;
+-	active->gpu_count = 0;
+-	pthread_mutex_unlock(&mq_lock);
++	/* cons_tres suspends CPU cores, retaining memory and GRES ownership. */
++	(void) job_ptr;
++	(void) indefinite;
+ }
+ 
+ void monthly_quota_resume(struct job_record *job_ptr, bool indefinite)
+ {
+-	mq_active_record_t *active;
+-	mq_time_t now;
+-
+-	if (!job_ptr || !indefinite)
+-		return;
+-	pthread_mutex_lock(&mq_lock);
+-	if (!mq_enabled || !mq_healthy) {
+-		pthread_mutex_unlock(&mq_lock);
+-		return;
+-	}
+-	active = _find_active_job(job_ptr->job_id);
+-	if (!active || active->gpu_count || !active->base_gpu) {
+-		pthread_mutex_unlock(&mq_lock);
+-		return;
+-	}
+-	if (_now(&now) || _append_event("RESUME|%u|%" PRIu64 "|%" PRIu64
+-					"|%u", active->job_id, active->generation,
+-					 now.sec, now.nsec) ||
+-	    _charge_interval(active, &active->anchor, &now)) {
+-		_mark_unhealthy("RESUME could not be durably recorded");
+-		pthread_mutex_unlock(&mq_lock);
+-		return;
+-	}
+-	active->anchor = now;
+-	active->gpu_count = active->base_gpu;
+-	pthread_mutex_unlock(&mq_lock);
++	/* GPU accounting continues through suspend and resume. */
++	(void) job_ptr;
++	(void) indefinite;
+ }
+ 
+ bool monthly_quota_job_resize_denied(struct job_record *job_ptr,
+@@ -1408,7 +1356,8 @@
+ 			active->committed = true;
+ 		}
+ 		if (IS_JOB_SUSPENDED(job_ptr)) {
+-			if (active->gpu_count != 0)
++			if (_job_gpu_count(job_ptr, NULL, true, &actual_gpu, &why) <= 0 ||
++			    actual_gpu != active->gpu_count)
+ 				bad = true;
+ 			continue;
+ 		}
