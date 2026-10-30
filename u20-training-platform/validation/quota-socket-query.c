@@ -77,6 +77,11 @@ int main(int argc, char **argv)
          (fields[10] == 0 && fields[11] == 0))) {
         fprintf(stderr, "running exhausted job or overage is not accounted for\n"); return 1;
     }
+    if (argc == 2 && !strcmp(argv[1], "root-finished-overage") &&
+        (fields[1] != 3 || fields[12] != 0 || fields[13] != 0 ||
+         (fields[10] == 0 && fields[11] == 0))) {
+        fprintf(stderr, "finished job or its overage was not reconciled\n"); return 1;
+    }
     if (argc == 2 && !strcmp(argv[1], "root-tier")) {
         const char *value = getenv("TIME_EXPECT_TIER");
         if (!value || fields[1] != strtoull(value, NULL, 10)) {

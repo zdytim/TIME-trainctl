@@ -186,6 +186,19 @@ for _ in $(seq 1 50); do
                     grep -Eq 'NodeList=\(null\)' "$base/log/next.out"
                     grep -q 'MonthlyGpuQuota:monthly_capacity_exhausted' "$base/log/next.out"
                     echo 'PASS: running job continues into overage and new job stays unallocated'
+                    finished=0
+                    for _ in $(seq 1 25); do
+                        scontrol show job "$job" > "$base/log/finished.out"
+                        if grep -q 'JobState=COMPLETED' "$base/log/finished.out" &&
+                           grep -q 'ExitCode=0:0' "$base/log/finished.out"; then finished=1; break; fi
+                        sleep 1
+                    done
+                    if test "$finished" != 1; then cat "$base/log/finished.out"; exit 1; fi
+                    /validation/quota-socket-query root-finished-overage
+                    scontrol show job "$next" > "$base/log/next-after.out"
+                    grep -q 'JobState=PENDING' "$base/log/next-after.out"
+                    grep -Eq 'NodeList=\(null\)' "$base/log/next-after.out"
+                    echo 'PASS: overage job finishes and waiting job remains unallocated'
                 else
                     sleep 2
                     first=$(/validation/quota-socket-query root-active)
