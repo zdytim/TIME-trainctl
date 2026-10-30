@@ -52,5 +52,9 @@ int main(int argc, char **argv)
     if (argc == 2 && !strcmp(argv[1], "root-eligible") && fields[1] != 0) {
         fprintf(stderr, "synthetic user is not in debug tier\n"); return 1;
     }
+    if (argc == 2 && !strcmp(argv[1], "root-active") &&
+        (fields[12] != 1 || fields[13] != 1 || fields[2] < 1)) {
+        fprintf(stderr, "running allocation or elapsed usage is not accounted for\n"); return 1;
+    }
     return 0;
 }

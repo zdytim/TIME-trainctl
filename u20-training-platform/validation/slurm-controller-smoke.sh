@@ -98,6 +98,8 @@ for _ in $(seq 1 50); do
                     cat "$base/state/monthly-quota.wal"
                     exit 1
                 fi
+                sleep 2
+                /validation/quota-socket-query root-active
                 echo 'PASS: eligible synthetic user starts a GPU job'
             fi
             kill "$node_pid" 2>/dev/null || true
