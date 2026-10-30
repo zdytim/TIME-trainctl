@@ -39,6 +39,10 @@ U20_REQUIRED_PLUGINS = (
     "src/plugins/sched/backfill/.libs/sched_backfill.so",
     "src/plugins/select/cons_tres/.libs/select_cons_tres.so",
     "src/plugins/gres/gpu/.libs/gres_gpu.so",
+    "src/plugins/task/cgroup/.libs/task_cgroup.so",
+    "src/plugins/proctrack/cgroup/.libs/proctrack_cgroup.so",
+    "src/plugins/jobacct_gather/linux/.libs/jobacct_gather_linux.so",
+    "src/plugins/accounting_storage/none/.libs/accounting_storage_none.so",
 )
 
 
