@@ -1,0 +1,11 @@
+--- a/src/slurmctld/Makefile.in
++++ b/src/slurmctld/Makefile.in
+@@ -155,7 +155,7 @@
+ 	groups.$(OBJEXT) heartbeat.$(OBJEXT) job_mgr.$(OBJEXT) \
+ 	job_scheduler.$(OBJEXT) job_submit.$(OBJEXT) \
+ 	licenses.$(OBJEXT) locks.$(OBJEXT) monthly_quota.$(OBJEXT) \
+-	node_scheduler.$(OBJEXT) partition_mgr.$(OBJEXT) \
++	node_mgr.$(OBJEXT) node_scheduler.$(OBJEXT) partition_mgr.$(OBJEXT) \
+ 	ping_nodes.$(OBJEXT) port_mgr.$(OBJEXT) power_save.$(OBJEXT) \
+ 	powercapping.$(OBJEXT) preempt.$(OBJEXT) proc_req.$(OBJEXT) \
+ 	read_config.$(OBJEXT) reservation.$(OBJEXT) \
