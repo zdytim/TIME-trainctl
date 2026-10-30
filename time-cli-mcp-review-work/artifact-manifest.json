@@ -38,7 +38,7 @@
     },
     {
       "path": "docs/SECURITY.md",
-      "sha256": "e9f5652c944937fcf3d30ece504f2883d8d9231f067254b5f3ace45e74ffbc36",
+      "sha256": "37c51bce52cb2d4b8981738a361047710177f99e81827fedcfa505231e35b68e",
       "mode": "0o600"
     },
     {
@@ -58,7 +58,7 @@
     },
     {
       "path": "time_core.py",
-      "sha256": "c6a7bab52aea162577cd5dccb082227fef3f449b2b82fbb38aaf158b79008288",
+      "sha256": "15d8691b46af82392e0958d70c86fffc5f731c1d134d7fc8b17b21f932697ea1",
       "mode": "0o755"
     },
     {
