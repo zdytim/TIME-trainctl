@@ -1,0 +1,53 @@
+--- a/src/slurmctld/monthly_quota_control.c
++++ b/src/slurmctld/monthly_quota_control.c
+@@ -15,6 +15,7 @@
+ #include <sys/stat.h>
+ #include <sys/time.h>
+ #include <sys/un.h>
++#include <time.h>
+ #include <unistd.h>
+ #include "src/common/log.h"
+ #include "src/slurmctld/locks.h"
+@@ -54,6 +55,7 @@
+ 	int rc = -1;
+ 	monthly_quota_snapshot_t view;
+ 	slurmctld_lock_t config_lock = {READ_LOCK, NO_LOCK, NO_LOCK, NO_LOCK, NO_LOCK};
++	slurmctld_lock_t grant_lock = {READ_LOCK, WRITE_LOCK, NO_LOCK, NO_LOCK, NO_LOCK};
+ 
+ 	if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &peer_len) ||
+ 	    peer_len != sizeof(peer) || peer.uid != 0)
+@@ -71,9 +73,10 @@
+ 	p = strtok_r(buf, " ", &save);
+ 	while (p && count < 7) { part[count++] = p; p = strtok_r(NULL, " ", &save); }
+ 	if (p || count < 2 || number(part[1], &uid) || uid > UINT32_MAX) return;
+-	lock_slurmctld(config_lock);
+ 	if (count == 2 && !strcmp(part[0], "SNAP")) {
++		lock_slurmctld(config_lock);
+ 		rc = monthly_quota_snapshot((uid_t)uid, &view);
++		unlock_slurmctld(config_lock);
+ 		if (!rc) {
+ 			snprintf(reply, sizeof(reply),
+ 				 "OK %u %u %" PRIu64 " %u %" PRIu64 " %u "
+@@ -88,10 +91,20 @@
+ 	} else if (count == 6 && !strcmp(part[0], "GRANT") &&
+ 		   !number(part[2], &month) && month <= UINT32_MAX &&
+ 		   !number(part[3], &sec)) {
++		time_t changed;
++		lock_slurmctld(grant_lock);
+ 		rc = monthly_quota_grant((uid_t)uid, (uint32_t)month, sec, part[4], part[5]);
+-		if (!rc) snprintf(reply, sizeof(reply), "OK\n");
++		if (!rc) {
++			changed = time(NULL);
++			if (changed != (time_t)-1)
++				last_job_update = changed;
++		}
++		unlock_slurmctld(grant_lock);
++		if (!rc) {
++			queue_job_scheduler();
++			snprintf(reply, sizeof(reply), "OK\n");
++		}
+ 	}
+-	unlock_slurmctld(config_lock);
+ 	if (rc) snprintf(reply, sizeof(reply), "ERROR unavailable_or_invalid\n");
+ 	length = 0;
+ 	while (length < strlen(reply)) {
