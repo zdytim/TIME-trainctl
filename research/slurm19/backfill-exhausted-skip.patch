@@ -1,0 +1,37 @@
+--- a/src/plugins/sched/backfill/backfill.c
++++ b/src/plugins/sched/backfill/backfill.c
+@@ -89,6 +89,7 @@
+ #include "src/slurmctld/job_scheduler.h"
+ #include "src/slurmctld/licenses.h"
+ #include "src/slurmctld/locks.h"
++#include "src/slurmctld/monthly_quota.h"
+ #include "src/slurmctld/node_scheduler.h"
+ #include "src/slurmctld/preempt.h"
+ #include "src/slurmctld/reservation.h"
+@@ -1625,6 +1626,13 @@
+ 				rc = 1;
+ 				break;
+ 			}
++		}
++		/* SELECT_MODE_WILL_RUN below bypasses select_nodes(), so exclude
++		 * currently exhausted jobs before making a future reservation. */
++		if (job_queue_rec->monthly_tier == MONTHLY_QUOTA_EXHAUSTED) {
++			xfree(job_queue_rec);
++			job_ptr = NULL;
++			continue;
+ 		}
+ 		job_ptr          = job_queue_rec->job_ptr;
+ 		part_ptr         = job_queue_rec->part_ptr;
+--- a/src/slurmctld/node_scheduler.c
++++ b/src/slurmctld/node_scheduler.c
+@@ -2857,8 +2857,8 @@
+ 	}
+ 	assoc_mgr_unlock(&job_read_locks);
+ 
+-	/* This is read-only.  It also runs for backfill test_only calls so an
+-	 * exhausted GPU job is not reserved in the future-node map. */
++	/* This is read-only. Backfill also has direct select_g_job_test paths;
++	 * this check alone does not govern all future-resource predictions. */
+ 	if (error_code == SLURM_SUCCESS &&
+ 	    monthly_quota_check(job_ptr, tres_req_cnt, test_only, false) < 0) {
+ 		free_job_resources(&job_ptr->job_resrcs);
