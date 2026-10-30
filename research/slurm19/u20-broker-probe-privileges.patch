@@ -1,6 +1,7 @@
 --- a/pro6000d-training-api.py
 +++ b/pro6000d-training-api.py
-@@ -473,0 +474,17 @@
+@@ -1 +1,18 @@
+-    def gpu_xml(self) -> bytes:
 +    def gpu_probe_argv(self, executable: str) -> List[str]:
 +        """Never invoke NVIDIA tooling with root's device-changing privileges."""
 +        argv = [executable, "-q", "-x"]
@@ -18,6 +19,7 @@
 +        return ["/usr/bin/setpriv", "--reuid", str(user.pw_uid), "--regid", str(user.pw_gid),
 +                "--clear-groups"] + argv
 +
-@@ -479 +496 @@
++    def gpu_xml(self) -> bytes:
+@@ -1 +1 @@
 -        process = subprocess.Popen([executable, "-q", "-x"], stdin=subprocess.DEVNULL,
 +        process = subprocess.Popen(self.gpu_probe_argv(executable), stdin=subprocess.DEVNULL,
