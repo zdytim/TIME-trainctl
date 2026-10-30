@@ -296,7 +296,7 @@ for _ in $(seq 1 50); do
                 # Stock u20 daemon and its stock libslurmfull, copied into this
                 # disposable image; all config/state/plugins remain synthetic.
                 test -x /stock-u20/slurmd && test -f /stock-u20/libslurmfull.so
-                LD_LIBRARY_PATH=/stock-u20 /stock-u20/slurmd -D -f "$SLURM_CONF" > "$base/log/slurmd.out" 2>&1 &
+                LD_LIBRARY_PATH="/stock-u20:$prefix/lib/slurm" /stock-u20/slurmd -D -f "$SLURM_CONF" > "$base/log/slurmd.out" 2>&1 &
             else
                 slurmd -D -f "$SLURM_CONF" > "$base/log/slurmd.out" 2>&1 &
             fi
