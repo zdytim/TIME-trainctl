@@ -318,6 +318,34 @@ def handle(args):
                     ledger.update(args.request_id, outcome=record["outcome"], result=record["result"])
             except TimeError:
                 pass
+        # A cancellation is correlated by its explicit target job, never by
+        # the submit request ID. A terminal non-cancelled state is not proof
+        # that the cancellation succeeded.
+        cancel_path = re.fullmatch(r"/api/v1/jobs/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/cancel",
+                                   record.get("path", ""))
+        if (record.get("outcome") in ("pending", "unknown", "accepted_pending") and
+                record.get("method") == "POST" and cancel_path):
+            try:
+                jobs = command_jobs(client)
+                matches = [job for job in jobs if str(job.get("id")) == cancel_path.group(1)]
+                if len(matches) == 1:
+                    job = matches[0]
+                    state = str(job.get("state", "")).upper()
+                    reason = str(job.get("reason_code", "")).lower()
+                    if state in ("CANCELLED", "CANCELED"):
+                        outcome = "confirmed"
+                    elif state in ("COMPLETED", "FAILED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY"):
+                        outcome = "unknown"
+                    elif reason == "cancellation_requested" or state == "CANCELLATION_REQUESTED":
+                        outcome = "accepted_pending"
+                    else:
+                        outcome = "unknown"
+                    record = dict(record)
+                    record["outcome"] = outcome
+                    record["result"] = {"job": job}
+                    ledger.update(args.request_id, outcome=outcome, result=record["result"])
+            except TimeError:
+                pass
         if (record.get("outcome") in ("pending", "unknown") and
                 record.get("method") == "POST" and record.get("path") == "/api/v1/applications" and
                 record.get("body", {}).get("kind") == "monthly_gpu_hours"):
