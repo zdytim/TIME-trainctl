@@ -1,22 +1,12 @@
 --- a/pro6000d-training-api.py
 +++ b/pro6000d-training-api.py
-@@ -218,6 +218,8 @@
-         columns = {r[1] for r in self.store.db.execute("PRAGMA table_info(jobs)")}
-         if "client_request_id" not in columns:
-             self.store.db.execute("ALTER TABLE jobs ADD COLUMN client_request_id TEXT")
-+        if "client_request_hash" not in columns:
-+            self.store.db.execute("ALTER TABLE jobs ADD COLUMN client_request_hash TEXT")
-         self.store.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS jobs_request ON jobs(owner_uid,client_request_id) WHERE client_request_id IS NOT NULL")
- 
-     # ---------- identity and authorization ----------
-@@ -719,11 +721,26 @@
-     def submit(self, ident: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
-         uid = ident["uid"]
-         request_id = payload.get("client_request_id")
+@@ -220,0 +221,3 @@
++        if "client_request_hash" in columns:
++            raise RuntimeError("legacy candidate request-hash column requires offline migration before upgrade")
++        self.store.db.execute("CREATE TABLE IF NOT EXISTS job_request_fingerprints (job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE, request_hash TEXT NOT NULL)")
+@@ -721,0 +725 @@
 +        request_digest = None
-         if request_id is not None:
-             if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9-]{8,80}", request_id):
-                 raise ApiError(400, "invalid_request_id", "请求标识无效")
+@@ -724,0 +729,10 @@
 +            # Hash the exact JSON request excluding the key itself. Deliberately
 +            # conservative: aliases/defaults are not silently equated across API versions.
 +            try:
@@ -27,45 +17,24 @@
 +            except (TypeError, ValueError):
 +                raise ApiError(400, "invalid_request", "请求无法规范化")
 +            request_digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-             prior = self.store.db.execute("SELECT * FROM jobs WHERE owner_uid=? AND client_request_id=?", (uid, request_id)).fetchone()
-             if prior:
-+                if prior["client_request_hash"] is None:
+@@ -726,0 +741,5 @@
++                fingerprint = self.store.db.execute("SELECT request_hash FROM job_request_fingerprints WHERE job_id=?", (prior["id"],)).fetchone()
++                if fingerprint is None:
 +                    raise ApiError(409, "legacy_request_unverifiable", "旧请求缺少内容摘要；请查询原任务，勿直接重试")
-+                if prior["client_request_hash"] != request_digest:
++                if fingerprint["request_hash"] != request_digest:
 +                    raise ApiError(409, "idempotency_conflict", "请求编号已绑定其他任务内容")
-                 return self.job_json(prior)
-         self.tick()
-         if not self.scheduler_available() or not self.admission_available():
-@@ -733,9 +750,9 @@
-         if app_id:
-             app = self.store.db.execute("SELECT * FROM applications WHERE id=? AND owner_uid=?", (str(app_id), uid)).fetchone()
-             if app and app["bound_job_id"]:
+@@ -736,3 +755,3 @@
 -                prior = self.store.db.execute("SELECT * FROM jobs WHERE id=?", (app["bound_job_id"],)).fetchone()
 -                if prior:
 -                    return self.job_json(prior)
 +                # A same-ID retry was handled above. A different ID cannot
 +                # reuse an already consumed authorization or claim its job.
 +                raise ApiError(409, "authorization_consumed", "批准已绑定任务；请查询原任务")
-             if not app or app["kind"] != "temporary_job" or app["status"] != "APPROVED" or app["authorization_used"]:
-                 raise ApiError(409, "invalid_temporary_authorization", "批准不存在、未批准或已使用")
-             if not app["expires_at"] or parse_iso(app["expires_at"]) <= dt.datetime.now(dt.timezone.utc):
-@@ -760,7 +777,7 @@
-                 changed = db.execute("UPDATE applications SET authorization_used=1,bound_job_id=?,updated_at=? WHERE id=? AND status='APPROVED' AND authorization_used=0 AND bound_job_id IS NULL", (jid, utc_now(), app_id)).rowcount
-                 if changed != 1:
-                     raise ApiError(409, "authorization_consumed", "批准已被其他请求使用")
--            db.execute("INSERT INTO jobs(id,owner_uid,owner_name,name,state,requested_gpu,requested_cpu,requested_mem_mb,requested_minutes,qos,workdir,env_name,command,output_path,reason_code,reason_text,temporary_application_id,created_at,updated_at,client_request_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (jid, uid, ident["username"], job["name"], "WAITING_QUOTA", job["gpu"], job["cpu"], job["memory_mb"], job["time_minutes"], job["qos"], job["workdir"], job["environment"], job["command"], job["output_path"], "waiting_user_quota", "已入队，等待个人额度与设备资源", app_id, utc_now(), utc_now(), request_id))
-+            db.execute("INSERT INTO jobs(id,owner_uid,owner_name,name,state,requested_gpu,requested_cpu,requested_mem_mb,requested_minutes,qos,workdir,env_name,command,output_path,reason_code,reason_text,temporary_application_id,created_at,updated_at,client_request_id,client_request_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (jid, uid, ident["username"], job["name"], "WAITING_QUOTA", job["gpu"], job["cpu"], job["memory_mb"], job["time_minutes"], job["qos"], job["workdir"], job["environment"], job["command"], job["output_path"], "waiting_user_quota", "已入队，等待个人额度与设备资源", app_id, utc_now(), utc_now(), request_id, request_digest))
-             self.store.audit(uid, ident["username"], "queue", "job", jid, {"temporary_application_id": app_id}, "accepted")
-             db.execute("COMMIT")
-         except Exception:
-@@ -787,7 +804,9 @@
-         return "\n".join(lines) + "\n"
- 
-     def job_json(self, row: sqlite3.Row) -> Dict[str, Any]:
+@@ -763,0 +783,2 @@
++            if request_digest is not None:
++                db.execute("INSERT INTO job_request_fingerprints(job_id,request_hash) VALUES(?,?)", (jid, request_digest))
+@@ -790 +811,3 @@
 -        return {k: row[k] for k in row.keys()}
 +        # Fingerprints are server-internal and should not disclose a
 +        # guessable digest of a user's training command.
 +        return {k: row[k] for k in row.keys() if k != "client_request_hash"}
- 
-     def jobs(self, ident: Dict[str, Any]) -> List[Dict[str, Any]]:
-         self.tick()
