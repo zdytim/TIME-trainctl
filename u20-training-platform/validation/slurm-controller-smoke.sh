@@ -4,7 +4,7 @@ set -eu
 test "${TIME_ISOLATED_VALIDATION:-}" = 1
 test -f /.dockerenv
 base=/tmp/time-isolated
-prefix=/opt/time/slurm19-2f57b3225733
+prefix=${TIME_VALIDATION_PREFIX:-/opt/time/slurm19-2f57b3225733}
 mkdir -p "$base/state" "$base/spool" "$base/log" /run/munge
 chmod 700 "$base" "$base/state" "$base/spool" /run/munge
 dd if=/dev/urandom of="$base/munge.key" bs=1024 count=1 status=none

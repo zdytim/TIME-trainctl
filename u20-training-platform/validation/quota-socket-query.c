@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 int main(void)
 {
@@ -12,6 +13,10 @@ int main(void)
     char buf[1024];
     ssize_t count;
     int fd;
+    unsigned long long fields[17];
+    char *cursor, *end;
+    time_t local_time;
+    struct tm civil;
     if (access("/.dockerenv", F_OK) || !getenv("TIME_ISOLATED_VALIDATION") ||
         strcmp(getenv("TIME_ISOLATED_VALIDATION"), "1")) return 2;
     addr.sun_family = AF_UNIX;
@@ -26,5 +31,18 @@ int main(void)
     buf[count] = '\0';
     fputs(buf, stdout);
     close(fd);
-    return strncmp(buf, "OK ", 3) != 0;
+    if (strncmp(buf, "OK ", 3)) return 1;
+    cursor = buf + 3;
+    for (int i = 0; i < 17; i++) {
+        fields[i] = strtoull(cursor, &end, 10);
+        if (end == cursor || (*end != ' ' && *end != '\n')) return 1;
+        cursor = end + 1;
+    }
+    local_time = (time_t)fields[14] + 8 * 60 * 60;
+    if (!gmtime_r(&local_time, &civil)) return 1;
+    if (fields[0] != (unsigned long long)((civil.tm_year + 1900) * 100 + civil.tm_mon + 1)) {
+        fprintf(stderr, "quota month does not match snapshot timestamp\n");
+        return 1;
+    }
+    return 0;
 }
