@@ -19,6 +19,7 @@ import re
 import shlex
 import socket
 import stat
+import struct
 import tempfile
 import time
 import uuid
@@ -417,6 +418,18 @@ class BrokerClient(object):
         sent = False
         try:
             sock.connect(self.socket_path)
+            # Authenticate the connected process before sending any request.
+            # The supported broker runs as root on Linux; a socket path alone
+            # does not prove that the listener is the expected service.
+            if not hasattr(socket, "SO_PEERCRED"):
+                raise ServiceUnavailable("cannot authenticate the local broker peer")
+            try:
+                pid, uid, _gid = struct.unpack("3i", sock.getsockopt(
+                    socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+            except (OSError, struct.error) as exc:
+                raise ServiceUnavailable("cannot authenticate the local broker peer", details=str(exc)) from exc
+            if uid != 0 or pid <= 0:
+                raise ServiceUnavailable("local broker peer is not the root service")
             sock.sendall(encoded)
             sent = True
             chunks = []
