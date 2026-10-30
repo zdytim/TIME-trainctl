@@ -215,6 +215,16 @@ class RequestLedger(object):
 
     def _ensure_directory(self):
         self._assert_no_symlink_components(self.directory)
+        # Persist newly created directory entries as well as the ledger itself.
+        # In particular, fsyncing only the leaf directory does not make a new
+        # parent entry durable across a crash.
+        missing = []
+        parent = pathlib.Path(os.path.abspath(str(self.directory)))
+        while not os.path.lexists(str(parent)):
+            missing.append(parent)
+            if parent.parent == parent:
+                break
+            parent = parent.parent
         if self.directory.exists() or self.directory.is_symlink():
             directory_stat = os.lstat(str(self.directory))
             if not stat.S_ISDIR(directory_stat.st_mode) or stat.S_ISLNK(directory_stat.st_mode):
@@ -232,6 +242,17 @@ class RequestLedger(object):
             raise TimeError("request_ledger_unsecure",
                             "local request state directory is not user-owned")
         os.chmod(str(self.directory), 0o700)
+        for created in reversed(missing):
+            self._sync_directory(created.parent)
+
+    @staticmethod
+    def _sync_directory(path):
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(path), flags)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     def _read_unlocked(self):
         fd = None
@@ -275,6 +296,7 @@ class RequestLedger(object):
                 os.fsync(stream.fileno())
             os.replace(temporary, str(self.path))
             self._check_owned_regular(self.path, 0o600, "request ledger")
+            self._sync_directory(self.directory)
         finally:
             try:
                 os.unlink(temporary)
