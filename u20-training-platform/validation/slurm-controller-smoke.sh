@@ -64,7 +64,7 @@ if test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8;
         *) exit 2 ;;
     esac
 fi
-if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8; then
+if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8 || test "${TIME_EXHAUSTED_TEST:-0}" = 9; then
     if test "$gpu_count" = 4; then
         touch "$base/fakegpu0" "$base/fakegpu1" "$base/fakegpu2" "$base/fakegpu3"
         printf 'NodeName=time-test Name=gpu File=%s/fakegpu[0-3]\n' "$base" > "$base/gres.conf"
@@ -174,7 +174,25 @@ for _ in $(seq 1 50); do
                     cat "$base/state/monthly-quota.wal"
                     exit 1
                 fi
-                if test "$TIME_EXHAUSTED_TEST" = 4; then
+                if test "$TIME_EXHAUSTED_TEST" = 9; then
+                    sleep 2
+                    /validation/quota-socket-query root-active
+                    scontrol shutdown
+                    wait "$controller_pid" 2>/dev/null || true
+                    test ! -e "$base/state/time-quota.sock"
+                    timeout 45 slurmctld -D -v -f "$SLURM_CONF" > "$base/log/controller-restart.out" 2>&1 &
+                    controller_pid=$!
+                    ready=0
+                    for _ in $(seq 1 80); do
+                        if scontrol ping > "$base/log/ping-restart.out" 2>&1 &&
+                           grep -Eq '^Slurmctld\(primary\) at .* is UP' "$base/log/ping-restart.out"; then ready=1; break; fi
+                        sleep .1
+                    done
+                    if test "$ready" != 1; then cat "$base/log/controller-restart.out"; exit 1; fi
+                    /validation/quota-socket-query root-active
+                    scontrol show job "$job" | grep -q 'JobState=RUNNING'
+                    echo 'PASS: running job and accounting survive clean controller restart'
+                elif test "$TIME_EXHAUSTED_TEST" = 4; then
                     sleep 7
                     /validation/quota-socket-query root-active-exhausted
                     scontrol show job "$job" | grep -q 'JobState=RUNNING'
