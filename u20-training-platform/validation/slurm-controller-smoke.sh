@@ -225,6 +225,9 @@ for _ in $(seq 1 50); do
             grep -q 'JobState=PENDING' "$base/log/approved.out"
             scancel "$job"
             echo 'PASS: root broker identity can submit marked ordinary-user job'
+        elif test "${TIME_EXHAUSTED_TEST:-0}" = 21; then
+            test "$service_user" = slurm
+            TIME_VALIDATION_BROKER_DIR=/broker /opt/py310/bin/python3 /validation/test_broker_console_view.py
         elif test "${TIME_EXHAUSTED_TEST:-0}" = 19; then
             test "$service_user" = slurm
             TIME_VALIDATION_BROKER_DIR=/broker /opt/py310/bin/python3 /validation/test_broker_socket_identity.py
