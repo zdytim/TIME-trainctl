@@ -631,6 +631,12 @@ def feature_capabilities(discovery=None):
             monthly.update(server_state=mode, enforcement_ready=False,
                            accounting=observed_monthly.get("accounting", "unknown"),
                            reason="server reports the monthly gate is not enabled")
+    elif (isinstance(observed_monthly, dict) and
+          observed_monthly.get("enforcement_ready") is True and
+          observed_monthly.get("mode") == "enforcing"):
+        monthly.update(server_state="enforcing", enforcement_ready=True,
+                       accounting=observed_monthly.get("accounting", "unknown"),
+                       reason="server reports the verified monthly gate is active")
     return {
         "source": "reviewed_snapshot_plus_runtime_discovery",
         "server_discovery": discovery,

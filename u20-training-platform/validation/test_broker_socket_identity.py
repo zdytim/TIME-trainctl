@@ -123,6 +123,9 @@ with tempfile.TemporaryDirectory(prefix='time-socket-', dir='/tmp') as tmp:
                 raise AssertionError((proc.returncode, proc.stdout, proc.stderr))
             assert proc.returncode == 0 and output.get('ok'), (proc.returncode, output, proc.stderr)
             return output
+        capabilities = cli(1001, user_state, 'capabilities')
+        assert capabilities['data']['monthly_quota']['server_state'] == 'enforcing'
+        assert capabilities['data']['monthly_quota']['enforcement_ready'] is True
         created = cli(1001, user_state, 'request', 'create', '--kind', 'monthly_gpu_hours',
                       '--reason', 'Need another GPU training allocation', '--gpu-hours', '3',
                       '--month', str(month), '--client-request-id', 'socket-cli-request-1', '--yes')
