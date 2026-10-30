@@ -43,24 +43,39 @@ def validate(raw):
     return req
 
 
+def write_all(fd, data):
+    view = memoryview(data)
+    while view:
+        count = os.write(fd, view)
+        if count <= 0:
+            raise OSError("terminal output was incomplete")
+        view = view[count:]
+
+
 def ask(tty, request):
     # ASCII JSON escapes terminal control characters and visual direction marks.
+    # A unique challenge prevents a late answer approving the next request.
     display = json.dumps(request["action"], ensure_ascii=True, sort_keys=True, indent=2)
+    challenge = "YES " + request["request_id"]
     message = ("\nTIME MCP requests permission for this exact action:\n" + display +
-               "\nType YES to approve within 60 seconds; anything else rejects: ")
-    os.write(tty, message.encode("ascii"))
+               "\nType " + challenge + " within 60 seconds to approve: ")
+    write_all(tty, message.encode("ascii"))
     deadline = time.monotonic() + 60
     answer = bytearray()
-    while len(answer) < 32:
+    completed = False
+    while len(answer) < 64:
         remaining = deadline - time.monotonic()
         if remaining <= 0 or not select.select([tty], [], [], remaining)[0]:
             break
         byte = os.read(tty, 1)
-        if not byte or byte in (b"\r", b"\n"):
+        if not byte:
+            break
+        if byte in (b"\r", b"\n"):
+            completed = True
             break
         answer.extend(byte)
-    os.write(tty, b"\n")
-    return bytes(answer) == b"YES"
+    write_all(tty, b"\n")
+    return completed and bytes(answer) == challenge.encode("ascii")
 
 
 def serve(sock, tty):
