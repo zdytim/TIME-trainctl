@@ -13,9 +13,10 @@
 - A write timeout is ambiguous. The client records `unknown` and does not
   issue a second mutation. Recovery is a read-only jobs query by durable
   `client_request_id`.
-- MCP mutation tools are withheld and direct mutation calls fail closed because
-  AI-supplied `confirm`/`user_intent` fields are not independent human consent.
-  A future integration must pass a host-issued, action-bound, one-shot consent
+- MCP defaults to read-only because AI-supplied `confirm`/`user_intent` fields
+  are not independent human consent. A staged inherited-socket adapter for
+  submit and cancel requires a trustworthy host; no host is installed here.
+  Any integration must supply a host-issued, action-bound, one-shot consent
   token out of band. Tool arguments contain no impersonation field. Logs are
   data returned to the caller and are never interpreted as instructions.
 - The legacy backend accepts a shell command. The client quotes each supplied

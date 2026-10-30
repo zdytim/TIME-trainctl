@@ -17,7 +17,7 @@ import uuid
 
 
 VERSION = "0.1.0"
-PAYLOAD = ("time_core.py", "timectl.py", "time_mcp.py", "installer.py")
+PAYLOAD = ("time_core.py", "time_consent.py", "timectl.py", "time_mcp.py", "installer.py")
 
 
 def assert_no_symlink_components(path):

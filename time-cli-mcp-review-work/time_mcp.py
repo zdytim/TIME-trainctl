@@ -13,7 +13,8 @@ import re
 import sys
 import traceback
 
-from time_core import (BrokerClient, RequestLedger, TimeError,
+from time_consent import ConsentUnavailable, inherited_host_consent
+from time_core import (BrokerClient, RequestLedger, TimeError, UnknownOutcome,
                        discover_server_capabilities,
                        error_envelope, feature_capabilities,
                        job_outcome, normalize_command_job,
@@ -124,10 +125,9 @@ MUTATION_TOOL_NAMES = {
     "time_preview_quota", "time_preview_rules",
 }
 
-# No independent human-consent channel is installed in this artifact. Do not
-# expose AI-supplied confirm/user_intent fields as if they were authorization.
-# Read-only tools remain available; direct calls to mutation names fail closed.
-TOOLS = [tool for tool in TOOLS if tool["name"] not in MUTATION_TOOL_NAMES]
+# Only submit and cancel have a staged host-consent adapter. Other mutation
+# paths remain absent until their own API and consent contracts are ready.
+HOST_CONSENT_TOOLS = {"time_submit_job", "time_cancel_job"}
 
 
 def require_intent(args, expected):
@@ -155,42 +155,55 @@ def job_from_args(args):
 class Server(object):
     def __init__(self):
         self.client = BrokerClient()
-        self.ledger = None
+        self.consent = inherited_host_consent()
+        self.ledger = RequestLedger() if self.consent else None
+
+    def tools(self):
+        allowed = HOST_CONSENT_TOOLS if self.consent else set()
+        return [tool for tool in TOOLS if tool["name"] not in MUTATION_TOOL_NAMES or tool["name"] in allowed]
 
     def read(self, method, path, body=None, timeout=10):
         return self.client.request(method, path, body, timeout=timeout, mutation=False)
 
     def mutate(self, method, path, body, intent, timeout=15, request_id=None):
-        raise TimeError(
-            "feature_not_enabled",
-            "MCP mutations are disabled until a host-provided independent human-consent integration is installed",
-            status=409)
-        # Kept below as a reviewable implementation sketch for the future
-        # consent adapter; this function is fail-closed before any broker call.
+        if not self.consent or not self.ledger:
+            raise TimeError("feature_not_enabled", "host consent channel is unavailable", status=409)
         require_intent(body, intent)
         request_id = request_id or self.ledger.new_id()
         payload = dict(body)
         payload.pop("confirm", None)
         payload.pop("user_intent", None)
+        try:
+            approved = self.consent.authorize(method, path, payload)
+        except ConsentUnavailable as exc:
+            self.consent = None
+            raise TimeError("consent_unavailable", str(exc), status=503)
+        if not approved:
+            raise TimeError("confirmation_declined", "host did not approve this action", status=403)
         self.ledger.reserve(request_id, method, path, payload)
         try:
             result = self.client.request(method, path, payload, timeout=timeout,
                                          mutation=True)
         except TimeError as exc:
-            self.ledger.update(request_id, outcome=exc.outcome,
-                               error=error_envelope(exc))
+            exc.request_id = request_id
+            try:
+                self.ledger.update(request_id, outcome=exc.outcome, error=error_envelope(exc))
+            except (TimeError, OSError):
+                pass
             raise
         outcome = job_outcome(result.get("job"), True) if isinstance(result, dict) and "job" in result else "confirmed"
-        self.ledger.update(request_id, outcome=outcome, result=result)
+        try:
+            self.ledger.update(request_id, outcome=outcome, result=result)
+        except (TimeError, OSError) as exc:
+            error = UnknownOutcome("broker replied but local request state could not be recorded", details=str(exc))
+            error.request_id = request_id
+            raise error
         return result, request_id, outcome
 
     def call(self, name, args):
         args = args if isinstance(args, dict) else {}
-        if name in MUTATION_TOOL_NAMES:
-            raise TimeError(
-                "feature_not_enabled",
-                "MCP mutations are disabled until a host-provided independent human-consent integration is installed",
-                status=409)
+        if name in MUTATION_TOOL_NAMES and (name not in HOST_CONSENT_TOOLS or not self.consent):
+            raise TimeError("feature_not_enabled", "host-authorized mutation is unavailable", status=409)
         if name == "time_identity":
             return response_envelope(True, self.read("GET", "/api/v1/me"))
         if name == "time_state":
@@ -333,13 +346,13 @@ def main():
                 reply(request_id, {"protocolVersion": PROTOCOL_VERSION,
                                    "capabilities": {"tools": {"listChanged": False}},
                                    "serverInfo": {"name": "time-mcp", "version": "0.1.0"},
-                                   "instructions": "User-scoped read-only time tools. Mutations are withheld until independent host consent exists."})
+                                   "instructions": "User-scoped time tools. Mutations require a trusted host consent channel."})
                 continue
             if method == "ping":
                 reply(request_id, {})
                 continue
             if method == "tools/list":
-                reply(request_id, {"tools": TOOLS})
+                reply(request_id, {"tools": server.tools()})
                 continue
             if method == "tools/call":
                 params = request.get("params") or {}
@@ -348,7 +361,7 @@ def main():
                     envelope = server.call(name, params.get("arguments") or {})
                     reply(request_id, tool_result(envelope))
                 except TimeError as exc:
-                    reply(request_id, tool_result(error_envelope(exc)))
+                    reply(request_id, tool_result(error_envelope(exc, request_id=getattr(exc, "request_id", None))))
                 continue
             reply(request_id, error={"code": -32601, "message": "method not found"})
         except (ValueError, TypeError) as exc:

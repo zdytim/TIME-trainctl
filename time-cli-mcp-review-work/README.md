@@ -36,11 +36,12 @@ such as `bash -lc '...'`.
 The MCP server is `time-mcp`. It is a per-user stdio process. Configure the
 host to start it as the login user; do not run one shared root process and do
 not pass a UID as a tool argument. Its stdout is JSON-RPC only and its stderr
-is diagnostic output. The delivered MCP tool list is read-only. Mutation tools
-are intentionally withheld: `confirm` and `user_intent` supplied by an AI
-caller are not independent human authorization. A future host integration must
-provide a one-shot, action-bound consent token out of band before mutations can
-be enabled.
+is diagnostic output. By default the MCP tool list is read-only. A staged
+adapter can expose submit and cancel only when a trusted host passes an inherited
+Unix stream in `TIME_MCP_CONSENT_FD`. That host must show the complete normalized
+request to a human and return a fresh, action-bound decision. The adapter alone
+cannot prove that a same-UID peer is a trustworthy consent UI; no such host is
+delivered or enabled here. Other MCP mutations remain withheld.
 
 CLI mutations require `--yes` in automation and ask for `y/N` confirmation on
 a TTY. A submit request is written to a locked 0700/0600 user-local ledger
