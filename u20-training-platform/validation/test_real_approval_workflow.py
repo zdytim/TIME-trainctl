@@ -80,7 +80,7 @@ with tempfile.TemporaryDirectory(prefix='time-approval-', dir='/tmp') as tmp:
     db_path = pathlib.Path(tmp) / 'state.sqlite3'
     config_path.write_text(json.dumps({
         'state_db': str(db_path), 'training_group': 'timefixture', 'admin_group': 'root',
-        'monthly_controller': {'grant_enabled': True, 'controller_user': 'slurm',
+        'monthly_controller': {'grant_enabled': True, 'read_enabled': True, 'activation_verified': True, 'controller_user': 'slurm',
                                'socket_path': '/tmp/time-isolated/state/time-quota.sock'},
     }))
     prepared = subprocess.run([sys.executable, __file__, 'prepare', str(config_path)],

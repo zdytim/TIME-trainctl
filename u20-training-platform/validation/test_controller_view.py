@@ -19,6 +19,7 @@ def snapshot(seconds, tier, grant=0, fraction=0):
 
 staged = view.snapshot_view(snapshot(0, 'debug'))
 assert staged['month'] == '2026-10' and not staged['enforcement_ready'] and staged['mode'] == 'staged'
+assert staged['state'] == 'observed' and staged['snapshot']['tier'] == 'debug'
 current = view.snapshot_view(snapshot(6 * 3600, 'important'), True)
 assert current['enforcement_ready'] and current['current_tier'] == 'important'
 assert current['tiers'][0]['remaining_gpu_seconds'] == 0
@@ -28,6 +29,7 @@ assert over['remaining_gpu_seconds'] == 0 and over['overage_gpu_seconds'] == 720
 granted = view.snapshot_view(snapshot(607 * 3600, 'normal', grant=3 * 3600, fraction=1), True)
 assert granted['additional_gpu_seconds'] == 10800 and 3599 < granted['remaining_gpu_seconds'] < 3600
 assert not view.unavailable(True)['enforcement_ready'] and not view.unavailable(True)['request_available']
+assert view.unavailable(True)['state'] == 'unknown'
 for bad in (dict(snapshot(0, 'debug'), tier='normal'), dict(snapshot(0, 'debug'), month=202613),
             dict(snapshot(0, 'debug'), capacity=amount(1))):
     try:

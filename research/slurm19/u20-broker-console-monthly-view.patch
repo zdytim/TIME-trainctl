@@ -8,8 +8,30 @@
  from typing import Any, Dict, Iterable, List, Optional, Tuple
  
  
-@@ -1183,21 +1184,23 @@
+@@ -989,6 +990,7 @@
+                 return dict(prior)
+             requested = self.monthly_request(requested)
+             self.monthly_controller_bridge()
++            self.require_monthly_grant_ready(ident["uid"])
+         elif kind == "temporary_job":
+             if not self.config.get("temporary_authorizations", {}).get("enabled", False):
+                 raise ApiError(409, "temporary_authorization_disabled", "临时资源授权尚未开启")
+@@ -1042,6 +1044,7 @@
+         expiry = None
+         if row["kind"] == "monthly_gpu_hours" and action != "reject":
+             self.monthly_controller_bridge()
++            self.require_monthly_grant_ready(row["owner_uid"])
+             adjusted = payload.get("approved", {}) if action == "approve_adjusted" else {}
+             if not isinstance(adjusted, dict) or set(adjusted) - {"gpu_hours"}:
+                 raise ApiError(400, "invalid_approved", "仅允许调整追加 GPU 小时")
+@@ -1181,23 +1184,29 @@
+         except Exception: db.execute("ROLLBACK"); raise
+         if row["target_scope"]=="default": self.default_quota=proposed
          return {"applied":True,"impacts":json_object(row["impacts_json"],[])}
++
++    def require_monthly_grant_ready(self, uid: int) -> None:
++        if self.controller_monthly_snapshot(uid).get("request_available") is not True:
++            raise ApiError(503, "monthly_quota_unavailable", "月度额度追加尚未启用或控制器不可用")
  
      def controller_monthly_snapshot(self, uid: int) -> Dict[str, Any]:
 -        # An absent or unavailable controller is never reported as zero usage.
@@ -41,7 +63,7 @@
  
      def handle(self, uid: int, request: Dict[str, Any]) -> Dict[str, Any]:
          if not isinstance(request, dict): raise ApiError(400,"invalid_request","请求必须是对象")
-@@ -1209,11 +1212,16 @@
+@@ -1209,11 +1218,16 @@
          if method == "GET" and path == "/api/v1/me": return {"identity": ident, "version": VERSION}
          if method == "GET" and path == "/api/v1/capabilities":
              monthly_config = self.config.get("monthly_controller", {})

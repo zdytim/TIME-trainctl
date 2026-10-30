@@ -65,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix='time-socket-', dir='/tmp') as tmp:
     config.write_text(json.dumps({
         'state_db': str(private / 'state.sqlite3'), 'socket_path': endpoint,
         'socket_group': 'timefixture', 'training_group': 'timefixture', 'admin_group': 'root',
-        'monthly_controller': {'grant_enabled': True, 'controller_user': 'slurm',
+        'monthly_controller': {'grant_enabled': True, 'read_enabled': True, 'activation_verified': True, 'controller_user': 'slurm',
                                'socket_path': '/tmp/time-isolated/state/time-quota.sock'},
     }))
     server = subprocess.Popen([sys.executable, __file__, 'server', str(config)],

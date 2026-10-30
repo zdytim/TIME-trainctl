@@ -49,6 +49,14 @@ with tempfile.TemporaryDirectory(prefix='broker-console-view-', dir='/tmp') as t
     service.config['monthly_controller']['activation_verified'] = False
     staged = service.controller_monthly_snapshot(1001)
     assert staged['mode'] == 'staged' and not staged['enforcement_ready'] and not staged['request_available']
+    assert service.handle(1001, request)['application']['id'] == application['id']
+    new_request = json.loads(json.dumps(request))
+    new_request['body']['requested']['client_request_id'] = 'fixture-console-002'
+    try:
+        service.handle(1001, new_request)
+        raise AssertionError('staged controller accepted a new application')
+    except module.ApiError as exc:
+        assert exc.code == 'monthly_quota_unavailable'
     service.config['monthly_controller']['activation_verified'] = True
     service.config['monthly_controller']['socket_path'] = '/tmp/nonexistent-time-controller.sock'
     unknown = service.controller_monthly_snapshot(1001)
