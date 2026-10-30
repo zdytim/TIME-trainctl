@@ -1,0 +1,70 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -882,14 +882,34 @@
+ 	}
+ 
+ 	return -1;
++}
++
++/* The writer's line buffer is 1024 bytes. Bound recovery memory to the same
++ * maximum and reject incomplete, oversized or binary records. */
++static int _read_wal_line(FILE *stream, char *line, size_t size, size_t *length)
++{
++	size_t used = 0;
++	int ch;
++
++	while ((ch = fgetc(stream)) != EOF) {
++		if (ch == '\0' || used >= size - 1)
++			return -1;
++		line[used++] = (char)ch;
++		if (ch == '\n') {
++			line[used] = '\0';
++			*length = used;
++			return 1;
++		}
++	}
++	return (ferror(stream) || used) ? -1 : 0;
+ }
+ 
+ static int _replay_wal(void)
+ {
+ 	FILE *stream;
+-	char *line = NULL;
+-	size_t line_size = 0;
+-	ssize_t line_len;
++	char line[1024];
++	size_t line_len;
++	int read_rc;
+ 	uint64_t seq;
+ 	bool header_seen = false;
+ 	int rc = -1;
+@@ -899,15 +919,12 @@
+ 	stream = fdopen(dup(mq_fd), "r");
+ 	if (!stream)
+ 		return -1;
+-	while ((line_len = getline(&line, &line_size, stream)) >= 0) {
++	while ((read_rc = _read_wal_line(stream, line, sizeof(line), &line_len)) > 0) {
+ 		char *fields[16];
+ 		char *save = line;
+ 		char *field;
+ 		int field_count = 0;
+ 
+-		if (line_len == 0 || line[line_len - 1] != '\n' ||
+-		    memchr(line, '\0', (size_t)line_len))
+-			goto out;
+ 		line[line_len - 1] = '\0';
+ 		if (line_len > 1 && line[line_len - 2] == '\r')
+ 			line[line_len - 2] = '\0';
+@@ -934,11 +951,10 @@
+ 			goto out;
+ 		mq_seq = seq;
+ 	}
+-	if (ferror(stream) || !header_seen)
++	if (read_rc < 0 || !header_seen)
+ 		goto out;
+ 	rc = 0;
+ out:
+-	free(line);
+ 	fclose(stream);
+ 	if (lseek(mq_fd, 0, SEEK_END) < 0)
+ 		return -1;
