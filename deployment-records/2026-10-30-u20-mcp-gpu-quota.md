@@ -1,0 +1,6 @@
+# u20 CLI/MCP GPU and quota candidate
+
+- Source commit `d7e13de`; u20 host `u20-Z790-S-DDR4`, account `u20`; deployed 2026-10-30 10:37 Asia/Shanghai. Changed only the user's `timectl` and `time-mcp` wrappers to point to `~/.local/share/time/candidate-d7e13de/`; no controller, root backend, system service or job modified.
+- Candidate files matched the committed artifact manifest and Python sources passed AST syntax checks. Before changing wrappers, ownership and exact previous contents were verified and backups created at `~/.local/share/time/backup-before-d7e13de/`.
+- Read-only deployment health: `timectl whoami` returned authenticated Unix user `u20`. MCP stdio initialized and listed 10 tools including `time_gpu` and `time_quota`; write tools remain withheld. No training job, test suite or simulated workload ran. New broker fields remain staged only; the current u20 broker is legacy and may omit `usage` and monthly information.
+- Rollback: verify wrappers still point to this candidate, then restore the exact two files in the backup directory. Rollback not needed and not exercised; retain candidate and state. Strict monthly controller remains uninstalled and disabled, and end-to-end write behavior remains unverified.
