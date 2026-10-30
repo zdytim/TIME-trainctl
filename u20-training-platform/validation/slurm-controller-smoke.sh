@@ -56,14 +56,14 @@ else
     printf 'U20MQ1|HEADER|1\n' > "$base/state/monthly-quota.wal"
     printf 'U20MQ1|CHECKPOINT|0\n' > "$base/state/monthly-quota.checkpoint"
 fi
-if test "${TIME_EXHAUSTED_TEST:-0}" = 7; then
+if test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8; then
     case "${TIME_CORRUPT_KIND:-missing}" in
         missing) rm "$base/state/monthly-quota.checkpoint" ;;
         truncated) printf 'U20MQ1|1|PREPARE' >> "$base/state/monthly-quota.wal" ;;
         *) exit 2 ;;
     esac
 fi
-if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7; then
+if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8; then
     if test "$gpu_count" = 4; then
         touch "$base/fakegpu0" "$base/fakegpu1" "$base/fakegpu2" "$base/fakegpu3"
         printf 'NodeName=time-test Name=gpu File=%s/fakegpu[0-3]\n' "$base" > "$base/gres.conf"
@@ -121,7 +121,7 @@ for _ in $(seq 1 50); do
                 /validation/quota-socket-query root
             elif test "$TIME_EXHAUSTED_TEST" = 4; then
                 TIME_EXPECT_TIER=2 /validation/quota-socket-query root-tier
-            elif test "$TIME_EXHAUSTED_TEST" = 7; then
+            elif test "$TIME_EXHAUSTED_TEST" = 7 || test "$TIME_EXHAUSTED_TEST" = 8; then
                 /validation/quota-socket-query root-unavailable
             else
                 /validation/quota-socket-query root-eligible
@@ -136,11 +136,18 @@ for _ in $(seq 1 50); do
             if ! grep -q 'State=IDLE' "$base/log/node.out"; then
                 cat "$base/log/slurmd.out" "$base/log/node.out"; exit 1
             fi
-            job=$(sbatch --parsable --time=00:01:00 --mem=64M --gres="gpu:$request_gpus" --chdir="$base" --output="$base/slurm-%j.out" --wrap='sleep 30')
-            if test "$TIME_EXHAUSTED_TEST" = 7; then sleep 10; else sleep 3; fi
+            if test "$TIME_EXHAUSTED_TEST" = 8; then
+                job=$(sbatch --parsable --time=00:01:00 --mem=64M --chdir="$base" --output="$base/slurm-%j.out" --wrap='sleep 30')
+            else
+                job=$(sbatch --parsable --time=00:01:00 --mem=64M --gres="gpu:$request_gpus" --chdir="$base" --output="$base/slurm-%j.out" --wrap='sleep 30')
+            fi
+            if test "$TIME_EXHAUSTED_TEST" = 7 || test "$TIME_EXHAUSTED_TEST" = 8; then sleep 10; else sleep 3; fi
             scontrol show job "$job" > "$base/log/job.out"
             cat "$base/log/job.out"
-            if test "$TIME_EXHAUSTED_TEST" = 7; then
+            if test "$TIME_EXHAUSTED_TEST" = 8; then
+                grep -q 'JobState=RUNNING' "$base/log/job.out"
+                echo 'PASS: CPU-only job runs alone with a damaged ledger'
+            elif test "$TIME_EXHAUSTED_TEST" = 7; then
                 grep -q 'JobState=PENDING' "$base/log/job.out"
                 grep -Eq 'NodeList=\(null\)' "$base/log/job.out"
                 echo 'OBSERVED: GPU job is pending and unallocated; reason may be stale'
