@@ -1,0 +1,103 @@
+--- a/src/common/gres.c
++++ b/src/common/gres.c
+@@ -13680,6 +13680,54 @@
+ 	return (gres_job_state_t *)gres_state_ptr->gres_data;
+ }
+ 
++/* Inspect plugin identity rather than type_name: gres_get_job_state("gpu")
++ * does not match typed GPU records. Return -1 for unsupported/ambiguous GPU
++ * shapes, 0 for no relevant GRES, 1 for a single untyped GPU record. */
++extern int gres_job_quota_gpu_shape(List gres_list, gres_job_state_t **gpu)
++{
++	ListIterator iter;
++	gres_state_t *entry;
++	int result = 0;
++	uint32_t gpu_id = gres_plugin_build_id("gpu");
++	uint32_t mps_id = gres_plugin_build_id("mps");
++	uint32_t shard_id = gres_plugin_build_id("shard");
++	uint32_t mig_id = gres_plugin_build_id("mig");
++
++	if (!gpu)
++		return -1;
++	*gpu = NULL;
++	if (!gres_list)
++		return 0;
++	slurm_mutex_lock(&gres_context_lock);
++	iter = list_iterator_create(gres_list);
++	while ((entry = list_next(iter))) {
++		gres_job_state_t *data = entry->gres_data;
++		if (!data) {
++			result = -1;
++			break;
++		}
++		if (entry->plugin_id == mps_id || entry->plugin_id == shard_id ||
++		    entry->plugin_id == mig_id) {
++			result = -1;
++			break;
++		}
++		if (entry->plugin_id != gpu_id)
++			continue;
++		if (result || data->type_name ||
++		    (data->gres_name && strcmp(data->gres_name, "gpu"))) {
++			result = -1;
++			break;
++		}
++		*gpu = data;
++		result = 1;
++	}
++	list_iterator_destroy(iter);
++	slurm_mutex_unlock(&gres_context_lock);
++	if (result < 0)
++		*gpu = NULL;
++	return result;
++}
++
+ extern uint32_t gres_get_autodetect_types(void)
+ {
+ 	return autodetect_types;
+--- a/src/common/gres.h
++++ b/src/common/gres.h
+@@ -1310,6 +1310,7 @@
+ 			      enum gres_step_data_type data_type, void *data);
+ 
+ extern gres_job_state_t *gres_get_job_state(List gres_list, char *name);
++extern int gres_job_quota_gpu_shape(List gres_list, gres_job_state_t **gpu);
+ extern gres_step_state_t *gres_get_step_state(List gres_list, char *name);
+ 
+ extern uint32_t gres_get_autodetect_types(void);
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -598,7 +598,7 @@
+ 				  const char **why)
+ {
+ 	gres_job_state_t *gpu_state;
+-	int pos;
++	int pos, shape;
+ 	uint64_t tres_gpu = 0;
+ 
+ 	*gpu_count = 0;
+@@ -621,16 +621,14 @@
+ 		tres_gpu = tres_cnt[pos];
+ 	}
+ 
+-	/* These GRES can consume GPU hardware without an untyped gpu TRES. */
+-	if (gres_get_job_state(job_ptr->gres_list, "mps") ||
+-	    gres_get_job_state(job_ptr->gres_list, "shard") ||
+-	    gres_get_job_state(job_ptr->gres_list, "mig")) {
+-		*why = "non-gpu GPU-like GRES";
+-		return -1;
+-	}
+-
+-	gpu_state = gres_get_job_state(job_ptr->gres_list, "gpu");
+-	if (!gpu_state) {
++	/* Inspect plugin identity, including typed records. The generic lookup
++	 * matches a type name for typed GRES and can miss gpu:MODEL entirely. */
++	shape = gres_job_quota_gpu_shape(job_ptr->gres_list, &gpu_state);
++	if (shape < 0) {
++		*why = "typed, duplicate or GPU-like GRES is unsupported";
++		return -1;
++	}
++	if (!shape) {
+ 		if (tres_gpu) {
+ 			*why = "gpu TRES has no matching GRES state";
+ 			return -1;
