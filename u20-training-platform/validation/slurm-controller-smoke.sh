@@ -143,7 +143,11 @@ if test "${TIME_EXHAUSTED_TEST:-0}" = 12; then
     original_socket=$(stat -c '%d:%i' "$base/state/time-quota.sock")
 fi
 if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8 || test "${TIME_EXHAUSTED_TEST:-0}" = 9 || test "${TIME_EXHAUSTED_TEST:-0}" = 10 || test "${TIME_EXHAUSTED_TEST:-0}" = 13 || test "${TIME_EXHAUSTED_TEST:-0}" = 14 || test "${TIME_EXHAUSTED_TEST:-0}" = 16 || test "${TIME_EXHAUSTED_TEST:-0}" = 17; then
-    if test "$gpu_count" = 4; then
+    if test "${TIME_REAL_GPU_VALIDATION:-0}" = 1; then
+        test "$TIME_EXHAUSTED_TEST" = 17 && test "$gpu_count" = 1 && test "$request_gpus" = 1
+        test -c /dev/nvidia0 && test -c /dev/nvidiactl && test -c /dev/nvidia-uvm
+        printf 'NodeName=time-test Name=gpu File=/dev/nvidia0\n' > "$base/gres.conf"
+    elif test "$gpu_count" = 4; then
         touch "$base/fakegpu0" "$base/fakegpu1" "$base/fakegpu2" "$base/fakegpu3"
         printf 'NodeName=time-test Name=gpu File=%s/fakegpu[0-3]\n' "$base" > "$base/gres.conf"
     else
@@ -313,7 +317,12 @@ for _ in $(seq 1 50); do
                 cat "$base/log/slurmd.out" "$base/log/node.out"; exit 1
             fi
             if test "$TIME_EXHAUSTED_TEST" = 17; then
-                job=$(sbatch --parsable --uid=1001 --gid=1001 --time=00:01:00 --mem=64M --gres="$request_spec" --chdir="$base/out" --output="$base/out/slurm-%j.out" --wrap='id -u; sleep 3')
+                if test "${TIME_REAL_GPU_VALIDATION:-0}" = 1; then
+                    command='set -e; id -u; /opt/py310/bin/python3 /validation/cuda-driver-probe.py; sleep 3'
+                else
+                    command='id -u; sleep 3'
+                fi
+                job=$(sbatch --parsable --uid=1001 --gid=1001 --time=00:01:00 --mem=64M --gres="$request_spec" --chdir="$base/out" --output="$base/out/slurm-%j.out" --wrap="$command")
             elif test "$TIME_EXHAUSTED_TEST" = 8; then
                 job=$(sbatch --parsable --time=00:01:00 --mem=64M --chdir="$base" --output="$base/slurm-%j.out" --wrap='sleep 30')
             else
@@ -375,6 +384,10 @@ for _ in $(seq 1 50); do
                         done
                         if test "$finished" != 1; then cat "$base/log/after-finish.out"; exit 1; fi
                         grep -qx '1001' "$base/out/slurm-$job.out"
+                        if test "${TIME_REAL_GPU_VALIDATION:-0}" = 1; then
+                            grep -q '^CUDA_DRIVER_PROBE_OK .*4090 1048576 bytes$' "$base/out/slurm-$job.out"
+                            echo 'PASS: isolated scheduled user performed real GPU memory round-trip'
+                        fi
                         echo 'PASS: ordinary user command executes and completes after grant'
                     fi
                     echo 'PASS: pending job starts after confirmed broker grant'
