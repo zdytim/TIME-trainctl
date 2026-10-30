@@ -53,7 +53,9 @@ def become_user():
     os.setuid(1001)
 
 with tempfile.TemporaryDirectory(prefix='time-socket-', dir='/tmp') as tmp:
-    os.chmod(tmp, 0o711)
+    # The CLI durably syncs the request ledger's parent directory; allow the
+    # fixture user to open this parent while keeping the database private.
+    os.chmod(tmp, 0o755)
     private = pathlib.Path(tmp) / 'private'
     private.mkdir(mode=0o700)
     # The production client deliberately accepts only this fixed path. /run is
