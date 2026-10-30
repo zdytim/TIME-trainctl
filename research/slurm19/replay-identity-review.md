@@ -1,0 +1,5 @@
+# Allocation identity replay hardening
+
+`replay-identity-fix.patch` follows `3ccd0a9` plus the intervening controller patches. WAL PREPARE replay rejects zero or exhausted generation numbers, non-increasing generation reuse, zero GPU counts and overlapping active entries for the same job ID. New admission fails closed before generation overflow. GPU TRES indexing also rejects an index outside the controller's request array. These checks prevent malformed but syntactically complete records from silently introducing duplicate allocation accounting; an existing incompatible journal requires manual review.
+
+Source audit for u20's 19.05.5 `select/cons_tres`: `select_p_select_nodeinfo_set` invokes `_add_job_to_res`, which invokes `gres_plugin_job_alloc`; the candidate's locked final quota begin precedes that call. Earlier `select_p_job_test` prepares candidate resources and uses `run_now`; its full side effects and all other allocation paths still need validation. This is source evidence only, not proof of runtime isolation, crash recovery or no-allocation behavior. No tests were run and the gate remains disabled.

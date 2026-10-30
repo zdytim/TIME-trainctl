@@ -1,0 +1,41 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -613,8 +613,13 @@
+ 	}
+ 
+ 	pos = _gpu_pos();
+-	if (pos >= 0 && tres_cnt)
++	if (pos >= 0 && tres_cnt) {
++		if (pos >= slurmctld_tres_cnt) {
++			*why = "GPU TRES index outside controller array";
++			return -1;
++		}
+ 		tres_gpu = tres_cnt[pos];
++	}
+ 
+ 	/* These GRES can consume GPU hardware without an untyped gpu TRES. */
+ 	if (gres_get_job_state(job_ptr->gres_list, "mps") ||
+@@ -728,7 +733,9 @@
+ 		    _parse_u64(fields[6], &gpu_count) ||
+ 		    _parse_u64(fields[7], &sec) ||
+ 		    _parse_u32(fields[8], &nsec) || nsec >= MQ_NSEC_PER_SEC ||
+-		    _find_active(job_id, generation))
++		    !generation || generation == UINT64_MAX ||
++		    generation < mq_next_generation || !gpu_count ||
++		    _find_active_job(job_id))
+ 			return -1;
+ 		new_active = xcalloc(1, sizeof(*new_active));
+ 		new_active->job_id = job_id;
+@@ -1327,6 +1334,12 @@
+ 	}
+ 	if (_quota_available(job_ptr->user_id, month, &now, false) <= 0) {
+ 		_set_pending_reason(job_ptr, "monthly capacity exhausted");
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++	if (!mq_next_generation || mq_next_generation == UINT64_MAX) {
++		_mark_unhealthy("allocation generation exhausted");
++		_set_pending_reason(job_ptr, "allocation identity unavailable");
+ 		pthread_mutex_unlock(&mq_lock);
+ 		return -1;
+ 	}
