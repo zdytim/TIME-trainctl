@@ -70,6 +70,10 @@ TOOLS = [
      "inputSchema": obj_schema({})},
     {"name": "time_state", "description": "Read broker-filtered state for this authenticated user.",
      "inputSchema": obj_schema({})},
+    {"name": "time_gpu", "description": "Read GPU inventory and metrics from the authenticated broker state.",
+     "inputSchema": obj_schema({})},
+    {"name": "time_quota", "description": "Read the current user's quota and conservatively reported monthly status.",
+     "inputSchema": obj_schema({})},
     {"name": "time_list_jobs", "description": "List jobs visible to this authenticated user.",
      "inputSchema": obj_schema({})},
     {"name": "time_validate_job", "description": "Validate a command through the broker without queueing it.",
@@ -191,6 +195,18 @@ class Server(object):
             return response_envelope(True, self.read("GET", "/api/v1/me"))
         if name == "time_state":
             return response_envelope(True, self.read("GET", "/api/v1/state"))
+        if name == "time_gpu":
+            state = self.read("GET", "/api/v1/state")
+            return response_envelope(True, {"gpus": state.get("gpus"), "metrics": state.get("metrics")})
+        if name == "time_quota":
+            state = self.read("GET", "/api/v1/state")
+            discovery = discover_server_capabilities(self.client)
+            return response_envelope(True, {
+                "quota": state.get("quota"), "usage": state.get("usage"),
+                "monthly_quota": state.get("monthly_quota", {
+                    "state": "unknown", "enforcement_ready": "unknown",
+                    "reason": "legacy state response has no monthly quota field"}),
+                "monthly_enforcement": feature_capabilities(discovery)["monthly_quota"]})
         if name == "time_list_jobs":
             return response_envelope(True, self.read("GET", "/api/v1/jobs"))
         if name == "time_validate_job":

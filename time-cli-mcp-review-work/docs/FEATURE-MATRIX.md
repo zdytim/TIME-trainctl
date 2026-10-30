@@ -5,7 +5,7 @@
 | Identity | `timectl whoami`, `time_identity` | `GET /api/v1/me` | Identity is the socket peer UID; request fields cannot override it. |
 | Health | `timectl doctor` | `/me`, `/state` | Cannot prove service/systemd health when the broker is unreachable. |
 | Queue/show | CLI and MCP | `GET /api/v1/jobs` | Prefixes must resolve to one job; visibility is broker-controlled. |
-| GPU/quota | CLI state views | `GET /api/v1/state` | GPU telemetry and scheduler health can be unavailable. |
+| GPU/quota | CLI and MCP state views | `GET /api/v1/state` | GPU telemetry and scheduler health can be unavailable; legacy brokers may omit usage. |
 | Log tail | CLI and MCP | `GET /api/v1/jobs/{id}/log` | Existing API is a bounded tail of at most 1 MiB; follow/offset is unavailable. |
 | Validate | `run --dry-run`, `validate`, `time_validate_job` | `POST /api/v1/jobs/validate` | Validation does not reserve resources or prove executable dependencies. |
 | Submit | CLI `run` only | `POST /api/v1/jobs` | MCP mutation withheld; legacy shell contract; ambiguous transport result is unknown. |

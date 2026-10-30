@@ -329,7 +329,7 @@ def handle(args):
             "monthly_quota": state.get("monthly_quota", {
                 "state": "unknown", "enforcement_ready": "unknown",
                 "reason": "legacy state response has no monthly quota field"}),
-            "monthly_enforcement": feature_capabilities()["monthly_quota"],
+            "monthly_enforcement": feature_capabilities(discover_capabilities(client))["monthly_quota"],
         })
     if command == "logs":
         if args.follow:

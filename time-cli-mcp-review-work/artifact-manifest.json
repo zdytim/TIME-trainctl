@@ -28,7 +28,7 @@
     },
     {
       "path": "docs/FEATURE-MATRIX.md",
-      "sha256": "8fdee89c27710c47638b4a301041da7444172c96550d639531347453f216e321",
+      "sha256": "a217f6157ffb0f2a8deb2fe6876b4f81c068858ffbf83382c13c0d409315e7f7",
       "mode": "0o600"
     },
     {
@@ -63,12 +63,12 @@
     },
     {
       "path": "time_mcp.py",
-      "sha256": "16e1b441e144d5b0ab206c91eb6973894a88f437e5153cbb7c6c5c71dc2902d0",
+      "sha256": "f6349adbdaa82d1e98df75c95210f0b7aeffe084d041a21541e5305ca331656b",
       "mode": "0o755"
     },
     {
       "path": "timectl.py",
-      "sha256": "1ca38b030c32e8e591a25386395f48621357e0696a9430f8a91c56b56ebe0bd0",
+      "sha256": "a5120834a9fd918f74cae660fb7e829c3e5eea212edaee84c946c4104c9dfa10",
       "mode": "0o755"
     },
     {
@@ -81,7 +81,7 @@
   "mcp_mutations": "withheld_until_independent_host_consent",
   "monthly_enforcement_claim": false,
   "python_compatibility": "Python 3.8+",
-  "review_status": "capability_discovery_staged_static_only",
+  "review_status": "gpu_quota_tools_staged_static_only",
   "server_files_changed": false,
   "system_install": false,
   "validation": "syntax checks only; no behavioral tests or deployment",
