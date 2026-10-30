@@ -30,6 +30,17 @@ PATCHES = (
     "public-gres-api-fix.patch",
 )
 
+# u20's live configuration requires these plugins.  A successful compiler
+# exit alone does not mean configure found the development dependencies.
+U20_REQUIRED_PLUGINS = (
+    "src/plugins/auth/munge/.libs/auth_munge.so",
+    "src/plugins/cred/munge/.libs/cred_munge.so",
+    "src/plugins/job_submit/lua/.libs/job_submit_lua.so",
+    "src/plugins/sched/backfill/.libs/sched_backfill.so",
+    "src/plugins/select/cons_tres/.libs/select_cons_tres.so",
+    "src/plugins/gres/gpu/.libs/gres_gpu.so",
+)
+
 
 def digest(path):
     value = hashlib.sha256()
@@ -115,6 +126,10 @@ def main():
         with (output / "build.log").open("xb") as log:
             subprocess.run(["nice", "-n", "19", "make", "-j2", "-C", "src"], cwd=str(source),
                            stdout=log, stderr=subprocess.STDOUT, check=True)
+        if args.layout == "u20-release-candidate":
+            missing = [name for name in U20_REQUIRED_PLUGINS if not (source / name).is_file()]
+            if missing:
+                raise ValueError("u20 release build is incomplete; required plugins missing: " + ", ".join(missing))
         binary = source / "src/slurmctld/.libs/slurmctld"
         print("candidate controller SHA-256:", digest(binary), flush=True)
     print("Candidate only; no system installation or quota activation was performed.")
