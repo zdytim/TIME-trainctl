@@ -567,4 +567,5 @@ def feature_capabilities(discovery=None):
             "audit": dict(route("GET /api/v1/audit"), client_support="admin read"),
         },
         "monthly_quota": monthly,
+        "monthly_requests": observed.get("monthly_requests", {"available": "unknown"}) if isinstance(observed, dict) else {"available": "unknown"},
     }

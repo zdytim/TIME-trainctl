@@ -60,3 +60,12 @@ use the same discovery logic and fall back to legacy identity on a 404. Until
 the endpoint is deployed, older brokers remain legacy/unknown. The client
 recognizes only explicit disabled or staged monthly status and does not enable
 monthly operations or claim pre-allocation enforcement.
+
+Staged monthly request support requires a server explicitly advertising the
+`owner-request-id-v1` contract and `available: true`; legacy and disabled
+servers reject the request locally. Example after an independently validated
+server is enabled: `timectl request create --kind monthly_gpu_hours --gpu-hours
+10 --month 202610 --reason "project requires additional capacity" --yes`.
+An administrator can run `timectl admin request reconcile APPLICATION_ID
+--yes` for a previously approved, unconfirmed controller grant. These commands
+are not evidence that monthly enforcement is active.

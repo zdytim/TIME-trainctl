@@ -1,0 +1,14 @@
+--- a/pro6000d-training-api.py
++++ b/pro6000d-training-api.py
+@@ -1197,6 +1197,11 @@
+         payload = request.get("body") or {}
+         if not isinstance(payload,dict): raise ApiError(400,"invalid_body","请求正文必须是对象")
+         if method == "GET" and path == "/api/v1/me": return {"identity": ident, "version": VERSION}
++        if method == "GET" and path == "/api/v1/capabilities":
++            monthly_config = self.config.get("monthly_controller", {})
++            available = isinstance(monthly_config, dict) and monthly_config.get("grant_enabled") is True
++            return {"schema_version": "1.0", "monthly_quota": {"mode": "staged", "enforcement_ready": False, "accounting": "controller_snapshot_if_configured"},
++                    "monthly_requests": {"available": available, "idempotency": "owner-request-id-v1", "reconcile": "application-grant-v1"}}
+         if method == "GET" and path == "/api/v1/state":
+             return {"identity": ident, "hostname": socket.gethostname(), "monthly_quota": self.controller_monthly_snapshot(uid), "jobs": self.jobs(ident), "gpus": self.gpu_inventory(ident), "metrics": self.metrics(ident), "quota": self.quota(uid), "accounts": self.accounts(ident), "default_quota": {**self.default_quota,"concurrent_job_limit":self.default_quota["concurrent_gpu_limit"]}, "temporary_authorizations_enabled": bool(self.config.get("temporary_authorizations", {}).get("enabled", False)), "applications": self.applications(ident), "notifications": self.notifications(ident), "rules": self.qos, "scheduler_available": self.last_reconcile_ok, "scheduler_error": self.scheduler_error, "observed_at": utc_now()}
+         if method == "GET" and path == "/api/v1/jobs": return {"jobs": self.jobs(ident)}

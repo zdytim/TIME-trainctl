@@ -8,7 +8,7 @@
   "files": [
     {
       "path": "README.md",
-      "sha256": "45afc24abf4b42f538464ed54c8a7a58d581d105473147f08d82bde1e1f034ba",
+      "sha256": "1b63c4027dcc08476ec7db736115ad9ce145ed0fb1f3a0abaa8bc4170e1a8dc3",
       "mode": "0o600"
     },
     {
@@ -58,7 +58,7 @@
     },
     {
       "path": "time_core.py",
-      "sha256": "15d8691b46af82392e0958d70c86fffc5f731c1d134d7fc8b17b21f932697ea1",
+      "sha256": "90a0c11296f30c8c379362198b272777d5d1a710fbef166280831cfeaca6d534",
       "mode": "0o755"
     },
     {
@@ -68,7 +68,7 @@
     },
     {
       "path": "timectl.py",
-      "sha256": "a5120834a9fd918f74cae660fb7e829c3e5eea212edaee84c946c4104c9dfa10",
+      "sha256": "6ecc5869bc0d81f5419e5b94ad8758ab5c7ab6c89b7168086082cd8d9415f7af",
       "mode": "0o755"
     },
     {

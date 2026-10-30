@@ -6,6 +6,7 @@ from __future__ import print_function
 import argparse
 import json
 import os
+import re
 import sys
 import time as _time
 
@@ -158,6 +159,9 @@ def build_parser():
     reject.add_argument("application_id")
     reject.add_argument("--reason", required=True)
     reject.add_argument("--yes", action="store_true")
+    reconcile = admin_req_sub.add_parser("reconcile", help="reconcile one pending monthly grant")
+    reconcile.add_argument("application_id")
+    reconcile.add_argument("--yes", action="store_true")
     admin_preview = admin_sub.add_parser("quota-preview")
     admin_preview.add_argument("--scope", choices=("default", "user"), default="user")
     admin_preview.add_argument("--uid", type=int)
@@ -292,6 +296,21 @@ def handle(args):
                     ledger.update(args.request_id, outcome=record["outcome"], result=record["result"])
             except TimeError:
                 pass
+        if (record.get("outcome") in ("pending", "unknown") and
+                record.get("method") == "POST" and record.get("path") == "/api/v1/applications" and
+                record.get("body", {}).get("kind") == "monthly_gpu_hours"):
+            try:
+                body = record["body"]
+                applications = request_read(client, "GET", "/api/v1/applications").get("applications", [])
+                matches = [item for item in applications if item.get("kind") == "monthly_gpu_hours" and
+                           item.get("requested") == body.get("requested") and item.get("reason") == body.get("reason")]
+                if len(matches) == 1:
+                    record = dict(record)
+                    record["outcome"] = "confirmed"
+                    record["result"] = {"application": matches[0]}
+                    ledger.update(args.request_id, outcome="confirmed", result=record["result"])
+            except TimeError:
+                pass
         return response_envelope(True, record, request_id=args.request_id,
                                  outcome=record.get("outcome", "unknown"))
     if command == "whoami":
@@ -368,8 +387,6 @@ def handle(args):
                                       timeout=15)
         return response_envelope(True, data, request_id=request_id, outcome=outcome)
     if command == "request":
-        if args.request_command == "create":
-            raise TimeError("feature_not_supported", "application creation is disabled because the legacy API lacks an idempotency key; inspect existing applications before any manual retry", status=409)
         if args.request_command in (None, "list"):
             return response_envelope(True, {"applications": request_read(client, "GET", "/api/v1/applications").get("applications", [])})
         applications = request_read(client, "GET", "/api/v1/applications").get("applications", [])
@@ -381,37 +398,24 @@ def handle(args):
         if args.request_command == "create":
             mutation_allowed(args)
             if args.kind == "monthly_gpu_hours":
-                raise TimeError("feature_not_enabled", "client refuses monthly requests because no authoritative controller capability was discovered", status=409)
-            if args.kind == "temporary_job":
-                command = strip_command_terminator(args.command_argv)
-                if not command:
-                    raise TimeError("invalid_arguments",
-                                    "temporary_job requests require the complete command after --",
-                                    status=400)
-                requested = normalize_command_job(
-                    command, name=args.name, gpus=args.gpus, cpus=args.cpus,
-                    memory=args.mem, duration=args.duration, qos=args.qos,
-                    workdir=args.workdir, output=args.output,
-                    environment=args.environment)
-            elif args.kind == "quota_change":
-                if any(value is None for value in (args.gpu_limit,
-                                                   args.concurrent_gpu_limit,
-                                                   args.active_job_limit)):
-                    raise TimeError("invalid_arguments",
-                                    "quota_change requires --gpu-limit, --concurrent-gpu-limit, and --active-job-limit",
-                                    status=400)
-                requested = {"gpu_limit": args.gpu_limit,
-                             "concurrent_gpu_limit": args.concurrent_gpu_limit,
-                             "active_job_limit": args.active_job_limit}
-                for key, value in requested.items():
-                    if value < 1 or value > 1024:
-                        raise TimeError("invalid_arguments", "quota values must be 1..1024", status=400)
-                if requested["concurrent_gpu_limit"] > requested["active_job_limit"]:
-                    raise TimeError("invalid_arguments", "concurrent GPU limit cannot exceed active job limit", status=400)
+                discovery = discover_capabilities(client)
+                observed = discovery.get("capabilities", {})
+                capability = observed.get("monthly_requests", {}) if isinstance(observed, dict) else {}
+                if not isinstance(capability, dict) or capability.get("available") is not True or capability.get("idempotency") != "owner-request-id-v1":
+                    raise TimeError("feature_not_enabled", "server has not advertised the idempotent monthly application contract", status=409)
+                try:
+                    month = int(args.month)
+                except (TypeError, ValueError):
+                    raise TimeError("invalid_arguments", "--month must be YYYYMM", status=400)
+                if args.gpu_hours is None or not 1 <= args.gpu_hours <= 100000 or not 197001 <= month <= 999912 or not 1 <= month % 100 <= 12:
+                    raise TimeError("invalid_arguments", "provide --gpu-hours (1..100000) and --month YYYYMM", status=400)
+                request_id = args.client_request_id or ledger.new_id()
+                requested = {"gpu_hours": args.gpu_hours, "month": month, "client_request_id": request_id}
+            elif args.kind in ("temporary_job", "quota_change"):
+                raise TimeError("feature_not_supported", "legacy application creation lacks server idempotency", status=409)
             else:
                 raise TimeError("invalid_arguments", "unsupported application kind", status=400)
             body = {"kind": args.kind, "requested": requested, "reason": args.reason}
-            request_id = ledger.new_id()
             data, outcome = request_write(client, ledger, request_id, "POST",
                                           "/api/v1/applications", body, timeout=15)
             return response_envelope(True, data, request_id=request_id, outcome=outcome)
@@ -422,9 +426,21 @@ def handle(args):
 
 def handle_admin(args, client, ledger):
     if args.admin_command == "request":
-        if args.request_action not in ("approve", "reject"):
-            raise TimeError("invalid_arguments", "admin request requires approve or reject", status=400)
+        if args.request_action not in ("approve", "reject", "reconcile"):
+            raise TimeError("invalid_arguments", "admin request requires approve, reject or reconcile", status=400)
         mutation_allowed(args)
+        if args.request_action == "reconcile":
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", args.application_id):
+                raise TimeError("invalid_arguments", "invalid application ID", status=400)
+            discovery = discover_capabilities(client)
+            observed = discovery.get("capabilities", {})
+            capability = observed.get("monthly_requests", {}) if isinstance(observed, dict) else {}
+            if not isinstance(capability, dict) or capability.get("reconcile") != "application-grant-v1":
+                raise TimeError("feature_not_enabled", "server has not advertised monthly grant reconciliation", status=409)
+            request_id = ledger.new_id()
+            data, outcome = request_write(client, ledger, request_id, "POST",
+                "/api/v1/applications/%s/grant-reconcile" % args.application_id, {}, timeout=15)
+            return response_envelope(True, data, request_id=request_id, outcome=outcome)
         adjusted = bool(getattr(args, "adjusted", False))
         body = {"action": "reject" if args.request_action == "reject" else (
             "approve_adjusted" if adjusted else "approve")}
