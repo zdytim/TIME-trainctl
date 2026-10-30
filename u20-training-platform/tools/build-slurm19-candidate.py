@@ -88,6 +88,8 @@ def main():
     parser.add_argument("--build", action="store_true", help="configure and compile src in the isolated directory")
     parser.add_argument("--layout", choices=("isolated", "u20-release-candidate"), default="isolated",
                         help="u20 layout embeds prospective system paths; never installs or starts it")
+    parser.add_argument("--dependency-root", type=pathlib.Path,
+                        help="optional build-only root containing munge and lua51 include/lib directories")
     args = parser.parse_args()
     if args.layout != "isolated" and not args.build:
         raise ValueError("a non-isolated layout requires --build")
@@ -121,8 +123,21 @@ def main():
         configure = ["./configure", "--prefix=" + prefix,
                      "--sysconfdir=" + sysconfdir,
                      "--localstatedir=" + localstatedir]
+        env = os.environ.copy()
+        if args.dependency_root:
+            deps = args.dependency_root.resolve(strict=True)
+            if any(c.isspace() for c in str(deps)):
+                raise ValueError("dependency root cannot contain whitespace")
+            required = ("munge/include/munge.h", "munge/lib/libmunge.so",
+                        "lua51/include/lua.h", "lua51/lib/liblua5.1.so")
+            if any(not (deps / path).is_file() for path in required):
+                raise ValueError("dependency root is missing required headers or link libraries")
+            configure.extend(["--with-munge=" + str(deps / "munge"), "--without-rpath"])
+            env["lua_CFLAGS"] = "-I" + str(deps / "lua51/include")
+            env["lua_LIBS"] = "-L" + str(deps / "lua51/lib") + " -llua5.1 -lm"
+            print("build-only dependency root:", deps, flush=True)
         with (output / "configure.log").open("xb") as log:
-            subprocess.run(configure, cwd=str(source), stdout=log, stderr=subprocess.STDOUT, check=True)
+            subprocess.run(configure, cwd=str(source), env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
         with (output / "build.log").open("xb") as log:
             subprocess.run(["nice", "-n", "19", "make", "-j2", "-C", "src"], cwd=str(source),
                            stdout=log, stderr=subprocess.STDOUT, check=True)
