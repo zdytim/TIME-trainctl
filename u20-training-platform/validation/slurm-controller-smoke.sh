@@ -7,7 +7,10 @@ base=/tmp/time-isolated
 prefix=${TIME_VALIDATION_PREFIX:-/opt/time/slurm19-2f57b3225733}
 gpu_count=${TIME_FAKE_GPU_COUNT:-1}
 case "$gpu_count" in 1|4) ;; *) echo 'Only 1 or 4 synthetic GPUs supported' >&2; exit 2;; esac
-export TIME_EXPECT_GPUS="$gpu_count"
+request_gpus=${TIME_REQUEST_GPUS:-$gpu_count}
+case "$request_gpus" in 1|4) ;; *) exit 2;; esac
+test "$request_gpus" -le "$gpu_count"
+export TIME_EXPECT_GPUS="$request_gpus"
 mkdir -p "$base/state" "$base/spool" "$base/log" /run/munge
 chmod 700 "$base" "$base/state" "$base/spool" /run/munge
 dd if=/dev/urandom of="$base/munge.key" bs=1024 count=1 status=none
@@ -41,7 +44,7 @@ GresTypes=gpu
 NodeName=time-test CPUs=2 RealMemory=256 State=UNKNOWN Gres=gpu:$gpu_count
 PartitionName=normal Nodes=time-test Default=YES State=UP
 EOF
-if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 3; then
+if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 3 || test "${TIME_EXHAUSTED_TEST:-0}" = 4; then
     now=$(date +%s)
     seeded=${TIME_SEED_GPU_SECONDS:-2178000}
     test "$seeded" -gt 0 && test $((seeded % 4)) -eq 0
@@ -53,7 +56,7 @@ else
     printf 'U20MQ1|HEADER|1\n' > "$base/state/monthly-quota.wal"
     printf 'U20MQ1|CHECKPOINT|0\n' > "$base/state/monthly-quota.checkpoint"
 fi
-if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2; then
+if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4; then
     if test "$gpu_count" = 4; then
         touch "$base/fakegpu0" "$base/fakegpu1" "$base/fakegpu2" "$base/fakegpu3"
         printf 'NodeName=time-test Name=gpu File=%s/fakegpu[0-3]\n' "$base" > "$base/gres.conf"
@@ -82,6 +85,8 @@ for _ in $(seq 1 50); do
         elif test "${TIME_EXHAUSTED_TEST:-0}" != 0; then
             if test "$TIME_EXHAUSTED_TEST" = 1; then
                 /validation/quota-socket-query root
+            elif test "$TIME_EXHAUSTED_TEST" = 4; then
+                TIME_EXPECT_TIER=2 /validation/quota-socket-query root-tier
             else
                 /validation/quota-socket-query root-eligible
             fi
@@ -95,7 +100,7 @@ for _ in $(seq 1 50); do
             if ! grep -q 'State=IDLE' "$base/log/node.out"; then
                 cat "$base/log/slurmd.out" "$base/log/node.out"; exit 1
             fi
-            job=$(sbatch --parsable --time=00:01:00 --gres="gpu:$gpu_count" --chdir="$base" --output="$base/slurm-%j.out" --wrap='sleep 30')
+            job=$(sbatch --parsable --time=00:01:00 --gres="gpu:$request_gpus" --chdir="$base" --output="$base/slurm-%j.out" --wrap='sleep 30')
             sleep 3
             scontrol show job "$job" > "$base/log/job.out"
             cat "$base/log/job.out"
@@ -111,15 +116,29 @@ for _ in $(seq 1 50); do
                     cat "$base/state/monthly-quota.wal"
                     exit 1
                 fi
-                sleep 2
-                first=$(/validation/quota-socket-query root-active)
-                sleep 2
-                second=$(/validation/quota-socket-query root-active)
-                printf '%s\n%s\n' "$first" "$second"
-                printf '%s\n%s\n' "$first" "$second" | awk -v g="$gpu_count" '
-                    NR == 1 { u=$4; un=$5; t=$16; tn=$17; next }
-                    NR == 2 { du=($4-u)*1000000000+($5-un); dt=($16-t)*1000000000+($17-tn);
-                              if (dt <= 0 || du != g*dt) exit 1; print "PASS: GPU-time multiplier " g }'
+                if test "$TIME_EXHAUSTED_TEST" = 4; then
+                    sleep 7
+                    /validation/quota-socket-query root-active-exhausted
+                    scontrol show job "$job" | grep -q 'JobState=RUNNING'
+                    next=$(sbatch --parsable --time=00:01:00 --gres=gpu:1 --chdir="$base" --output="$base/slurm-%j.out" --wrap='sleep 1')
+                    sleep 3
+                    scontrol show job "$next" > "$base/log/next.out"
+                    cat "$base/log/next.out"
+                    grep -q 'JobState=PENDING' "$base/log/next.out"
+                    grep -Eq 'NodeList=\(null\)' "$base/log/next.out"
+                    grep -q 'MonthlyGpuQuota:monthly_capacity_exhausted' "$base/log/next.out"
+                    echo 'PASS: running job continues into overage and new job stays unallocated'
+                else
+                    sleep 2
+                    first=$(/validation/quota-socket-query root-active)
+                    sleep 2
+                    second=$(/validation/quota-socket-query root-active)
+                    printf '%s\n%s\n' "$first" "$second"
+                    printf '%s\n%s\n' "$first" "$second" | awk -v g="$request_gpus" '
+                        NR == 1 { u=$4; un=$5; t=$16; tn=$17; next }
+                        NR == 2 { du=($4-u)*1000000000+($5-un); dt=($16-t)*1000000000+($17-tn);
+                                  if (dt <= 0 || du != g*dt) exit 1; print "PASS: GPU-time multiplier " g }'
+                fi
                 echo 'PASS: eligible synthetic user starts a GPU job'
             fi
             kill "$node_pid" 2>/dev/null || true

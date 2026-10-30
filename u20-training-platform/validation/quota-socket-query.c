@@ -58,6 +58,11 @@ int main(int argc, char **argv)
         (fields[12] != expected_gpus || fields[13] != 1 || fields[2] < 1)) {
         fprintf(stderr, "running allocation or elapsed usage is not accounted for\n"); return 1;
     }
+    if (argc == 2 && !strcmp(argv[1], "root-active-exhausted") &&
+        (fields[1] != 3 || fields[12] != expected_gpus || fields[13] != 1 ||
+         (fields[10] == 0 && fields[11] == 0))) {
+        fprintf(stderr, "running exhausted job or overage is not accounted for\n"); return 1;
+    }
     if (argc == 2 && !strcmp(argv[1], "root-tier")) {
         const char *value = getenv("TIME_EXPECT_TIER");
         if (!value || fields[1] != strtoull(value, NULL, 10)) {
