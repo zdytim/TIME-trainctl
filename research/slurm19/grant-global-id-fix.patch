@@ -1,0 +1,55 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -430,14 +430,12 @@
+ 	return NULL;
+ }
+ 
+-static mq_grant_record_t *_find_grant(uint32_t uid, uint32_t month,
+-					     const char *grant_id)
++static mq_grant_record_t *_find_grant(const char *grant_id)
+ {
+ 	mq_grant_record_t *record;
+ 
+ 	for (record = mq_grants; record; record = record->next) {
+-		if (record->uid == uid && record->month == month &&
+-		    !strcmp(record->grant_id, grant_id))
++		if (!strcmp(record->grant_id, grant_id))
+ 			return record;
+ 	}
+ 	return NULL;
+@@ -450,9 +448,10 @@
+ 	mq_grant_record_t *grant;
+ 	mq_month_record_t *month_record;
+ 
+-	grant = _find_grant(uid, month, grant_id);
++	grant = _find_grant(grant_id);
+ 	if (grant)
+-		return (grant->amount.sec == sec && grant->amount.nsec == nsec &&
++		return (grant->uid == uid && grant->month == month &&
++			grant->amount.sec == sec && grant->amount.nsec == nsec &&
+ 			!strcmp(grant->actor, actor)) ? 0 : -1;
+ 	month_record = _find_month(uid, month, true);
+ 	if (_amount_add(&month_record->grants, sec, nsec))
+@@ -1418,15 +1417,18 @@
+ 	pthread_mutex_lock(&mq_lock);
+ 	if (_token_enabled() && !mq_enabled)
+ 		(void) _ensure_module_locked();
+-	if (!mq_enabled || !mq_healthy || !mq_reconciled || month % 100 < 1 || month % 100 > 12 ||
+-	    month / 100 < 1970 || !gpu_seconds || !_field_safe(grant_id) ||
++	if (!mq_enabled || !mq_healthy || !mq_reconciled ||
++	    (uid_t)uid32 != uid || month % 100 < 1 || month % 100 > 12 ||
++	    month / 100 < 1970 || month / 100 > 9999 ||
++	    !gpu_seconds || !_field_safe(grant_id) ||
+ 	    !_field_safe(actor)) {
+ 		pthread_mutex_unlock(&mq_lock);
+ 		return -1;
+ 	}
+-	existing = _find_grant(uid32, month, grant_id);
++	existing = _find_grant(grant_id);
+ 	if (existing) {
+-		int same = existing->amount.sec == gpu_seconds &&
++		int same = existing->uid == uid32 && existing->month == month &&
++			   existing->amount.sec == gpu_seconds &&
+ 			   existing->amount.nsec == 0 &&
+ 			   !strcmp(existing->actor, actor);
+ 		pthread_mutex_unlock(&mq_lock);
