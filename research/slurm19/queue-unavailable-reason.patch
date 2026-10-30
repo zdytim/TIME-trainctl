@@ -1,0 +1,61 @@
+--- a/src/slurmctld/job_scheduler.c
++++ b/src/slurmctld/job_scheduler.c
+@@ -1958,8 +1958,37 @@
+ 		xfree(uids);
+ 	}
+ 	list_sort(job_queue, sort_job_queue2);
++}
++
++/* Scheduling cannot determine GPU queue order without a current quota
++ * snapshot. Preserve an explicit reason rather than a stale selection result.
++ * Both callers hold the controller job write lock. */
++static void _monthly_quota_mark_unavailable(struct job_record *job_ptr)
++{
++	const char *reason = "MonthlyGpuQuota:quota state or ordering unavailable";
++	if (!job_ptr || !IS_JOB_PENDING(job_ptr) ||
++	    !gres_get_job_state(job_ptr->gres_list, "gpu"))
++		return;
++	if (job_ptr->state_reason == WAIT_ACCOUNT_POLICY && job_ptr->state_desc &&
++	    !strcmp(job_ptr->state_desc, reason))
++		return;
++	job_ptr->state_reason = WAIT_ACCOUNT_POLICY;
++	xfree(job_ptr->state_desc);
++	job_ptr->state_desc = xstrdup(reason);
++	last_job_update = time(NULL);
+ }
+ 
++static void _monthly_quota_queue_unavailable(List queue, job_queue_rec_t *current)
++{
++	ListIterator iter;
++	job_queue_rec_t *rec;
++	_monthly_quota_mark_unavailable(current->job_ptr);
++	iter = list_iterator_create(queue);
++	while ((rec = list_next(iter)))
++		_monthly_quota_mark_unavailable(rec->job_ptr);
++	list_iterator_destroy(iter);
++}
++
+ /* Compare the current candidate and all remaining queued users against one
+  * fresh ledger snapshot. Return 1 if current, 0 if stale, -1 if unavailable.
+  * Unknown ordering stops the pass; allocation has its own independent gate. */
+@@ -1994,8 +2023,10 @@
+ 			return 1;
+ 	}
+ 	count = (size_t)list_count(job_queue) + 1;
+-	if (gettimeofday(&now, NULL) || now.tv_sec < 0)
++	if (gettimeofday(&now, NULL) || now.tv_sec < 0) {
++		_monthly_quota_queue_unavailable(job_queue, current);
+ 		return -1;
++	}
+ 	uids = xcalloc(count, sizeof(*uids));
+ 	tiers = xcalloc(count, sizeof(*tiers));
+ 	uids[0] = current->job_ptr->user_id;
+@@ -2025,6 +2056,8 @@
+ 	}
+ 	list_iterator_destroy(iter);
+ out:
++	if (matches < 0)
++		_monthly_quota_queue_unavailable(job_queue, current);
+ 	xfree(tiers);
+ 	xfree(uids);
+ 	return matches;

@@ -33,6 +33,7 @@ PATCHES = (
     "wal-checkpoint-sha256.patch",
     "root-witness-anchor.patch",
     "preserve-witness-fd.patch",
+    "queue-unavailable-reason.patch",
 )
 
 # u20's live configuration requires these plugins.  A successful compiler

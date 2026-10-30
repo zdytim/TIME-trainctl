@@ -330,7 +330,12 @@ for _ in $(seq 1 50); do
             elif test "$TIME_EXHAUSTED_TEST" = 7; then
                 grep -q 'JobState=PENDING' "$base/log/job.out"
                 grep -Eq 'NodeList=\(null\)' "$base/log/job.out"
-                echo 'OBSERVED: GPU job is pending and unallocated; reason may be stale'
+                if test "${TIME_EXPECT_UNAVAILABLE_REASON:-0}" = 1; then
+                    grep -q 'MonthlyGpuQuota:quota_state_or_ordering_unavailable' "$base/log/job.out"
+                    echo 'PASS: unallocated GPU job reports unavailable quota state'
+                else
+                    echo 'OBSERVED: GPU job is pending and unallocated; reason may be stale'
+                fi
                 cpu=$(sbatch --parsable --time=00:01:00 --mem=64M --chdir="$base" --output="$base/cpu-%j.out" --wrap='sleep 30')
                 sleep 5
                 scontrol show job "$cpu" > "$base/log/cpu.out"
