@@ -1,0 +1,5 @@
+# Staged classification of incomplete successful mutation replies
+
+The candidate broker client accepted a syntactically valid `ok: true` envelope even if its data omitted the expected job or application. CLI and MCP would then classify several mutations as confirmed without evidence of their result. Both clients now use the same classifier: job submissions and cancellations require a job ID and state; application creation, decision and grant reconciliation require an application ID and status. For operations targeting an existing job or application, the returned ID must match the request path. Incomplete or mismatched replies have unknown outcome and retain the local request record for review.
+
+For MCP, an unknown or rejected outcome is also marked as an error in the tool result so hosts are not encouraged to treat an ambiguous response as a successful action. This covers those named routes, not every possible broker mutation or semantic error inside an otherwise plausible response. It is untested staged code; no broker mutation, protocol test or deployment was performed.

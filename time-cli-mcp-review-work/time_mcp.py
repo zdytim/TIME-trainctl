@@ -18,7 +18,7 @@ from timectl import request_status
 from time_core import (BrokerClient, RequestLedger, TimeError, UnknownOutcome,
                        discover_server_capabilities,
                        error_envelope, feature_capabilities,
-                       job_outcome, normalize_command_job,
+                       mutation_result_outcome, normalize_command_job,
                        response_envelope)
 
 
@@ -210,7 +210,7 @@ class Server(object):
             except (TimeError, OSError):
                 pass
             raise
-        outcome = job_outcome(result.get("job"), True) if isinstance(result, dict) and "job" in result else "confirmed"
+        outcome = mutation_result_outcome(method, path, result)
         try:
             self.ledger.update(request_id, outcome=outcome, result=result)
         except (TimeError, OSError) as exc:
@@ -375,9 +375,10 @@ def reply(request_id, result=None, error=None):
 
 def tool_result(envelope):
     text = json.dumps(envelope, ensure_ascii=False, sort_keys=True)
+    outcome = (envelope.get("meta") or {}).get("outcome")
     return {"content": [{"type": "text", "text": text}],
             "structuredContent": envelope,
-            "isError": not envelope.get("ok", False)}
+            "isError": not envelope.get("ok", False) or outcome in ("unknown", "rejected")}
 
 
 def main():

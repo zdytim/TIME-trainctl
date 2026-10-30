@@ -13,7 +13,7 @@ import time as _time
 from time_core import (BrokerClient, RequestLedger, TimeError, UnknownOutcome,
                        discover_server_capabilities,
                        error_envelope, feature_capabilities, format_error,
-                       job_outcome, normalize_command_job, response_envelope,
+                       job_outcome, mutation_result_outcome, normalize_command_job, response_envelope,
                        utc_now)
 
 
@@ -251,9 +251,7 @@ def request_write(client, ledger, request_id, method, path, body, timeout):
             # Preserve the actual server/transport outcome and request ID.
             pass
         raise
-    outcome = "confirmed"
-    if isinstance(data, dict) and "job" in data:
-        outcome = job_outcome(data.get("job"), mutation=True)
+    outcome = mutation_result_outcome(method, path, data)
     try:
         ledger.update(request_id, outcome=outcome, result=data)
     except (TimeError, OSError) as exc:

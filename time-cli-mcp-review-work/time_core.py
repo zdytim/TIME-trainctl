@@ -539,6 +539,29 @@ def job_outcome(job, mutation):
     return "confirmed"
 
 
+def mutation_result_outcome(method, path, data):
+    """Classify known broker mutation results without trusting empty success."""
+    if method.upper() == "POST" and (path == "/api/v1/jobs" or
+            re.fullmatch(r"/api/v1/jobs/[^/]+/cancel", path)):
+        job = data.get("job") if isinstance(data, dict) else None
+        if (not isinstance(job, dict) or not isinstance(job.get("id"), str) or
+                not job["id"] or not isinstance(job.get("state"), str) or not job["state"]):
+            return "unknown"
+        if path != "/api/v1/jobs" and job["id"] != path.split("/")[-2]:
+            return "unknown"
+        return job_outcome(job, mutation=True)
+    if method.upper() == "POST" and (path == "/api/v1/applications" or
+            re.fullmatch(r"/api/v1/applications/[^/]+/(decision|grant-reconcile)", path)):
+        application = data.get("application") if isinstance(data, dict) else None
+        if (not isinstance(application, dict) or not isinstance(application.get("id"), str) or
+                not application["id"] or not isinstance(application.get("status"), str) or
+                not application["status"]):
+            return "unknown"
+        if path != "/api/v1/applications" and application["id"] != path.split("/")[-2]:
+            return "unknown"
+    return "confirmed"
+
+
 def format_error(exc, request_id=None):
     return error_envelope(exc, request_id=request_id)
 
