@@ -431,7 +431,10 @@ class BrokerClient(object):
                 chunks.append(chunk)
                 if b"\n" in chunk:
                     break
-            raw = b"".join(chunks).split(b"\n", 1)[0]
+            frame = b"".join(chunks)
+            if not frame.endswith(b"\n") or frame.count(b"\n") != 1:
+                raise _MalformedResponse("backend response is not one complete newline-delimited frame")
+            raw = frame[:-1]
             if not raw:
                 raise _MalformedResponse("backend returned no response")
             try:
@@ -467,7 +470,9 @@ class BrokerClient(object):
             error = response.get("error") or {}
             if (not isinstance(error, dict) or
                     not isinstance(error.get("code"), str) or
-                    not isinstance(error.get("message"), str)):
+                    not isinstance(error.get("message"), str) or
+                    type(error.get("status")) is not int or
+                    not 400 <= error["status"] <= 599):
                 if mutation:
                     raise UnknownOutcome(
                         "broker returned a malformed rejection envelope; the mutation may still be processing")
