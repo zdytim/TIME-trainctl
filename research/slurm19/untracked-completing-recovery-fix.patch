@@ -1,0 +1,23 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -1582,13 +1582,19 @@
+ 			bad = true;
+ 	}
+ 
+-	/* Every recovered running GPU job must have exactly one ledger record. */
++	/* Every recovered running GPU job must have exactly one ledger record.
++	 * COMPLETING may have already lost its GRES information, so absence
++	 * of a record cannot prove it was CPU-only or not consuming a GPU. */
+ 	iterator = list_iterator_create(jobs);
+ 	while ((job_ptr = (struct job_record *)list_next(iterator))) {
+ 		uint64_t actual_gpu = 0;
+ 		const char *why = NULL;
+ 		int shape;
+ 
++		if (IS_JOB_COMPLETING(job_ptr) && !_find_active_job(job_ptr->job_id)) {
++			bad = true;
++			continue;
++		}
+ 		if (!IS_JOB_RUNNING(job_ptr) && !IS_JOB_SUSPENDED(job_ptr))
+ 			continue;
+ 		shape = _job_gpu_count(job_ptr, job_ptr->tres_alloc_cnt, true,
