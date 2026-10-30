@@ -85,5 +85,5 @@ if __name__ == "__main__":
     try:
         main()
     except (OSError, ValueError) as exc:
-        print("Ledger inspection unavailable; no files were changed: %s" % exc, file=sys.stderr)
+        print("Ledger inspection unavailable; no ledger content was written: %s" % exc, file=sys.stderr)
         sys.exit(1)
