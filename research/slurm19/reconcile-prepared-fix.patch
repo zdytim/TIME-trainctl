@@ -1,0 +1,132 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -1300,20 +1300,11 @@
+ 	return 0;
+ }
+ 
+-static bool _job_has_quota_gpu(struct job_record *job_ptr)
+-{
+-	uint64_t count;
+-	const char *why;
+-
+-	return (_job_gpu_count(job_ptr, job_ptr->tres_alloc_cnt, true,
+-				       &count, &why) > 0);
+-}
+-
+ int monthly_quota_reconcile(List jobs)
+ {
+ 	ListIterator iterator;
+ 	struct job_record *job_ptr;
+-	mq_active_record_t *active, *next_active;
++	mq_active_record_t *active;
+ 	mq_time_t now;
+ 	bool bad = false;
+ 
+@@ -1323,28 +1314,21 @@
+ 		pthread_mutex_unlock(&mq_lock);
+ 		return 0;
+ 	}
+-	if (!mq_healthy || mq_fd < 0 || !jobs || _now(&now) ||
+-	    _settle_all(&now)) {
++	if (!mq_healthy || mq_fd < 0 || !jobs || _now(&now)) {
+ 		_mark_unhealthy("startup/reconfiguration ledger recovery failed");
+ 		pthread_mutex_unlock(&mq_lock);
+ 		return -1;
+ 	}
+ 
+-	/* Resolve PREPARE records only from the authoritative recovered job table. */
+-	for (active = mq_active; active; active = next_active) {
++	/* Validate the entire recovered state before writing any new WAL event. */
++	for (active = mq_active; active; active = active->next) {
+ 		uint64_t actual_gpu = 0;
+ 		const char *why = NULL;
+ 
+-		next_active = active->next;
+ 		job_ptr = find_job_record(active->job_id);
+ 		if (!job_ptr || job_ptr->user_id != active->uid) {
+-			if (active->committed ||
+-			    _append_event("ABORT|%u|%" PRIu64, active->job_id,
+-					  active->generation)) {
+-				bad = true;
+-				continue;
+-			}
+-			_remove_active(active);
++			/* Missing job state does not prove a PREPARE was aborted. */
++			bad = true;
+ 			continue;
+ 		}
+ 		if (!IS_JOB_RUNNING(job_ptr) && !IS_JOB_SUSPENDED(job_ptr) &&
+@@ -1352,22 +1336,12 @@
+ 			bad = true;
+ 			continue;
+ 		}
+-		if (!active->committed) {
+-			if (_append_event("COMMIT|%u|%" PRIu64, active->job_id,
+-					  active->generation)) {
+-				bad = true;
+-				continue;
+-			}
+-			active->committed = true;
+-		}
+-		if (IS_JOB_SUSPENDED(job_ptr)) {
+-			if (_job_gpu_count(job_ptr, NULL, true, &actual_gpu, &why) <= 0 ||
+-			    actual_gpu != active->gpu_count)
++		if (IS_JOB_COMPLETING(job_ptr)) {
++			/* GRES may already be gone; a PREPARE cannot be proven here. */
++			if (!active->committed)
+ 				bad = true;
+ 			continue;
+ 		}
+-		if (IS_JOB_COMPLETING(job_ptr))
+-			continue; /* GRES may already be in Slurm's completion handoff. */
+ 		if (_job_gpu_count(job_ptr, NULL, true, &actual_gpu, &why) <= 0 ||
+ 		    actual_gpu != active->gpu_count)
+ 			bad = true;
+@@ -1376,19 +1350,42 @@
+ 	/* Every recovered running GPU job must have exactly one ledger record. */
+ 	iterator = list_iterator_create(jobs);
+ 	while ((job_ptr = (struct job_record *)list_next(iterator))) {
++		uint64_t actual_gpu = 0;
++		const char *why = NULL;
++		int shape;
++
+ 		if (!IS_JOB_RUNNING(job_ptr) && !IS_JOB_SUSPENDED(job_ptr))
+ 			continue;
+-		if (!_job_has_quota_gpu(job_ptr))
+-			continue;
+-		if (!_find_active_job(job_ptr->job_id))
++		shape = _job_gpu_count(job_ptr, job_ptr->tres_alloc_cnt, true,
++				       &actual_gpu, &why);
++		if (shape < 0 || (shape > 0 && !_find_active_job(job_ptr->job_id)))
+ 			bad = true;
+ 	}
+ 	list_iterator_destroy(iterator);
+ 
+-	if (bad)
++	if (bad) {
+ 		_mark_unhealthy("recovered jobs and ledger do not match");
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++	for (active = mq_active; active; active = active->next) {
++		if (active->committed)
++			continue;
++		if (_append_event("COMMIT|%u|%" PRIu64, active->job_id,
++				  active->generation)) {
++			_mark_unhealthy("recovery COMMIT could not be durably recorded");
++			pthread_mutex_unlock(&mq_lock);
++			return -1;
++		}
++		active->committed = true;
++	}
++	if (_settle_all(&now)) {
++		_mark_unhealthy("recovered allocations could not be durably settled");
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
+ 	pthread_mutex_unlock(&mq_lock);
+-	return bad ? -1 : 0;
++	return 0;
+ }
+ 
+ bool monthly_quota_enabled(void)
