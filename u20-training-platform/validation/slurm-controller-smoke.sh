@@ -98,6 +98,7 @@ if test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8;
         missing) rm "$base/state/monthly-quota.checkpoint" ;;
         truncated) printf 'U20MQ1|1|PREPARE' >> "$base/state/monthly-quota.wal" ;;
         content) sed -i 's/|PREPARE|900000|0|1|4|/|PREPARE|900000|1|1|4|/' "$base/state/monthly-quota.wal" ;;
+        oldformat) ;;
         none) ;;
         *) exit 2 ;;
     esac
