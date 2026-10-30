@@ -49,6 +49,10 @@ GresTypes=gpu
 NodeName=time-test CPUs=2 RealMemory=1024 State=UNKNOWN Gres=$gpu_spec
 PartitionName=normal Nodes=time-test Default=YES State=UP
 EOF
+if test "${TIME_EXHAUSTED_TEST:-0}" = 20; then
+    echo 'JobSubmitPlugins=lua' >> "$SLURM_CONF"
+    cp /validation/job_submit.lua "$base/job_submit.lua"
+fi
 if test "${TIME_EXHAUSTED_TEST:-0}" = 13; then
     now=$(date +%s)
     normal_start=$((now - 94500))
@@ -145,6 +149,23 @@ for _ in $(seq 1 50); do
             test "$(cat "$base/state/time-quota.sock")" = preserve-me
             grep -q 'monthly quota control socket unavailable' "$base/log/controller.out"
             echo 'PASS: unrelated regular file was preserved'
+        elif test "${TIME_EXHAUSTED_TEST:-0}" = 20; then
+            marker=pro6000d-job:0123456789abcdef0123456789abcdef
+            for client in srun salloc; do
+                if runuser -u timefixture -- timeout 8 "$client" --immediate=2 --begin=now+10minutes --gres=gpu:1 --comment="$marker" /bin/true > "$base/log/$client.out" 2>&1; then
+                    echo "FAIL: direct $client was accepted" >&2; exit 1
+                fi
+                if ! grep -q 'Please submit through the Cockpit training platform' "$base/log/$client.out"; then
+                    cat "$base/log/$client.out"; exit 1
+                fi
+                echo "PASS: forged marker rejected by isolated $client"
+            done
+            job=$(sbatch --parsable --uid=1001 --gid=1001 --begin=now+10minutes --gres=gpu:1 --comment="$marker" --wrap='true')
+            scontrol show job "$job" > "$base/log/approved.out"
+            grep -q 'UserId=timefixture(1001)' "$base/log/approved.out"
+            grep -q 'JobState=PENDING' "$base/log/approved.out"
+            scancel "$job"
+            echo 'PASS: root broker identity can submit marked ordinary-user job'
         elif test "${TIME_EXHAUSTED_TEST:-0}" = 19; then
             test "$service_user" = slurm
             TIME_VALIDATION_BROKER_DIR=/broker /opt/py310/bin/python3 /validation/test_broker_socket_identity.py
