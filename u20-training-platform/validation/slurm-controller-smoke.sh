@@ -94,6 +94,8 @@ for _ in $(seq 1 50); do
             else
                 if ! grep -q 'JobState=RUNNING' "$base/log/job.out"; then
                     cat "$base/log/controller.out" "$base/log/slurmd.out"
+                    if test -f "$base/slurm-$job.out"; then cat "$base/slurm-$job.out"; fi
+                    cat "$base/state/monthly-quota.wal"
                     exit 1
                 fi
                 echo 'PASS: eligible synthetic user starts a GPU job'
