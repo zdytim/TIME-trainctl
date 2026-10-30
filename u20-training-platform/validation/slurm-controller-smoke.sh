@@ -237,7 +237,7 @@ for _ in $(seq 1 50); do
         else
             /validation/quota-socket-query
         fi
-        echo 'PASS: isolated controller responds with a fresh ledger'
+        echo 'DONE: isolated controller fixture completed'
         kill "$controller_pid" 2>/dev/null || true
         wait "$controller_pid" 2>/dev/null || true
         exit 0
