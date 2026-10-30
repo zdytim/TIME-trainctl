@@ -78,7 +78,7 @@
     },
     {
       "path": "timectl.py",
-      "sha256": "9c12557265de76cbb81e2e3e5522bbb427c2339de06f91321abb5e49b2a644b9",
+      "sha256": "6bad699a226681ef1811fdf9eac7c4084df316e35350a1b068c542a20fc26f34",
       "mode": "0o755"
     },
     {

@@ -276,6 +276,14 @@ def state_value(client):
     return request_read(client, "GET", "/api/v1/state")
 
 
+def authenticated_uid(client):
+    identity = request_read(client, "GET", "/api/v1/me").get("identity")
+    uid = identity.get("uid") if isinstance(identity, dict) else None
+    if isinstance(uid, bool) or not isinstance(uid, int) or uid < 0:
+        raise TimeError("identity_unavailable", "cannot establish the current request owner", status=503)
+    return uid
+
+
 def handle(args):
     client, ledger = client_and_ledger(args)
     command = args.command
@@ -290,9 +298,11 @@ def handle(args):
         if (record.get("outcome") in ("pending", "unknown") and
                 record.get("method") == "POST" and record.get("path") == "/api/v1/jobs"):
             try:
+                uid = authenticated_uid(client)
                 jobs = command_jobs(client)
                 matches = [job for job in jobs
-                           if job.get("client_request_id") == args.request_id]
+                           if type(job.get("owner_uid")) is int and job.get("owner_uid") == uid and
+                           job.get("client_request_id") == args.request_id]
                 if len(matches) == 1:
                     record = dict(record)
                     record["outcome"] = job_outcome(matches[0], mutation=True)
@@ -305,8 +315,10 @@ def handle(args):
                 record.get("body", {}).get("kind") == "monthly_gpu_hours"):
             try:
                 body = record["body"]
+                uid = authenticated_uid(client)
                 applications = request_read(client, "GET", "/api/v1/applications").get("applications", [])
                 matches = [item for item in applications if item.get("kind") == "monthly_gpu_hours" and
+                           type(item.get("owner_uid")) is int and item.get("owner_uid") == uid and
                            item.get("requested") == body.get("requested") and item.get("reason") == body.get("reason")]
                 if len(matches) == 1:
                     record = dict(record)
