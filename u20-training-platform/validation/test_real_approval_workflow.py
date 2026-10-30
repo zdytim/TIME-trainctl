@@ -71,4 +71,4 @@ with tempfile.TemporaryDirectory(prefix='time-approval-', dir='/tmp') as tmp:
     assert service.store.db.execute('SELECT count(*) FROM audit_log WHERE object_id=?', (aid,)).fetchone()[0] >= 3
     assert service.store.db.execute('SELECT count(*) FROM notifications WHERE recipient_uid=1001').fetchone()[0] >= 1
     service.store.db.close()
-print('PASS: real approval handlers persist and reconcile an adjusted grant across broker restart')
+print('PASS: real approval handlers persist and reconcile an adjusted grant after reopening SQLite')
