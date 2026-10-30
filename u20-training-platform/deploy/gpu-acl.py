@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Apply only this platform's NVIDIA device ACL entries, retaining other access."""
+"""Apply platform NVIDIA device ACL entries and deny unenrolled others."""
 import glob
 import grp
 import json
@@ -20,7 +20,7 @@ def main():
     admin = grp.getgrnam(config.get('admin_group', 'pro6000d-admin'))
     admins = set(admin.gr_mem)
     admins.update(p.pw_name for p in pwd.getpwall() if p.pw_gid == admin.gr_gid)
-    entries = ['g:%s:---' % training, 'g:%s:rw' % runtime]
+    entries = ['g:%s:---' % training, 'g:%s:rw' % runtime, 'o::---']
     entries += ['u:%d:rw' % pwd.getpwnam(name).pw_uid for name in sorted(admins)]
     targets = sys.argv[1:] or glob.glob('/dev/nvidia*') + glob.glob('/dev/nvidia-caps/*')
     for path in targets:
