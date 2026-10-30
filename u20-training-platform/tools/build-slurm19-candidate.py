@@ -43,6 +43,16 @@ U20_REQUIRED_PLUGINS = (
     "src/plugins/proctrack/cgroup/.libs/proctrack_cgroup.so",
     "src/plugins/jobacct_gather/linux/.libs/jobacct_gather_linux.so",
     "src/plugins/accounting_storage/none/.libs/accounting_storage_none.so",
+    "src/plugins/acct_gather_energy/none/.libs/acct_gather_energy_none.so",
+    "src/plugins/ext_sensors/none/.libs/ext_sensors_none.so",
+    "src/plugins/mpi/none/.libs/mpi_none.so",
+    "src/plugins/preempt/none/.libs/preempt_none.so",
+    "src/plugins/priority/basic/.libs/priority_basic.so",
+    "src/plugins/switch/none/.libs/switch_none.so",
+    "src/plugins/topology/none/.libs/topology_none.so",
+    "src/plugins/jobcomp/filetxt/.libs/jobcomp_filetxt.so",
+    "src/plugins/job_container/none/.libs/job_container_none.so",
+    "src/plugins/launch/slurm/.libs/launch_slurm.so",
 )
 
 
