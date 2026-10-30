@@ -1,0 +1,9 @@
+# u20 GPU TRES prerequisite: unresolved
+
+Read-only observation on 2026-10-30: u20 runs Slurm 19.05.5 with `AccountingStorageType=accounting_storage/none`, `GresTypes=gpu`, `SelectType=select/cons_tres` and `SchedulerType=sched/backfill`. `scontrol show config` lists `AccountingStorageTRES = cpu,mem,energy,node,billing,fs/disk,vmem,pages`, with no `gres/gpu`. The node reports `Gres=gpu:1` but its `CfgTRES` also omits GPU. The node was IDLE at observation; this is not a guarantee about later jobs.
+
+The candidate `_job_gpu_count` requires `_gpu_pos()` to find an untyped `gres/gpu` entry in `assoc_mgr_tres_array`, and rejects GPU admission if the position or exact request count is unavailable. Therefore the observed configuration is a serious compatibility blocker: merely enabling the candidate risks leaving all GPU jobs queued. This conclusion is source-and-configuration based; actual runtime behavior is not tested.
+
+The Slurm 19 source documents `AccountingStorageTRES=gres/gpu`, but u20 uses `accounting_storage/none`; its plugin's `acct_storage_p_get_tres` returns NULL. It is not established that adding the config entry alone supplies the candidate's required array and exact counts on this setup. Do not assert that adding the setting alone fixes the problem, enable slurmdbd, alter the production configuration or restart services without a reviewed compatibility and migration path.
+
+Potential approaches need separate design: establish a real supported Slurm accounting/TRES provider and migration, or derive exact GPU requests and allocations from Slurm's GRES selection state with conservative rejection of unsupported forms. The source distinguishes requested GRES fields from `total_gres`, which is allocated state; treating the latter as the requested count before selection would be unsafe. Both paths need isolated behavior validation and protection of existing jobs.
