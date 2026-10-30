@@ -1,0 +1,104 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -977,22 +977,17 @@
+ 	return (_amount_cmp(&capacity, &usage) > 0) ? 1 : 0;
+ }
+ 
+-int monthly_quota_tier_at(uid_t uid, uint64_t sec, uint32_t nsec,
+-			  monthly_quota_tier_t *tier)
++static int _tier_locked(uid_t uid, const mq_time_t *now,
++			monthly_quota_tier_t *tier)
+ {
+-	mq_time_t now;
+ 	mq_amount_t usage, debug_limit, important_limit, normal_limit;
+ 	mq_month_record_t *record;
+ 	uint32_t month;
+ 	int rc = -1;
+ 
+-	if (!tier || nsec >= MQ_NSEC_PER_SEC || (uid_t)(uint32_t)uid != uid)
+-		return -1;
+-	now.sec = sec;
+-	now.nsec = nsec;
+-	pthread_mutex_lock(&mq_lock);
+-	if (!mq_enabled || !mq_healthy || _month_key(&now, &month) ||
+-	    _project_usage((uint32_t)uid, month, &now, &usage))
++	if ((uid_t)(uint32_t)uid != uid ||
++	    _month_key(now, &month) ||
++	    _project_usage((uint32_t)uid, month, now, &usage))
+ 		goto out;
+ 	debug_limit.sec = 5ULL * 60 * 60;
+ 	debug_limit.nsec = 0;
+@@ -1011,10 +1006,47 @@
+ 		*tier = MONTHLY_QUOTA_NORMAL;
+ 	else
+ 		*tier = MONTHLY_QUOTA_EXHAUSTED;
++	rc = 0;
++out:
++	return rc;
++}
++
++/* All output belongs to one locked ledger state and one supplied timestamp.
++ * Failure leaves the caller's output unchanged. It does not reserve GPUs. */
++int monthly_quota_tiers_at(const uid_t *uids, size_t count, uint64_t sec,
++			   uint32_t nsec, monthly_quota_tier_t *tiers)
++{
++	mq_time_t now = { .sec = sec, .nsec = nsec };
++	monthly_quota_tier_t *snapshot;
++	size_t i;
++	int rc = -1;
++
++	if (nsec >= MQ_NSEC_PER_SEC || (count && (!uids || !tiers)) ||
++	    count > SIZE_MAX / sizeof(*snapshot))
++		return -1;
++	snapshot = count ? malloc(count * sizeof(*snapshot)) : NULL;
++	if (count && !snapshot)
++		return -1;
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy)
++		goto out;
++	for (i = 0; i < count; i++) {
++		if (_tier_locked(uids[i], &now, &snapshot[i]))
++			goto out;
++	}
++	if (count)
++		memcpy(tiers, snapshot, count * sizeof(*snapshot));
+ 	rc = 0;
+ out:
+ 	pthread_mutex_unlock(&mq_lock);
++	free(snapshot);
+ 	return rc;
++}
++
++int monthly_quota_tier_at(uid_t uid, uint64_t sec, uint32_t nsec,
++			  monthly_quota_tier_t *tier)
++{
++	return monthly_quota_tiers_at(&uid, 1, sec, nsec, tier);
+ }
+ 
+ static int _check_shape_and_quota(struct job_record *job_ptr,
+--- a/src/slurmctld/monthly_quota.h
++++ b/src/slurmctld/monthly_quota.h
+@@ -10,6 +10,7 @@
+ 
+ #include <stdbool.h>
+ #include <stdint.h>
++#include <stddef.h>
+ #include <sys/types.h>
+ 
+ #include "src/common/list.h"
+@@ -24,8 +25,13 @@
+ 	MONTHLY_QUOTA_EXHAUSTED = 3
+ } monthly_quota_tier_t;
+ 
+-/* Read-only projected tier at an explicit realtime value. Calls are not an
+- * atomic multi-user ledger snapshot. Returns -1 for disabled/unknown state. */
++/* Atomic read-only snapshot at a supplied realtime value. Failure leaves
++ * output unchanged; success does not reserve resources. */
++extern int monthly_quota_tiers_at(const uid_t *uids, size_t count,
++				  uint64_t sec, uint32_t nsec,
++				  monthly_quota_tier_t *tiers);
++
++/* Single-user convenience wrapper. Returns -1 for disabled/unknown state. */
+ extern int monthly_quota_tier_at(uid_t uid, uint64_t sec, uint32_t nsec,
+ 				 monthly_quota_tier_t *tier);
+ 
