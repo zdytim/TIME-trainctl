@@ -1,0 +1,7 @@
+# Staged typed-GPU guard using existing Slurm API
+
+The previous candidate added `gres_job_quota_gpu_shape` to Slurm's shared library, creating a mandatory new library symbol. Slurm 19 already exposes `gres_plugin_job_count`, which enumerates GRES plugin IDs independently of their type names. The staged replacement enumerates IDs through that public function, rejects duplicate GPU records and GPU-like MPS/shard/MIG IDs, then uses the existing untyped lookup only when exactly one GPU ID exists. A typed-only GPU is rejected when the untyped lookup is absent or has a type. Existing selected/allocation bitmap checks are unchanged.
+
+The patch removes the added GRES helper and header declaration, so the candidate controller no longer needs that new symbol. On u20's observed installed library, `gres_plugin_job_count`, `gres_plugin_build_id` and `gres_get_job_state` are exported. This is not proof of ABI compatibility or safe system-library reuse: versions, compiler options, all symbols, plugins and library loading still require review. The public Slurm function assumes non-null internal GRES records; malformed controller state may cause Slurm assertions rather than a graceful quota error. Other unknown GPU aliases remain a configuration boundary.
+
+The candidate is staged and untested; typed and mixed requests, CPU-only jobs, corrupt state, accounting, restart, plugin loading and no-allocation-on-exhaustion need isolated validation. No live library, service or job was changed.

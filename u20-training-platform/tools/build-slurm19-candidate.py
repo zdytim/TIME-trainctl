@@ -27,6 +27,7 @@ PATCHES = (
     "untracked-completing-recovery-fix.patch", "uncommitted-release-fix.patch", "strict-grant-replay-fix.patch",
     "wal-empty-fields-fix.patch", "typed-gpu-admission-fix.patch", "single-node-gres-fallback.patch",
     "gres-device-bitmap-fix.patch", "backfill-exhausted-skip.patch", "wal-bounded-line-fix.patch",
+    "public-gres-api-fix.patch",
 )
 
 
