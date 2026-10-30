@@ -63,12 +63,12 @@
     },
     {
       "path": "time_core.py",
-      "sha256": "866b5bcb4ee0989b6072a184249d9b20074e6e3ae5d4a0c7f9668de1be6791c9",
+      "sha256": "e4a67e5189d877db438a5cf9d2340f35540b0b510ae689d7c56b79c1f69f1be1",
       "mode": "0o755"
     },
     {
       "path": "time_mcp.py",
-      "sha256": "6b3cfc9fc75e6b74450715b58356dc522c1f0e6614b30affb41df6be16d30857",
+      "sha256": "2ab6286b431ab689ca3c6ee775bd01eb92beb65c2d0deecdb61f54a93e0e0e48",
       "mode": "0o755"
     },
     {

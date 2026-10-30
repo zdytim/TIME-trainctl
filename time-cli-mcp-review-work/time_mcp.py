@@ -160,7 +160,15 @@ class Server(object):
     def __init__(self):
         self.client = BrokerClient()
         self.consent = inherited_host_consent()
-        self.ledger = RequestLedger() if self.consent else None
+        self.ledger = None
+        if self.consent:
+            try:
+                self.ledger = RequestLedger()
+            except (TimeError, OSError) as exc:
+                print("time-mcp request state unavailable; starting read-only: %s" % exc,
+                      file=sys.stderr)
+                self.consent.sock.close()
+                self.consent = None
 
     def tools(self):
         allowed = HOST_CONSENT_TOOLS if self.consent else set()

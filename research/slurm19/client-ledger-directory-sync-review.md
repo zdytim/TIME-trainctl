@@ -7,3 +7,5 @@ The candidate now synchronizes directory ancestors even when they already exist,
 Only source inspection and Python AST parsing were performed. No crash simulation, behavioral test, installation, live mutation or service restart was performed. The installed u20 CLI/MCP remains at its previously recorded version.
 
 The committed source at `22d38e3` was exported to `/home/u20/.local/share/time/builds/cli-mcp-22d38e3/time-cli-mcp-review-work`. All 16 listed artifact hashes matched the manifest and all top-level Python files parsed on u20. This is a staged source artifact, not a runtime or durability check and not an installation.
+
+Follow-up source changes convert directory synchronization errors into structured client errors. The staged consent-enabled MCP falls back to read-only when initializing its local request ledger fails, and reports the reason on stderr; it must not expose mutation tools without a usable ledger. Failure after a broker reply remains an unknown outcome. These error paths have not been behavior-tested.

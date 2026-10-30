@@ -244,11 +244,16 @@ class RequestLedger(object):
     @staticmethod
     def _sync_directory(path):
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(str(path), flags)
         try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+            fd = os.open(str(path), flags)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError as exc:
+            raise TimeError("request_ledger_unavailable",
+                            "cannot durably synchronize request state directory",
+                            status=503, details=str(exc)) from exc
 
     def _read_unlocked(self):
         fd = None
