@@ -1,0 +1,106 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -89,6 +89,8 @@
+ static bool mq_initialized;
+ static bool mq_enabled;
+ static bool mq_healthy;
++/* WAL opening alone is not proof it matches restored Slurm jobs. */
++static bool mq_reconciled;
+ static uint64_t mq_seq;
+ static uint64_t mq_next_generation;
+ static char *mq_path;
+@@ -513,6 +515,7 @@
+ 	if (mq_healthy)
+ 		error("monthly quota ledger entering fail-closed state: %s", why);
+ 	mq_healthy = false;
++	mq_reconciled = false;
+ }
+ 
+ static int _settle_active(mq_active_record_t *active, const mq_time_t *to,
+@@ -1028,7 +1031,7 @@
+ 	if (count && !snapshot)
+ 		return -1;
+ 	pthread_mutex_lock(&mq_lock);
+-	if (!mq_enabled || !mq_healthy)
++	if (!mq_enabled || !mq_healthy || !mq_reconciled)
+ 		goto out;
+ 	for (i = 0; i < count; i++) {
+ 		if (_tier_locked(uids[i], &now, &snapshot[i]))
+@@ -1060,6 +1063,7 @@
+ 	uint32_t month;
+ 	int shape_rc, available;
+ 
++	(void) test_only; /* All early checks project running usage without writes. */
+ 	shape_rc = _job_gpu_count(job_ptr, tres_req_cnt, false, &gpu_count, &why);
+ 	if (shape_rc == 0)
+ 		return 0;
+@@ -1076,11 +1080,11 @@
+ 				    "preemption path is not transactionally supported");
+ 		return -1;
+ 	}
+-	if (!mq_healthy) {
++	if (!mq_healthy || !mq_reconciled) {
+ 		_set_pending_reason(job_ptr, "ledger recovering or unavailable");
+ 		return -1;
+ 	}
+-	available = _quota_available(job_ptr->user_id, month, &now, test_only);
++	available = _quota_available(job_ptr->user_id, month, &now, true);
+ 	if (available <= 0) {
+ 		_set_pending_reason(job_ptr,
+ 				    available < 0 ? "ledger arithmetic failure" :
+@@ -1104,6 +1108,7 @@
+ 		mq_initialized = true;
+ 		mq_enabled = false;
+ 		mq_healthy = false;
++		mq_reconciled = false;
+ 		return 0;
+ 	}
+ 
+@@ -1121,8 +1126,10 @@
+ 		}
+ 		opened = true;
+ 	}
+-	if (opened)
++	if (opened) {
+ 		mq_healthy = true;
++		mq_reconciled = false;
++	}
+ 	return 0;
+ }
+ 
+@@ -1173,8 +1180,8 @@
+ 		pthread_mutex_unlock(&mq_lock);
+ 		return why ? -1 : 0;
+ 	}
+-	if (!mq_healthy || _now(&now) || _month_key(&now, &month) ||
+-	    _settle_all(&now)) {
++	if (!mq_healthy || !mq_reconciled || _now(&now) ||
++	    _month_key(&now, &month) || _settle_all(&now)) {
+ 		_set_pending_reason(job_ptr, "ledger recovering or unavailable");
+ 		pthread_mutex_unlock(&mq_lock);
+ 		return -1;
+@@ -1346,7 +1353,7 @@
+ 	pthread_mutex_lock(&mq_lock);
+ 	if (_token_enabled() && !mq_enabled)
+ 		(void) _ensure_module_locked();
+-	if (!mq_enabled || !mq_healthy || month % 100 < 1 || month % 100 > 12 ||
++	if (!mq_enabled || !mq_healthy || !mq_reconciled || month % 100 < 1 || month % 100 > 12 ||
+ 	    month / 100 < 1970 || !gpu_seconds || !_field_safe(grant_id) ||
+ 	    !_field_safe(actor)) {
+ 		pthread_mutex_unlock(&mq_lock);
+@@ -1456,6 +1463,7 @@
+ 		pthread_mutex_unlock(&mq_lock);
+ 		return -1;
+ 	}
++	mq_reconciled = true;
+ 	pthread_mutex_unlock(&mq_lock);
+ 	return 0;
+ }
+@@ -1478,6 +1486,7 @@
+ 	mq_initialized = false;
+ 	mq_enabled = false;
+ 	mq_healthy = false;
++	mq_reconciled = false;
+ 	mq_seq = 0;
+ 	mq_next_generation = 0;
+ 	pthread_mutex_unlock(&mq_lock);
