@@ -1,0 +1,12 @@
+diff --git a/src/slurmctld/monthly_quota.c b/src/slurmctld/monthly_quota.c
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -236,7 +236,7 @@ static void _civil_from_days(int64_t days, int *year, unsigned *month)
+ 	unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+ 	unsigned mp = (5 * doy + 2) / 153;
+ 
+-	y += (mp < 10);
++	y += (mp >= 10);
+ 	*year = y;
+ 	*month = (unsigned)((int)mp + (mp < 10 ? 3 : -9));
+ }
