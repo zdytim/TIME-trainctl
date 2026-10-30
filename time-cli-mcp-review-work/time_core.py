@@ -215,16 +215,6 @@ class RequestLedger(object):
 
     def _ensure_directory(self):
         self._assert_no_symlink_components(self.directory)
-        # Persist newly created directory entries as well as the ledger itself.
-        # In particular, fsyncing only the leaf directory does not make a new
-        # parent entry durable across a crash.
-        missing = []
-        parent = pathlib.Path(os.path.abspath(str(self.directory)))
-        while not os.path.lexists(str(parent)):
-            missing.append(parent)
-            if parent.parent == parent:
-                break
-            parent = parent.parent
         if self.directory.exists() or self.directory.is_symlink():
             directory_stat = os.lstat(str(self.directory))
             if not stat.S_ISDIR(directory_stat.st_mode) or stat.S_ISLNK(directory_stat.st_mode):
@@ -242,8 +232,14 @@ class RequestLedger(object):
             raise TimeError("request_ledger_unsecure",
                             "local request state directory is not user-owned")
         os.chmod(str(self.directory), 0o700)
-        for created in reversed(missing):
-            self._sync_directory(created.parent)
+        # Always sync the ancestry, even on a retry after an earlier fsync
+        # failure: the directories may now exist but not yet be durable.
+        parent = pathlib.Path(os.path.abspath(str(self.directory))).parent
+        while True:
+            self._sync_directory(parent)
+            if parent.parent == parent:
+                break
+            parent = parent.parent
 
     @staticmethod
     def _sync_directory(path):
