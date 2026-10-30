@@ -220,7 +220,15 @@ def discover_capabilities(client):
 
 
 def client_and_ledger(args):
-    return BrokerClient(), RequestLedger(args.state_dir)
+    # Read-only operations must remain available when local durable mutation
+    # state is unavailable. Every operation that may write still needs it.
+    needs_ledger = (
+        args.command in ("request-status", "cancel") or
+        (args.command == "run" and not args.dry_run) or
+        (args.command == "request" and args.request_command == "create") or
+        (args.command == "admin" and args.admin_command not in (None, "audit"))
+    )
+    return BrokerClient(), RequestLedger(args.state_dir) if needs_ledger else None
 
 
 def request_read(client, method, path, body=None, timeout=10):
