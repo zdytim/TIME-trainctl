@@ -40,7 +40,11 @@ systemd-run --quiet --wait --collect --pipe --unit="$positive" --property=Runtim
     /usr/bin/python3 "$probe" "$positive" timzhang allow
 systemd-run --quiet --wait --collect --pipe --unit="$negative" --property=RuntimeMaxSec=15 \
     /usr/bin/python3 "$probe" "$negative" timzhang deny
-after=$(loginctl list-sessions --no-legend | awk '$2 == 1001 { print $1 }' | sort)
+for _ in $(seq 1 25); do
+    after=$(loginctl list-sessions --no-legend | awk '$2 == 1001 { print $1 }' | sort)
+    test "$before" = "$after" && break
+    sleep .2
+done
 if test "$before" != "$after"; then
     echo 'Session set changed; inspect without terminating any user session' >&2
     exit 1
