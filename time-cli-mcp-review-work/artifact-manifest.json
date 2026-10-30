@@ -48,7 +48,7 @@
     },
     {
       "path": "installer.py",
-      "sha256": "6ae535f63102841420037f1c15ed5abb98bd5546492c9cc18458cdde94a35b2d",
+      "sha256": "c64737ea6cba4a710154bf77edc810b559a9c1091632f2f2a3dbc03b7340b034",
       "mode": "0o755"
     },
     {

@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import stat
 import sys
@@ -98,9 +99,9 @@ def wrapper(python_file, action=None, manifest=None):
     if action:
         extra += " " + action
     if manifest:
-        extra += " --manifest " + repr(str(manifest))
+        extra += " --manifest " + shlex.quote(str(manifest))
     return "#!/bin/sh\nexec /usr/bin/env python3 %s%s \"$@\"\n" % (
-        repr(str(python_file)), extra)
+        shlex.quote(str(python_file)), extra)
 
 
 def install(args):
