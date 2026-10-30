@@ -1,0 +1,32 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -691,10 +691,14 @@
+ static int _parse_u64(const char *text, uint64_t *value)
+ {
+ 	char *end = NULL;
++	const unsigned char *cursor;
+ 	unsigned long long parsed;
+ 
+-	if (!text || !text[0] || text[0] == '-')
++	if (!text || !text[0])
+ 		return -1;
++	for (cursor = (const unsigned char *)text; *cursor; cursor++)
++		if (*cursor < '0' || *cursor > '9')
++			return -1;
+ 	errno = 0;
+ 	parsed = strtoull(text, &end, 10);
+ 	if (errno || !end || *end != '\0')
+@@ -818,8 +822,11 @@
+ 	if (!strcmp(event, "GRANT")) {
+ 		if (field_count != 9 || _parse_u32(fields[3], &uid) ||
+ 		    _parse_u32(fields[4], &month) || _parse_u64(fields[5], &sec) ||
+-		    _parse_u32(fields[6], &nsec) || nsec >= MQ_NSEC_PER_SEC ||
+-		    !_field_safe(fields[7]) || !_field_safe(fields[8]))
++		    _parse_u32(fields[6], &nsec) || nsec != 0 || !sec ||
++		    month / 100 < 1970 || month / 100 > 9999 ||
++		    month % 100 < 1 || month % 100 > 12 ||
++		    !_field_safe(fields[7]) || !_field_safe(fields[8]) ||
++		    _find_grant(fields[7]))
+ 			return -1;
+ 		return _add_grant_memory(uid, month, fields[7], sec, nsec, fields[8]);
+ 	}

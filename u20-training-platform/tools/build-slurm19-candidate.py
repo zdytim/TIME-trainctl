@@ -24,7 +24,7 @@ PATCHES = (
     "controller-local-bridge.patch", "controller-local-bridge-io-fix.patch",
     "selector-ambiguous-fix.patch", "replay-identity-fix.patch", "unhealthy-release-fix.patch",
     "grant-scheduler-wakeup.patch", "tier-stale-queue-fix.patch", "quota-denial-timestamps-fix.patch",
-    "untracked-completing-recovery-fix.patch", "uncommitted-release-fix.patch",
+    "untracked-completing-recovery-fix.patch", "uncommitted-release-fix.patch", "strict-grant-replay-fix.patch",
 )
 
 
