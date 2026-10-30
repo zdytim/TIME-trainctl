@@ -1,0 +1,41 @@
+--- a/src/slurmctld/monthly_quota_control.c
++++ b/src/slurmctld/monthly_quota_control.c
+@@ -93,7 +93,13 @@
+ 	}
+ 	unlock_slurmctld(config_lock);
+ 	if (rc) snprintf(reply, sizeof(reply), "ERROR unavailable_or_invalid\n");
+-	(void)send(fd, reply, strlen(reply), MSG_NOSIGNAL);
++	length = 0;
++	while (length < strlen(reply)) {
++		n = send(fd, reply + length, strlen(reply) - length, MSG_NOSIGNAL);
++		if (n < 0 && errno == EINTR) continue;
++		if (n <= 0) break; /* caller must treat an incomplete reply as unknown */
++		length += (size_t)n;
++	}
+ }
+ 
+ static void *serve(void *unused)
+@@ -107,6 +113,7 @@
+ 		if (ready < 0 && errno == EINTR) continue;
+ 		if (ready < 0) break;
+ 		if (fds[1].revents) break;
++		if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) break;
+ 		if (!(fds[0].revents & POLLIN)) continue;
+ 		fd = accept4(listener, NULL, NULL, SOCK_CLOEXEC);
+ 		if (fd >= 0) { handle(fd); close(fd); }
+@@ -155,10 +162,13 @@
+ void monthly_quota_control_stop(void)
+ {
+ 	struct stat sock;
++	ssize_t sent;
+ 	if (!started) return;
+-	(void)write(wakepipe[1], "x", 1);
++	do { sent = write(wakepipe[1], "x", 1); } while (sent < 0 && errno == EINTR);
++	if (sent != 1) { close(wakepipe[1]); wakepipe[1] = -1; }
+ 	pthread_join(thread, NULL);
+-	close(listener); close(wakepipe[0]); close(wakepipe[1]);
++	close(listener); close(wakepipe[0]);
++	if (wakepipe[1] >= 0) close(wakepipe[1]);
+ 	listener = wakepipe[0] = wakepipe[1] = -1;
+ 	if (!lstat(socket_path, &sock) && S_ISSOCK(sock.st_mode) &&
+ 	    sock.st_dev == socket_dev && sock.st_ino == socket_ino && sock.st_uid == geteuid())
