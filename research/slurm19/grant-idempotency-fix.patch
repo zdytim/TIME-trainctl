@@ -1,0 +1,86 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -67,6 +67,8 @@
+ 	uint32_t uid;
+ 	uint32_t month;
+ 	char *grant_id;
++	char *actor;
++	mq_amount_t amount;
+ 	struct mq_grant_record *next;
+ } mq_grant_record_t;
+ 
+@@ -413,13 +415,15 @@
+ 
+ static int _add_grant_memory(uint32_t uid, uint32_t month,
+ 				     const char *grant_id, uint64_t sec,
+-				     uint32_t nsec)
++				     uint32_t nsec, const char *actor)
+ {
+ 	mq_grant_record_t *grant;
+ 	mq_month_record_t *month_record;
+ 
+-	if (_find_grant(uid, month, grant_id))
+-		return 0;
++	grant = _find_grant(uid, month, grant_id);
++	if (grant)
++		return (grant->amount.sec == sec && grant->amount.nsec == nsec &&
++			!strcmp(grant->actor, actor)) ? 0 : -1;
+ 	month_record = _find_month(uid, month, true);
+ 	if (_amount_add(&month_record->grants, sec, nsec))
+ 		return -1;
+@@ -427,6 +431,9 @@
+ 	grant->uid = uid;
+ 	grant->month = month;
+ 	grant->grant_id = xstrdup(grant_id);
++	grant->actor = xstrdup(actor);
++	grant->amount.sec = sec;
++	grant->amount.nsec = nsec;
+ 	grant->next = mq_grants;
+ 	mq_grants = grant;
+ 	return 0;
+@@ -489,6 +496,7 @@
+ 	for (grant = mq_grants; grant; grant = next_grant) {
+ 		next_grant = grant->next;
+ 		xfree(grant->grant_id);
++		xfree(grant->actor);
+ 		xfree(grant);
+ 	}
+ 	for (active = mq_active; active; active = next_active) {
+@@ -777,7 +785,7 @@
+ 		    _parse_u32(fields[6], &nsec) || nsec >= MQ_NSEC_PER_SEC ||
+ 		    !_field_safe(fields[7]) || !_field_safe(fields[8]))
+ 			return -1;
+-		return _add_grant_memory(uid, month, fields[7], sec, nsec);
++		return _add_grant_memory(uid, month, fields[7], sec, nsec, fields[8]);
+ 	}
+ 
+ 	return -1;
+@@ -1261,6 +1269,7 @@
+ 				const char *grant_id, const char *actor)
+ {
+ 	uint32_t uid32 = (uint32_t)uid;
++	mq_grant_record_t *existing;
+ 
+ 	pthread_mutex_lock(&mq_lock);
+ 	if (_token_enabled() && !mq_enabled)
+@@ -1271,13 +1280,17 @@
+ 		pthread_mutex_unlock(&mq_lock);
+ 		return -1;
+ 	}
+-	if (_find_grant(uid32, month, grant_id)) {
++	existing = _find_grant(uid32, month, grant_id);
++	if (existing) {
++		int same = existing->amount.sec == gpu_seconds &&
++			   existing->amount.nsec == 0 &&
++			   !strcmp(existing->actor, actor);
+ 		pthread_mutex_unlock(&mq_lock);
+-		return 0;
++		return same ? 0 : -1;
+ 	}
+ 	if (_append_event("GRANT|%u|%u|%" PRIu64 "|0|%s|%s", uid32,
+ 			  month, gpu_seconds, grant_id, actor) ||
+-	    _add_grant_memory(uid32, month, grant_id, gpu_seconds, 0)) {
++	    _add_grant_memory(uid32, month, grant_id, gpu_seconds, 0, actor)) {
+ 		_mark_unhealthy("GRANT could not be durably applied");
+ 		pthread_mutex_unlock(&mq_lock);
+ 		return -1;
