@@ -44,7 +44,19 @@ GresTypes=gpu
 NodeName=time-test CPUs=2 RealMemory=1024 State=UNKNOWN Gres=gpu:$gpu_count
 PartitionName=normal Nodes=time-test Default=YES State=UP
 EOF
-if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 3 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 5 || test "${TIME_EXHAUSTED_TEST:-0}" = 6; then
+if test "${TIME_EXHAUSTED_TEST:-0}" = 13; then
+    now=$(date +%s)
+    normal_start=$((now - 94500))
+    important_start=$((now - 4500))
+    test "$(date -u -d "@$((now + 28800))" +%Y%m)" = "$(date -u -d "@$((normal_start + 28800))" +%Y%m)"
+    printf 'U20MQ1|HEADER|1\nU20MQ1|1|PREPARE|900000|1003|1|4|%s|0\nU20MQ1|2|COMMIT|900000|1\nU20MQ1|3|RELEASE|900000|1|%s|0\nU20MQ1|4|PREPARE|900001|1002|2|4|%s|0\nU20MQ1|5|COMMIT|900001|2\nU20MQ1|6|RELEASE|900001|2|%s|0\n' "$normal_start" "$now" "$important_start" "$now" > "$base/state/monthly-quota.wal"
+    printf 'U20MQ1|CHECKPOINT|6\n' > "$base/state/monthly-quota.checkpoint"
+    chmod 755 "$base"
+    mkdir "$base/out"
+    chmod 777 "$base/out"
+    touch "$base/out/order"
+    chmod 666 "$base/out/order"
+elif test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 3 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 5 || test "${TIME_EXHAUSTED_TEST:-0}" = 6; then
     now=$(date +%s)
     seeded=${TIME_SEED_GPU_SECONDS:-2178000}
     test "$seeded" -gt 0 && test $((seeded % 4)) -eq 0
@@ -77,7 +89,7 @@ if test "${TIME_EXHAUSTED_TEST:-0}" = 12; then
     test -S "$base/state/time-quota.sock"
     original_socket=$(stat -c '%d:%i' "$base/state/time-quota.sock")
 fi
-if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8 || test "${TIME_EXHAUSTED_TEST:-0}" = 9 || test "${TIME_EXHAUSTED_TEST:-0}" = 10; then
+if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8 || test "${TIME_EXHAUSTED_TEST:-0}" = 9 || test "${TIME_EXHAUSTED_TEST:-0}" = 10 || test "${TIME_EXHAUSTED_TEST:-0}" = 13; then
     if test "$gpu_count" = 4; then
         touch "$base/fakegpu0" "$base/fakegpu1" "$base/fakegpu2" "$base/fakegpu3"
         printf 'NodeName=time-test Name=gpu File=%s/fakegpu[0-3]\n' "$base" > "$base/gres.conf"
@@ -200,7 +212,20 @@ for _ in $(seq 1 50); do
                     cat "$base/state/monthly-quota.wal"
                     exit 1
                 fi
-                if test "$TIME_EXHAUSTED_TEST" = 10; then
+                if test "$TIME_EXHAUSTED_TEST" = 13; then
+                    for pair in 1003:normal 1002:important 1001:debug; do
+                        uid=${pair%:*}; label=${pair#*:}
+                        sbatch --parsable --uid="$uid" --gid="$uid" --time=00:01:00 --mem=64M --gres=gpu:1 --chdir="$base/out" --output="$base/out/$label-%j.out" --wrap="echo $label >> $base/out/order; sleep 2"
+                    done
+                    scancel "$job"
+                    for _ in $(seq 1 35); do
+                        test "$(wc -l < "$base/out/order")" -eq 3 && break
+                        sleep 1
+                    done
+                    cat "$base/out/order"
+                    test "$(cat "$base/out/order")" = "$(printf 'debug\nimportant\nnormal')"
+                    echo 'PASS: debug, important and normal queued jobs start in tier order'
+                elif test "$TIME_EXHAUSTED_TEST" = 10; then
                     sleep 2
                     /validation/quota-socket-query root-active
                     child=$(ps -o pid= --ppid "$controller_pid" | tr -d ' ')
