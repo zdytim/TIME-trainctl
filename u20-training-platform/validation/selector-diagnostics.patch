@@ -1,0 +1,15 @@
+diff --git a/src/slurmctld/monthly_quota.c b/src/slurmctld/monthly_quota.c
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -725,6 +725,12 @@ static int _job_gpu_count(struct job_record *job_ptr, uint64_t *tres_cnt,
+ 			if (!nodes || bit_set_count(nodes) != 1 ||
+ 			    !gpu_state->gres_cnt_node_select || !gpu_state->gres_bit_select ||
+ 			    gpu_state->total_node_cnt != (uint32_t)bit_size(nodes)) {
++				error("validation selector: nodes=%d selected=%d count_array=%d bitmap_array=%d total_nodes=%u bitmap_size=%d test_allocated=%d",
++				      nodes != NULL, nodes ? bit_set_count(nodes) : -1,
++				      gpu_state->gres_cnt_node_select != NULL,
++				      gpu_state->gres_bit_select != NULL, gpu_state->total_node_cnt,
++				      nodes ? bit_size(nodes) : -1, allocated);
+ 				*why = "single-node GPU selection is not provable";
+ 				return -1;
+ 			}

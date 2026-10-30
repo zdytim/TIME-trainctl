@@ -92,7 +92,10 @@ for _ in $(seq 1 50); do
                 grep -q 'MonthlyGpuQuota:monthly_capacity_exhausted' "$base/log/job.out"
                 echo 'PASS: exhausted synthetic user remains pending without a node allocation'
             else
-                grep -q 'JobState=RUNNING' "$base/log/job.out"
+                if ! grep -q 'JobState=RUNNING' "$base/log/job.out"; then
+                    cat "$base/log/controller.out" "$base/log/slurmd.out"
+                    exit 1
+                fi
                 echo 'PASS: eligible synthetic user starts a GPU job'
             fi
             kill "$node_pid" 2>/dev/null || true
