@@ -51,7 +51,10 @@ PartitionName=normal Nodes=time-test Default=YES State=UP
 EOF
 if test "${TIME_EXHAUSTED_TEST:-0}" = 20; then
     echo 'JobSubmitPlugins=lua' >> "$SLURM_CONF"
-    cp /validation/job_submit.lua "$base/job_submit.lua"
+    # The release-layout plugin embeds this config directory. Require a
+    # container-private tmpfs instead of writing a live host configuration.
+    test "$(stat -f -c %T /etc/slurm-llnl)" = tmpfs
+    cp /validation/job_submit.lua /etc/slurm-llnl/job_submit.lua
 fi
 if test "${TIME_EXHAUSTED_TEST:-0}" = 13; then
     now=$(date +%s)
