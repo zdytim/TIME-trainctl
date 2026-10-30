@@ -13,6 +13,7 @@ import tempfile
 import unittest
 
 
+@unittest.skipUnless(os.environ.get("TIME_VALIDATION_SLURM_SOURCE"), "requires isolated Slurm source")
 class CalendarSourceValidation(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

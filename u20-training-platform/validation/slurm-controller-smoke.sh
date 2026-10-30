@@ -60,6 +60,7 @@ if test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8;
     case "${TIME_CORRUPT_KIND:-missing}" in
         missing) rm "$base/state/monthly-quota.checkpoint" ;;
         truncated) printf 'U20MQ1|1|PREPARE' >> "$base/state/monthly-quota.wal" ;;
+        none) ;;
         *) exit 2 ;;
     esac
 fi
@@ -122,7 +123,11 @@ for _ in $(seq 1 50); do
             elif test "$TIME_EXHAUSTED_TEST" = 4; then
                 TIME_EXPECT_TIER=2 /validation/quota-socket-query root-tier
             elif test "$TIME_EXHAUSTED_TEST" = 7 || test "$TIME_EXHAUSTED_TEST" = 8; then
-                /validation/quota-socket-query root-unavailable
+                if test "${TIME_CORRUPT_KIND:-missing}" = none; then
+                    /validation/quota-socket-query root-eligible
+                else
+                    /validation/quota-socket-query root-unavailable
+                fi
             else
                 /validation/quota-socket-query root-eligible
             fi
