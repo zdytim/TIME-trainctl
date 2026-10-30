@@ -61,13 +61,21 @@ if test "${TIME_EXHAUSTED_TEST:-0}" = 13; then
     chmod 777 "$base/out"
     touch "$base/out/order"
     chmod 666 "$base/out/order"
-elif test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 3 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 5 || test "${TIME_EXHAUSTED_TEST:-0}" = 6 || test "${TIME_EXHAUSTED_TEST:-0}" = 16; then
+elif test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 3 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 5 || test "${TIME_EXHAUSTED_TEST:-0}" = 6 || test "${TIME_EXHAUSTED_TEST:-0}" = 16 || test "${TIME_EXHAUSTED_TEST:-0}" = 17; then
     now=$(date +%s)
     seeded=${TIME_SEED_GPU_SECONDS:-2178000}
     test "$seeded" -gt 0 && test $((seeded % 4)) -eq 0
     start=$((now - seeded / 4))
     test "$(date -u -d "@$((now + 28800))" +%Y%m)" = "$(date -u -d "@$((start + 28800))" +%Y%m)"
-    printf 'U20MQ1|HEADER|1\nU20MQ1|1|PREPARE|900000|0|1|4|%s|0\nU20MQ1|2|COMMIT|900000|1\nU20MQ1|3|RELEASE|900000|1|%s|0\n' "$start" "$now" > "$base/state/monthly-quota.wal"
+    seed_uid=0
+    if test "${TIME_EXHAUSTED_TEST:-0}" = 17; then
+        test "$(id -u timefixture)" = 1001
+        seed_uid=1001
+        chmod 755 "$base"
+        mkdir "$base/out"
+        chmod 777 "$base/out"
+    fi
+    printf 'U20MQ1|HEADER|1\nU20MQ1|1|PREPARE|900000|%s|1|4|%s|0\nU20MQ1|2|COMMIT|900000|1\nU20MQ1|3|RELEASE|900000|1|%s|0\n' "$seed_uid" "$start" "$now" > "$base/state/monthly-quota.wal"
     printf 'U20MQ1|CHECKPOINT|3\n' > "$base/state/monthly-quota.checkpoint"
 else
     printf 'U20MQ1|HEADER|1\n' > "$base/state/monthly-quota.wal"
@@ -94,7 +102,7 @@ if test "${TIME_EXHAUSTED_TEST:-0}" = 12; then
     test -S "$base/state/time-quota.sock"
     original_socket=$(stat -c '%d:%i' "$base/state/time-quota.sock")
 fi
-if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8 || test "${TIME_EXHAUSTED_TEST:-0}" = 9 || test "${TIME_EXHAUSTED_TEST:-0}" = 10 || test "${TIME_EXHAUSTED_TEST:-0}" = 13 || test "${TIME_EXHAUSTED_TEST:-0}" = 14 || test "${TIME_EXHAUSTED_TEST:-0}" = 16; then
+if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8 || test "${TIME_EXHAUSTED_TEST:-0}" = 9 || test "${TIME_EXHAUSTED_TEST:-0}" = 10 || test "${TIME_EXHAUSTED_TEST:-0}" = 13 || test "${TIME_EXHAUSTED_TEST:-0}" = 14 || test "${TIME_EXHAUSTED_TEST:-0}" = 16 || test "${TIME_EXHAUSTED_TEST:-0}" = 17; then
     if test "$gpu_count" = 4; then
         touch "$base/fakegpu0" "$base/fakegpu1" "$base/fakegpu2" "$base/fakegpu3"
         printf 'NodeName=time-test Name=gpu File=%s/fakegpu[0-3]\n' "$base" > "$base/gres.conf"
@@ -183,7 +191,9 @@ for _ in $(seq 1 50); do
             /validation/quota-socket-query root-tier
             echo 'PASS: expected monthly tier at seeded usage'
         elif test "${TIME_EXHAUSTED_TEST:-0}" != 0; then
-            if test "$TIME_EXHAUSTED_TEST" = 1 || test "$TIME_EXHAUSTED_TEST" = 16; then
+            if test "$TIME_EXHAUSTED_TEST" = 17; then
+                PYTHONPATH=/broker /opt/py310/bin/python3 -c 'from controller_bridge import ControllerBridge; s=ControllerBridge("/tmp/time-isolated/state/time-quota.sock",64030).snapshot(1001); assert s["tier"] == "exhausted", s'
+            elif test "$TIME_EXHAUSTED_TEST" = 1 || test "$TIME_EXHAUSTED_TEST" = 16; then
                 /validation/quota-socket-query root
             elif test "$TIME_EXHAUSTED_TEST" = 4; then
                 TIME_EXPECT_TIER=2 /validation/quota-socket-query root-tier
@@ -206,7 +216,9 @@ for _ in $(seq 1 50); do
             if ! grep -q 'State=IDLE' "$base/log/node.out"; then
                 cat "$base/log/slurmd.out" "$base/log/node.out"; exit 1
             fi
-            if test "$TIME_EXHAUSTED_TEST" = 8; then
+            if test "$TIME_EXHAUSTED_TEST" = 17; then
+                job=$(sbatch --parsable --uid=1001 --gid=1001 --time=00:01:00 --mem=64M --gres="$request_spec" --chdir="$base/out" --output="$base/out/slurm-%j.out" --wrap='sleep 30')
+            elif test "$TIME_EXHAUSTED_TEST" = 8; then
                 job=$(sbatch --parsable --time=00:01:00 --mem=64M --chdir="$base" --output="$base/slurm-%j.out" --wrap='sleep 30')
             else
                 job=$(sbatch --parsable --time=00:01:00 --mem=64M --gres="$request_spec" --chdir="$base" --output="$base/slurm-%j.out" --wrap='sleep 30')
@@ -234,14 +246,16 @@ for _ in $(seq 1 50); do
                 grep -Eq 'NodeList=\(null\)' "$base/log/cpu.out"
                 test "$(sha256sum "$base/state/monthly-quota.wal" | cut -d' ' -f1)" = "$corrupt_wal_hash"
                 echo 'OBSERVED: mixed queue is conservatively paused; damaged WAL remains unchanged'
-            elif test "$TIME_EXHAUSTED_TEST" = 1 || test "$TIME_EXHAUSTED_TEST" = 16; then
+            elif test "$TIME_EXHAUSTED_TEST" = 1 || test "$TIME_EXHAUSTED_TEST" = 16 || test "$TIME_EXHAUSTED_TEST" = 17; then
                 grep -q 'JobState=PENDING' "$base/log/job.out"
                 grep -Eq 'NodeList=\(null\)' "$base/log/job.out"
                 grep -q 'MonthlyGpuQuota:monthly_capacity_exhausted' "$base/log/job.out"
                 echo 'PASS: exhausted synthetic user remains pending without a node allocation'
-                if test "$TIME_EXHAUSTED_TEST" = 16; then
+                if test "$TIME_EXHAUSTED_TEST" = 16 || test "$TIME_EXHAUSTED_TEST" = 17; then
                     test "$service_user" = slurm
-                    TIME_VALIDATION_BROKER_DIR=/broker TIME_TEST_TARGET_UID=0 /opt/py310/bin/python3 /validation/test_real_controller_outbox.py
+                    target_uid=0
+                    if test "$TIME_EXHAUSTED_TEST" = 17; then target_uid=1001; fi
+                    TIME_VALIDATION_BROKER_DIR=/broker TIME_TEST_TARGET_UID="$target_uid" /opt/py310/bin/python3 /validation/test_real_controller_outbox.py
                     started=0
                     for _ in $(seq 1 100); do
                         scontrol show job "$job" > "$base/log/after-grant.out"
@@ -250,6 +264,7 @@ for _ in $(seq 1 50); do
                     done
                     if test "$started" != 1; then cat "$base/log/after-grant.out" "$base/log/controller.out"; exit 1; fi
                     grep -q 'NodeList=time-test' "$base/log/after-grant.out"
+                    if test "$TIME_EXHAUSTED_TEST" = 17; then grep -q 'UserId=timefixture(1001)' "$base/log/after-grant.out"; fi
                     echo 'PASS: pending job starts after confirmed broker grant'
                 fi
             else
