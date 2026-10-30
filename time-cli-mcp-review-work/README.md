@@ -52,12 +52,13 @@ before sending. A transport timeout or empty, malformed, or oversized broker
 response returns
 `outcome: "unknown"`, exit code 6, and the durable request ID; it is never
 automatically retried. `timectl request-status REQUEST_ID` checks visible jobs
-by the same broker request ID.
+by the same broker request ID, checks monthly applications for the same owner,
+and can revisit a pending cancellation by its job ID. The staged MCP offers
+the same operation as `time_request_status`; neither path resends a mutation.
 
-Temporary approval requests require the complete real job after `--`; quota
-change requests require all three quota limits. Adjusted approvals require a
-non-empty `--approved-json` object. The client refuses fake placeholder jobs
-and empty quota payloads.
+The candidate CLI currently refuses creation of legacy temporary-job and quota
+change requests because those routes do not advertise the required request-ID
+idempotency. Adjusted approvals require a non-empty `--approved-json` object.
 
 The staged backend exposes an additive capability endpoint; both CLI and MCP
 use the same discovery logic and fall back to legacy identity on a 404. Until

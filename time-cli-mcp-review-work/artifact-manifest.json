@@ -8,7 +8,7 @@
   "files": [
     {
       "path": "README.md",
-      "sha256": "0e73e8a0ad88c58457f2e275ba0b41211bc5925baa91bd4fab6de587be13bd15",
+      "sha256": "0bb719ed3db7377587a152cb356793a4c7062fb0a4b9413471aea83ed7fe50ec",
       "mode": "0o600"
     },
     {
@@ -28,7 +28,7 @@
     },
     {
       "path": "docs/FEATURE-MATRIX.md",
-      "sha256": "18d25ad760153539f39db06b661782424d2c686e0cd760c362a994ab2caee68f",
+      "sha256": "537fc3ca6ed866d042260d7a809189bf47f0ed32727fc08fd27b98f50a8f9c33",
       "mode": "0o600"
     },
     {

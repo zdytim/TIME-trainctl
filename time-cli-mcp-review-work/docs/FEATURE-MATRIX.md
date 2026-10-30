@@ -15,7 +15,8 @@ exposes the read-only tool set. The terminal-consent launcher is staged only.
 | Validate | `run --dry-run`, `validate`, `time_validate_job` | `POST /api/v1/jobs/validate` | Validation does not reserve resources or prove executable dependencies. |
 | Submit | CLI `run`; staged MCP `time_submit_job` with host consent | `POST /api/v1/jobs` | Installed u20 MCP is read-only; legacy shell contract; ambiguous transport result is unknown. |
 | Cancel | CLI; staged MCP `time_cancel_job` with host consent | `POST /api/v1/jobs/{id}/cancel` | Installed u20 MCP is read-only; cancellation may remain pending/unknown until reconciliation. |
-| Applications | CLI read/create; staged MCP monthly creation with host consent | `GET/POST /api/v1/applications` | Monthly creation requires advertised server idempotency; temporary CLI requests require a complete real job. |
+| Applications | CLI read and monthly create; staged MCP monthly creation with host consent | `GET/POST /api/v1/applications` | Monthly creation requires advertised server idempotency; legacy temporary-job and quota-change creation are refused by the candidate client. |
+| Request recovery | `timectl request-status`; staged MCP `time_request_status` | visible jobs and applications, local request ledger | No resubmission; inconclusive results remain unknown. Local state must be accessible. |
 | Admin approvals | CLI; staged MCP decision and grant reconciliation with host consent | `POST /api/v1/applications/{id}/decision` | Broker administrator authorization is required; adjusted approval requires actual parameters. Installed u20 MCP is read-only. |
 | Quota/rules admin | CLI preview/apply | existing preview/apply routes | MCP mutations withheld; apply requires a fresh preview and CLI consent. |
 | Audit | CLI and read-only MCP | `GET /api/v1/audit` | Existing API is administrator-only and bounded to recent entries. |
