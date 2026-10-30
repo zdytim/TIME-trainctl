@@ -11,7 +11,9 @@ for file in "$guard" "$probe"; do
 done
 test "$(sha256sum "$guard" | cut -d' ' -f1)" = 274a70e98183d0055d063c19f4eb24a0569d883788fe2f98bcf2545417a0ecab
 work=$(mktemp -d /run/time-pam-check-XXXXXXXX)
-suffix=${work##*-}
+# libpam canonicalizes service names to lowercase when loading /etc/pam.d.
+# Mixed-case mktemp suffixes would silently select the fallback service.
+suffix=$(printf '%s' "${work##*-}" | tr '[:upper:]' '[:lower:]')
 positive="time-pam-${suffix}-allow"
 negative="time-pam-${suffix}-deny"
 created=()
