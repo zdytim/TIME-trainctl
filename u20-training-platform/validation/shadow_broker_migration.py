@@ -21,8 +21,9 @@ live_db = Path('/var/lib/pro6000d-training/state.sqlite3')
 backup_root = Path('/var/backups/pro6000d-training')
 expected = {
     'old.py': '65d213100a0e0ebd3f9fe87b51d1625f8539acf954ca572b43fa48a07c43173c',
-    'new.py': '1c3b2b31ee6c54c3819b2b574fe5c3479a04bccae15c521b4cc675bf4f966114',
+    'new.py': '7372e1d9ad73f6899aa3f2e79e24aae594e42717ba941a6044ddfb31831ea55c',
     'controller_bridge.py': '30ac4668f6ea6f0a413f4a4a834b27d42c5db069900600058d18da58e2b04a70',
+    'controller_view.py': '10be510b5bee9afaec955293dbff499140e099ff612eed1186e7e96e299a637d',
 }
 
 def trusted(path, directory=False):
@@ -74,7 +75,7 @@ def inventory(db):
         result[table] = (cols, count, digest.digest())
     return result
 
-folder = Path(tempfile.mkdtemp(prefix='shadow-broker-811b75a-', dir=backup_root))
+folder = Path(tempfile.mkdtemp(prefix='shadow-broker-9566337-', dir=backup_root))
 baseline, shadow = folder / 'baseline.sqlite3', folder / 'shadow.sqlite3'
 print('Protected snapshot directory:', folder, flush=True)
 backup(live_db, baseline)
