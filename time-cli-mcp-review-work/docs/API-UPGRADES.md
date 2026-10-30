@@ -3,10 +3,11 @@
 These are reviewable follow-up patches. They are intentionally absent from
 this artifact and do not change the shared backend.
 
-1. Add an additive `GET /api/v1/capabilities` response with schema versions,
-   route support, native-argv support, log semantics, multi-node support, and
-   monthly-controller state. The client should enable stronger behavior only
-   after observing this response.
+1. A staged additive `GET /api/v1/capabilities` response now reports schema,
+   identity source, execution and log semantics, and a conservative monthly
+   state. It is not installed on the current u20 broker. Full route and
+   multi-node discovery and an authoritative controller state remain future
+   work. Clients must not enable stronger behavior merely from this response.
 2. Add a normalized request-body hash to the server's `(owner_uid,
    client_request_id)` record and return `idempotency_conflict` when a reused
    ID has different content.

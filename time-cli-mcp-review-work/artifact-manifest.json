@@ -8,7 +8,7 @@
   "files": [
     {
       "path": "README.md",
-      "sha256": "ffd2ac00b5c267c554322a5aaba8e5e90975635ac4b0a656f2bc404f08e68984",
+      "sha256": "45afc24abf4b42f538464ed54c8a7a58d581d105473147f08d82bde1e1f034ba",
       "mode": "0o600"
     },
     {
@@ -18,7 +18,7 @@
     },
     {
       "path": "docs/API-UPGRADES.md",
-      "sha256": "93118f4f6a1f589622af7c450e50d317efaa3f1eb2bea476b82df9b0ec684688",
+      "sha256": "c66ee8157f02a0662fbc9e71137b7ce8d9c8c03051de583910191e45dc90ccc7",
       "mode": "0o600"
     },
     {
@@ -28,7 +28,7 @@
     },
     {
       "path": "docs/FEATURE-MATRIX.md",
-      "sha256": "1c3f313a45622c3cb300cea70e285bf978309cf2de31d4d5bb18ee3d7c09034d",
+      "sha256": "8fdee89c27710c47638b4a301041da7444172c96550d639531347453f216e321",
       "mode": "0o600"
     },
     {
@@ -58,17 +58,17 @@
     },
     {
       "path": "time_core.py",
-      "sha256": "b63549d544d65a8cb54640a32fc9185c2ba8f90441fca8f22a3650cd9f105e40",
+      "sha256": "c6a7bab52aea162577cd5dccb082227fef3f449b2b82fbb38aaf158b79008288",
       "mode": "0o755"
     },
     {
       "path": "time_mcp.py",
-      "sha256": "9149eea914e785f11b5689c8005218b56bc6d0571e8c9cc93ba908f61b673f6c",
+      "sha256": "16e1b441e144d5b0ab206c91eb6973894a88f437e5153cbb7c6c5c71dc2902d0",
       "mode": "0o755"
     },
     {
       "path": "timectl.py",
-      "sha256": "65414ee6585f151fa186d5deec06af3d5b1445825310c26ef1b683e19040c9e6",
+      "sha256": "1ca38b030c32e8e591a25386395f48621357e0696a9430f8a91c56b56ebe0bd0",
       "mode": "0o755"
     },
     {
@@ -81,10 +81,11 @@
   "mcp_mutations": "withheld_until_independent_host_consent",
   "monthly_enforcement_claim": false,
   "python_compatibility": "Python 3.8+",
-  "review_status": "attempt2_static_review_repairs_applied",
+  "review_status": "capability_discovery_staged_static_only",
   "server_files_changed": false,
   "system_install": false,
-  "validation": "syntax/compilation checks only",
+  "validation": "syntax checks only; no behavioral tests or deployment",
   "version": "0.1.0",
-  "status": "supervisor-repaired-not-behavior-tested"
+  "status": "supervisor-repaired-not-behavior-tested",
+  "staged_backend_contract_changed": true
 }

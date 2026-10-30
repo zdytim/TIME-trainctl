@@ -10,6 +10,7 @@ import sys
 import time as _time
 
 from time_core import (BrokerClient, RequestLedger, TimeError, UnknownOutcome,
+                       discover_server_capabilities,
                        error_envelope, feature_capabilities, format_error,
                        job_outcome, normalize_command_job, response_envelope,
                        utc_now)
@@ -211,13 +212,7 @@ def mutation_allowed(args):
 
 
 def discover_capabilities(client):
-    try:
-        identity = request_read(client, "GET", "/api/v1/me", timeout=10)
-        return {"state": "reachable", "identity_version": identity.get("version"),
-                "route": "GET /api/v1/me"}
-    except TimeError as exc:
-        return {"state": "unreachable", "route": "GET /api/v1/me",
-                "error": {"code": exc.code, "message": exc.message}}
+    return discover_server_capabilities(client)
 
 
 def client_and_ledger(args):

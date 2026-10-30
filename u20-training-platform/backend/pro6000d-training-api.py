@@ -1109,6 +1109,14 @@ finally: os.close(fd)
         payload = request.get("body") or {}
         if not isinstance(payload,dict): raise ApiError(400,"invalid_body","请求正文必须是对象")
         if method == "GET" and path == "/api/v1/me": return {"identity": ident, "version": VERSION}
+        if method == "GET" and path == "/api/v1/capabilities":
+            return {"schema_version": "1.0", "api_version": VERSION,
+                    "identity_source": "unix_peer_uid", "execution": "shell_command",
+                    "logs": {"mode": "bounded_tail", "follow": False},
+                    "multi_node": "unknown",
+                    "monthly_quota": {"accounting": self.monthly.status,
+                                      "mode": "staged" if self.monthly.enabled else "disabled",
+                                      "enforcement_ready": False}}
         if method == "GET" and path == "/api/v1/state":
             return {"identity": ident, "hostname": socket.gethostname(), "jobs": self.jobs(ident), "monthly_quota": self.monthly.summary(uid), "monthly_accounts": [{"uid":a["uid"],"username":a["username"],**a["monthly_quota"]} for a in self.accounts(ident)] if ident["is_admin"] else [], "gpus": self.gpu_inventory(ident), "metrics": self.metrics(ident), "quota": self.quota(uid), "accounts": self.accounts(ident), "default_quota": {**self.default_quota,"concurrent_job_limit":self.default_quota["concurrent_gpu_limit"]}, "temporary_authorizations_enabled": bool(self.config.get("temporary_authorizations", {}).get("enabled", False)), "applications": self.applications(ident), "notifications": self.notifications(ident), "rules": self.qos, "scheduler_available": self.last_reconcile_ok, "scheduler_error": self.scheduler_error, "observed_at": utc_now()}
         if method == "GET" and path == "/api/v1/jobs": return {"jobs": self.jobs(ident)}

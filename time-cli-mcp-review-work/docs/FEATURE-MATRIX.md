@@ -14,6 +14,6 @@
 | Admin approvals | CLI only | `POST /api/v1/applications/{id}/decision` | MCP mutations withheld; adjusted CLI approval requires actual parameters. |
 | Quota/rules admin | CLI preview/apply | existing preview/apply routes | MCP mutations withheld; apply requires a fresh preview and CLI consent. |
 | Audit | CLI and read-only MCP | `GET /api/v1/audit` | Existing API is administrator-only and bounded to recent entries. |
-| Capabilities | CLI and read-only MCP discovery | `GET /api/v1/me` only | Server route support remains `unknown`; client support is reported separately. |
-| Monthly quota | Unknown display and client refusal | no discovered authoritative controller | No monthly request or enforcement claim is made. |
+| Capabilities | CLI and read-only MCP discovery | `GET /api/v1/capabilities`, fallback to `/me` on 404 | Only the new staged broker exposes this route; older deployed brokers remain legacy/unknown. Client support is reported separately. |
+| Monthly quota | Staged/disabled if explicitly reported; otherwise unknown, client refusal | no discovered authoritative controller | No monthly request or enforcement claim is made. |
 | MCP transport | dependency-free stdio JSON-RPC | N/A | Per-user process only; read-only tools until independent consent exists. |

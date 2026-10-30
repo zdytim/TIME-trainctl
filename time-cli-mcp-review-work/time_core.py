@@ -501,14 +501,49 @@ def format_error(exc, request_id=None):
     return error_envelope(exc, request_id=request_id)
 
 
+def discover_server_capabilities(client):
+    """Discover the broker contract without inferring enforcement from config."""
+    try:
+        data = client.request("GET", "/api/v1/capabilities", timeout=10, mutation=False)
+        if not isinstance(data, dict) or data.get("schema_version") != "1.0":
+            return {"state": "unknown", "route": "GET /api/v1/capabilities",
+                    "reason": "unsupported or malformed capability schema"}
+        return {"state": "reachable", "route": "GET /api/v1/capabilities",
+                "capabilities": data}
+    except TimeError as exc:
+        if exc.status != 404:
+            return {"state": "unknown", "route": "GET /api/v1/capabilities",
+                    "error": {"code": exc.code, "message": exc.message}}
+    try:
+        identity = client.request("GET", "/api/v1/me", timeout=10, mutation=False)
+        return {"state": "legacy", "route": "GET /api/v1/me",
+                "identity_version": identity.get("version") if isinstance(identity, dict) else None}
+    except TimeError as exc:
+        return {"state": "unreachable", "route": "GET /api/v1/me",
+                "error": {"code": exc.code, "message": exc.message}}
+
+
 def feature_capabilities(discovery=None):
     """Separate client support, reviewed evidence, and runtime server discovery."""
     discovery = discovery or {"state": "unknown", "reason": "not probed"}
     route = lambda value: {"server_state": "unknown", "reviewed_route": value}
+    observed = discovery.get("capabilities") if isinstance(discovery, dict) else None
+    observed_monthly = observed.get("monthly_quota") if isinstance(observed, dict) else None
+    monthly = {
+        "server_state": "unknown", "enforcement_ready": "unknown",
+        "client_support": "unsupported", "accounting": "unknown",
+        "reason": "no authoritative runtime capability observed",
+    }
+    if isinstance(observed_monthly, dict) and observed_monthly.get("enforcement_ready") is False:
+        mode = observed_monthly.get("mode")
+        if mode in ("disabled", "staged"):
+            monthly.update(server_state=mode, enforcement_ready=False,
+                           accounting=observed_monthly.get("accounting", "unknown"),
+                           reason="server reports the monthly gate is not enabled")
     return {
         "source": "reviewed_snapshot_plus_runtime_discovery",
         "server_discovery": discovery,
-        "server_capabilities_endpoint": {"server_state": "unknown", "route": None},
+        "server_capabilities_endpoint": {"server_state": "observed" if isinstance(observed, dict) else "unknown", "route": "GET /api/v1/capabilities"},
         "commands": {
             "identity": dict(route("GET /api/v1/me"), client_support="read"),
             "state": dict(route("GET /api/v1/state"), client_support="read"),
@@ -524,11 +559,5 @@ def feature_capabilities(discovery=None):
             "admin_preview_apply": dict(route("existing preview/apply routes"), client_support="admin write"),
             "audit": dict(route("GET /api/v1/audit"), client_support="admin read"),
         },
-        "monthly_quota": {
-            "server_state": "unknown",
-            "enforcement_ready": "unknown",
-            "client_support": "unsupported",
-            "accounting": "unknown",
-            "reason": "runtime capabilities are not exposed; this client makes no enforcement claim",
-        },
+        "monthly_quota": monthly,
     }

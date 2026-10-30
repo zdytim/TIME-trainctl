@@ -55,6 +55,8 @@ change requests require all three quota limits. Adjusted approvals require a
 non-empty `--approved-json` object. The client refuses fake placeholder jobs
 and empty quota payloads.
 
-Monthly quota is reported as unknown unless a future authoritative capability
-contract says otherwise. This artifact does not claim monthly pre-allocation
-enforcement and refuses monthly requests.
+The staged backend exposes an additive capability endpoint; both CLI and MCP
+use the same discovery logic and fall back to legacy identity on a 404. Until
+the endpoint is deployed, older brokers remain legacy/unknown. The client
+recognizes only explicit disabled or staged monthly status and does not enable
+monthly operations or claim pre-allocation enforcement.

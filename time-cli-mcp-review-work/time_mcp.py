@@ -14,6 +14,7 @@ import sys
 import traceback
 
 from time_core import (BrokerClient, RequestLedger, TimeError,
+                       discover_server_capabilities,
                        error_envelope, feature_capabilities,
                        job_outcome, normalize_command_job,
                        response_envelope)
@@ -108,7 +109,7 @@ TOOLS = [
                                 required=["preview_id", "confirm", "user_intent"])},
     {"name": "time_read_audit", "description": "Read the existing administrator audit route.",
      "inputSchema": obj_schema({})},
-    {"name": "time_capabilities", "description": "Report observed legacy compatibility and disabled/unknown features.",
+    {"name": "time_capabilities", "description": "Discover the broker capability contract or report legacy/unknown status.",
      "inputSchema": obj_schema({})},
 ]
 
@@ -265,15 +266,7 @@ class Server(object):
         if name == "time_read_audit":
             return response_envelope(True, self.read("GET", "/api/v1/audit"))
         if name == "time_capabilities":
-            try:
-                identity = self.read("GET", "/api/v1/me")
-                discovery = {"state": "reachable",
-                             "identity_version": identity.get("version"),
-                             "route": "GET /api/v1/me"}
-            except TimeError as exc:
-                discovery = {"state": "unreachable", "route": "GET /api/v1/me",
-                             "error": {"code": exc.code, "message": exc.message}}
-            return response_envelope(True, feature_capabilities(discovery))
+            return response_envelope(True, feature_capabilities(discover_server_capabilities(self.client)))
         raise TimeError("unknown_tool", "unknown MCP tool: %s" % name, status=404)
 
 
