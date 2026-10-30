@@ -1,0 +1,24 @@
+--- a/src/slurmctld/node_scheduler.c
++++ b/src/slurmctld/node_scheduler.c
+@@ -3058,7 +3058,8 @@
+ 		job_ptr->state_reason = WAIT_RESOURCES;
+ 		last_job_update = now;
+ 		if (quota_held) {
+-			monthly_quota_abort(job_ptr);
++			/* Selector failure does not prove side effects were rolled back. */
++			monthly_quota_ambiguous(job_ptr);
+ 			quota_held = false;
+ 		}
+ 		goto cleanup;
+@@ -3084,6 +3085,11 @@
+ 		job_ptr->end_time = 0;
+ 		job_ptr->state_reason = WAIT_RESOURCES;
+ 		last_job_update = now;
++		if (quota_held) {
++			/* A successful selector without resources is not a proven abort. */
++			monthly_quota_ambiguous(job_ptr);
++			quota_held = false;
++		}
+ 		goto cleanup;
+ 	}
+ 
