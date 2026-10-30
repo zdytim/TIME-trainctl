@@ -145,6 +145,9 @@ for _ in $(seq 1 50); do
             test "$(cat "$base/state/time-quota.sock")" = preserve-me
             grep -q 'monthly quota control socket unavailable' "$base/log/controller.out"
             echo 'PASS: unrelated regular file was preserved'
+        elif test "${TIME_EXHAUSTED_TEST:-0}" = 18; then
+            test "$service_user" = slurm
+            TIME_VALIDATION_BROKER_DIR=/broker /opt/py310/bin/python3 /validation/test_real_approval_workflow.py
         elif test "${TIME_EXHAUSTED_TEST:-0}" = 15; then
             test "$service_user" = slurm
             TIME_VALIDATION_BROKER_DIR=/broker /opt/py310/bin/python3 /validation/test_real_controller_outbox.py
