@@ -1,0 +1,603 @@
+{
+  "archive_sha256": "6aa4e7bd962f3f514405b49d9ab0d13c155b9a148df7adb198dcc44e5dcf7040",
+  "files": [
+    {
+      "mode": "0755",
+      "path": "sbin/slurmctld",
+      "sha256": "147017cb8d9f16e92eb8c9d1058f5d13f5abbd8f0da06888c4347be0263f3632",
+      "size": 4346480
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/accounting_storage_filetxt.so",
+      "sha256": "beac26fc426af3154f5bf4a36a6578e98b1d13058e3ff8e6b819c48f4b52dfed",
+      "size": 379544
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/accounting_storage_mysql.so",
+      "sha256": "ace1241e027fefed40dff04e333df6d33d3dd5a876ac82d4c691b0fa79033f47",
+      "size": 2341736
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/accounting_storage_none.so",
+      "sha256": "627011045297b7bde3c431ac03a7927146859bdd4542d841f6257895d3c3b78e",
+      "size": 255952
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/accounting_storage_slurmdbd.so",
+      "sha256": "84518691022a9c783e4da2e203a44db2c44dc1fc380fe5f36f0c6c226114d1c5",
+      "size": 466872
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/acct_gather_energy_cray_aries.so",
+      "sha256": "921a35833b673b272999153fe5b1e9ce4d0347a6ec7ecb6ff7c322608783b8c1",
+      "size": 224288
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/acct_gather_energy_ibmaem.so",
+      "sha256": "ec1ac6f5b151e2cdba16b5aa173b10194f61c131cea1fb9d1c78e9d1c354714b",
+      "size": 224328
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/acct_gather_energy_none.so",
+      "sha256": "1d2276a30316fb779fd85b9ca0c18729fe7051dcea63391b8fe51192601d3eac",
+      "size": 216120
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/acct_gather_energy_rapl.so",
+      "sha256": "58a56cf89e4a2e31b5aafdb3d0e4f6bb290f807179243b948b953623168a71fe",
+      "size": 240712
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/acct_gather_filesystem_lustre.so",
+      "sha256": "571ba7789dae2b1fdb8acf5d8beb65c567bf443f01e95d016b974ef94456f87b",
+      "size": 235184
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/acct_gather_filesystem_none.so",
+      "sha256": "bf5d27149a3ec3c142d4a17ee072ef91b8463b3e012fc71d02f6f1574977c8ed",
+      "size": 215840
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/acct_gather_interconnect_none.so",
+      "sha256": "feb58f29160ad4db2ccdbded8520af6f216e65fb047206102f18029353fea7d4",
+      "size": 215872
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/acct_gather_profile_hdf5.so",
+      "sha256": "dee54fd30cd03001c25b589cbcb91bde3bd24379cea7c7587f3fb6edf9b29fcc",
+      "size": 340088
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/acct_gather_profile_influxdb.so",
+      "sha256": "5c7dbcef4e0f5d126a595889836e0c7fa7a4c5ed14bbb72c716195644abddd4f",
+      "size": 303752
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/acct_gather_profile_none.so",
+      "sha256": "16dc4604c412d8049fdfcc162eb8c5410095eeaa679550487edc154a8987178c",
+      "size": 228280
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/auth_munge.so",
+      "sha256": "50269706cb1e65b01706fb84fdf26b4b40a2a3d289b0eb848d4c026e4215acdd",
+      "size": 234944
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/auth_none.so",
+      "sha256": "2bb28978259900bcf4a0d25878644f7f4babd3a160bed8a5dddbdf323b48490f",
+      "size": 226632
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/burst_buffer_datawarp.so",
+      "sha256": "6e5ee61d87b0d9d69959a1a5971ef8c86a7f160640558969de1551fd79529b79",
+      "size": 604160
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/burst_buffer_generic.so",
+      "sha256": "7ef6dba56a7146c2c858b44b2e9e0ff8c362149fba905bac772752fef0dcbbdc",
+      "size": 320384
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/checkpoint_none.so",
+      "sha256": "71162810bd18a2ce9625e5ea6d076a8a3165f92bed3545b5a52cb183c01e0480",
+      "size": 212712
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/checkpoint_ompi.so",
+      "sha256": "0d715d38bd0a9e821500ae0bbadf2f437c3fe2966ae113ba0bba3fefd5264a28",
+      "size": 222688
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/cli_filter_none.so",
+      "sha256": "e6fcdc3d76b9a114cfb6e3e8280d9dd5db5daa12ecc1f14fa1c566c1908b5d48",
+      "size": 237440
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/core_spec_cray_aries.so",
+      "sha256": "06abf54bcec6671f6aee83d573aabea4b35193aa60092e2737e7d2f96ea6d72c",
+      "size": 216016
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/core_spec_none.so",
+      "sha256": "2af93cb81bd6286afbdceecfe8358582f4b2fbcf1923a0db26d1af9e29005fc4",
+      "size": 214336
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/cred_munge.so",
+      "sha256": "4a195731da0c829ffc5be4ed8b10e48aebe66ac5b0531bcba370e83b35641fc0",
+      "size": 179080
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/cred_none.so",
+      "sha256": "e6834fe2e8ea9dc03102f748659b54bcda1b42c19df0783d83ed2e1bc378aeeb",
+      "size": 171520
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/ext_sensors_none.so",
+      "sha256": "0b5d7f30900e083565c52cd93664fa695de3e9bb65191e90dce8222b7ef35279",
+      "size": 242240
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/gpu_generic.so",
+      "sha256": "b32f0facbf0ccdae1e309aca399ee5007b3348ebc3517a17760fd4cf050c58ba",
+      "size": 229040
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/gres_gpu.so",
+      "sha256": "9f6c5c06c1cdcf063eb65d71930b817d4c8d031ea8359bd833657d56862b519a",
+      "size": 332952
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/gres_mic.so",
+      "sha256": "564ae2afa1a6008de612b666bae5aeabb720be7fcfa55da45a38e01127a64a69",
+      "size": 286320
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/gres_mps.so",
+      "sha256": "090c5b8d7be676b950c9f90cbf4d34f87c3857221f78aa43d856b9a947524002",
+      "size": 338448
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/gres_nic.so",
+      "sha256": "17a3f78c3e7cfa30901858d7d2e7b93fb8b243f843c7b351809b7b21dd7f6dc0",
+      "size": 286320
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/job_container_cncu.so",
+      "sha256": "a6012ea718efd790b99edb7b715767c6e294dc394725653c71236ff3d2b10e6b",
+      "size": 240048
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/job_container_none.so",
+      "sha256": "467b7cd59f61c8961c691cc52c0dc91765e8eb76a1196943caa91a4fdc91f370",
+      "size": 215864
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/job_submit_all_partitions.so",
+      "sha256": "1bf68ad4b1d64b05b2911c151ea981b2af3c0cbfe44668444868980c8018cb37",
+      "size": 224824
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/job_submit_cray_aries.so",
+      "sha256": "0868ec2df2ddad8e5e94aac2f434f817cea28f2c1582352e387c4c4ab6bfe292",
+      "size": 225208
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/job_submit_defaults.so",
+      "sha256": "343cd5f60fd335fec114dba464145f2927b2c7a6d9f7096ed6e51206cfdd66be",
+      "size": 223600
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/job_submit_logging.so",
+      "sha256": "c5996a5ba6af599d1ee3246380cad4d479de56e41ae9a49a8eec0926a11a4290",
+      "size": 224312
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/job_submit_lua.so",
+      "sha256": "8afd36122861af140536865768e23686f8749753204ee6a638efeb20e6fe2bc9",
+      "size": 333736
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/job_submit_partition.so",
+      "sha256": "4fc07d8365c18e6713704de99b7219291d1886aa325a19e9397cbf7033f4db92",
+      "size": 226216
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/job_submit_pbs.so",
+      "sha256": "c285d1bd3744285faee70352f012d90f422c2b93e1cfacb493f9d0d070f2d52a",
+      "size": 243416
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/job_submit_require_timelimit.so",
+      "sha256": "f0fc1b60e9d7d1f6f9355c67c6c7c747823806ecd2e9c85fac0f8f947b727a54",
+      "size": 210864
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/job_submit_throttle.so",
+      "sha256": "cdbdb14c3ed9cbd797327ab9e171d0476ac06a0acb5f51af6881a302b2d350a8",
+      "size": 234640
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/jobacct_gather_cgroup.so",
+      "sha256": "d8be8fa6e8c2fae0076d0446e62c184d7a1633f4b06b18aeef3a2948dc3f38d0",
+      "size": 400528
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/jobacct_gather_linux.so",
+      "sha256": "53360c0ba9b48593951a6565c0459fff19a0396553df33d1c9c72e91dfa22c43",
+      "size": 308016
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/jobacct_gather_none.so",
+      "sha256": "aecbf715e2baee9ce06e30c35ad2a33f075ee6a9072d7eafb8fbd225354b6657",
+      "size": 227832
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/jobcomp_elasticsearch.so",
+      "sha256": "e98367268f7b0651fe2e38c6fc33e470245963949bf5cc73a66e7d3e9cef59c5",
+      "size": 303464
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/jobcomp_filetxt.so",
+      "sha256": "bdb7eb862d710fc0d8d9a1c301da395dd1c55e0fb17def82fc6cac1e4ce17c1b",
+      "size": 268376
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/jobcomp_mysql.so",
+      "sha256": "803810f80e95f403ccc09f20e10bae1ee03fd67a37f8caf30345f1ef259014f2",
+      "size": 589784
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/jobcomp_none.so",
+      "sha256": "791a53f8f808d502a81b756254f0b74232ad796c0a023d85ba9434b91b2e1e80",
+      "size": 202424
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/jobcomp_script.so",
+      "sha256": "160a7a55043ea0df69f4fb4be04ece1bbe9960c6080d810e29b6d71509eba3a5",
+      "size": 241832
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/launch_slurm.so",
+      "sha256": "a28b761296a4fd03979087e942c2c31175c6da74c4b4e7f1c792aa21d3083ffd",
+      "size": 332832
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/layouts_power_cpufreq.so",
+      "sha256": "5c0fb71dca140371bf364f9157be67350b9081357537f00d8899e8dc8801e95f",
+      "size": 140824
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/layouts_power_default.so",
+      "sha256": "abc767138051a14c20f7cc96508d1d3ed414694e86a836a3111a91c10bfb1f0e",
+      "size": 139928
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/layouts_unit_default.so",
+      "sha256": "42a50903b4b404decfe5457b72d43b47a687df915aaa1fd74b4d7ccdfdcc3555",
+      "size": 145496
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/libslurmfull.so",
+      "sha256": "07f5d7afcb22bb514d5d1d5d89a8818658b43f8a9569f0388c1fbd3c3071444e",
+      "size": 9426128
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/mcs_account.so",
+      "sha256": "764f7bc5eaaacca5f7fc4147e0a127bc00c51ed81eccac96fa6de37915809569",
+      "size": 205608
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/mcs_group.so",
+      "sha256": "d21b8b4bc295bd67d7b782f0271eda58770b53de76424d2f4a34c1e7088de1e1",
+      "size": 211776
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/mcs_none.so",
+      "sha256": "262c978e60b259b9f839a7d1f7fc8542c0d467f30e7e72175e870374f760cf11",
+      "size": 201568
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/mcs_user.so",
+      "sha256": "59b9a7e27908c0408d79889ab33638f774dd229d5a6abf7626f916dac0a152e0",
+      "size": 204432
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/mpi_none.so",
+      "sha256": "c6d6a860756532e08e10833f2dd1d3c895de6ac3e7172340472f3058b007bd23",
+      "size": 226504
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/mpi_openmpi.so",
+      "sha256": "800dfdee334b063f7803096af04cc5f31791d2ef1ab99b05cdb193b17c1ebe81",
+      "size": 226504
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/mpi_pmi2.so",
+      "sha256": "83628154ce6ca479e173643df17788369acada996caa4dd364ac64fab3eee951",
+      "size": 799256
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/node_features_knl_cray.so",
+      "sha256": "5d34ac77d6887b4ae97cec2ed7931ae1da0d0c1ce5db94967e1eb0c75e8ea9b1",
+      "size": 389104
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/node_features_knl_generic.so",
+      "sha256": "1007ac99d0777289fb507132e104649a5aa84b5890e702431ed4fae156752de4",
+      "size": 325832
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/power_cray_aries.so",
+      "sha256": "e80eaf616504ebe053ab11f119363020d1aee3e10da152235163c14bd2b00b93",
+      "size": 343072
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/power_none.so",
+      "sha256": "64003f53be8812e289c7ee71fbda78f1ecca4db3f30496be38ee7a15a71b3312",
+      "size": 261576
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/preempt_none.so",
+      "sha256": "40a075f691ca92af4b4abab245035870371e9b79aca69dda6d94a99068bc2325",
+      "size": 204680
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/preempt_partition_prio.so",
+      "sha256": "8e07d0979750a180c20255abae8daf2bcf03a0770d6e3c0182f8f5aead7728cf",
+      "size": 210608
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/preempt_qos.so",
+      "sha256": "0b6eb4cfec66e11ac38ae099d8d0390890843a6505621be5ed355eb638231573",
+      "size": 211008
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/priority_basic.so",
+      "sha256": "3d1a3164aa78704f41325c4e477176ffe517d0e1258dcd06136f32db6504e4cb",
+      "size": 213704
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/priority_multifactor.so",
+      "sha256": "189847ff1539270334511ab9ea4de9b29e3101a7cc07acaf6ff5933a79924299",
+      "size": 348752
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/proctrack_cgroup.so",
+      "sha256": "39f667330de0d1ac8fee6fd71a21bad92aecc7d7edc1f63d157e612056e9ed25",
+      "size": 217808
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/proctrack_linuxproc.so",
+      "sha256": "7018a0f592a0d5adc66ce861535302f347b435f9a9bbf74e1a5bbc50ab3a9aee",
+      "size": 212952
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/proctrack_pgid.so",
+      "sha256": "da4d81fd9bc744585ddc84ea868247d97ba6dd18f6052523492f9e2dccfc122c",
+      "size": 194528
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/route_default.so",
+      "sha256": "3a17727bf690ed85242c7f5b9776315e8e9d2edb0c2ced424f9f9e5a6a459f25",
+      "size": 215352
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/route_topology.so",
+      "sha256": "b1a5f276e6b973f43cc4c21e99753b8b9727163fce7c43095bf3c4cb390d6dec",
+      "size": 227104
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/sched_backfill.so",
+      "sha256": "2cd2ab204453aeffa6f733082e68419e492a450bd82e204a08c301e7dd6390b7",
+      "size": 417664
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/sched_builtin.so",
+      "sha256": "a1a08c35dab32fd9b6c38f9ec2efd1c7a14b9b1391c2c80e7341ebe654ec742f",
+      "size": 253768
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/sched_hold.so",
+      "sha256": "fe3e8da54e087fcbddc4bc09b086bac22ce64a4fa6b5698c4e1a32cec63a627e",
+      "size": 208080
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/select_cons_res.so",
+      "sha256": "bed0f52548815a3108c2a0989f50a02e365e537225cbb0ea55512125701569e0",
+      "size": 643704
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/select_cons_tres.so",
+      "sha256": "e03a71d6296d1d94b3985c79d72aab55d5e4eb2f82450c48cf4194bba3a90a24",
+      "size": 742424
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/select_cray_aries.so",
+      "sha256": "d2259fc9b332bb7a0c30be615fdee8264b16acd00f5de5348486b0914edcaacb",
+      "size": 454888
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/select_linear.so",
+      "sha256": "8a1855de56a10827fb69bcda0627751fc2b497460083a997b84fc9eb97a37d6e",
+      "size": 423568
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/site_factor_none.so",
+      "sha256": "45e4205823aee50fb3e447514e6c4d11e7bc9e59f1a523c89c5da28df88c5844",
+      "size": 234992
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/slurmctld_nonstop.so",
+      "sha256": "9b320f2c4cfb4ea0947a0eabc9628afbf2d8a2a522bbfa6635a612148046aa73",
+      "size": 453512
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/spank_pbs.so",
+      "sha256": "789f2cbaefbb0270f46a695a8f857db8e72b2554932f0763628f8e79d8f6fb42",
+      "size": 73136
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/switch_cray_aries.so",
+      "sha256": "df3edf1fae7159fe704b9aca40e14989c03fca439524868b260c8ad111da94f4",
+      "size": 397704
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/switch_generic.so",
+      "sha256": "39bf54d320b43fa4e44e2787f57fb39324dd81e9be8d1046384e4846a348b1ff",
+      "size": 279464
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/switch_none.so",
+      "sha256": "81192f3f0d4693c48e2904e0f01da508d7952b415f9d45a2a79c9bb4eb2917ee",
+      "size": 236688
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/task_affinity.so",
+      "sha256": "209c20c834e698a2c8a36dc7014baed46a6e1d1dc0a6472d79c8ad0d6eabb96b",
+      "size": 507840
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/task_cgroup.so",
+      "sha256": "5f7a3bd95299ffd7b3674ff81345a1ef4c94a2dce4ab5fe8d55d8aef1b60a62d",
+      "size": 484584
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/task_cray_aries.so",
+      "sha256": "f8eb217dafa316c0c3517a3e02d56b8982b18bdd6c471650dc0a2e868759c03e",
+      "size": 251352
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/task_none.so",
+      "sha256": "739dd1e8220a78a186b798bd2478806f4944e0441be7cebe10da0eefc28ee0a3",
+      "size": 228448
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/topology_3d_torus.so",
+      "sha256": "e317955b4094ac958291994038cab2922e851c3bc4ab4d3d262d6fe69a555673",
+      "size": 217656
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/topology_hypercube.so",
+      "sha256": "173f401ed129543d917dd351ca7cb25f8b80f3427c0ba7fed288baaa48a1dac3",
+      "size": 245504
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/topology_node_rank.so",
+      "sha256": "b1fe868ef8327405a4313e2f9fc14432e4e1761e15089bf6a6f351d8aa228aee",
+      "size": 195888
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/topology_none.so",
+      "sha256": "450c52fb53773d2429eaacfdce4342239b9e8222733a6f763b13361a89b6c8fd",
+      "size": 160920
+    },
+    {
+      "mode": "0755",
+      "path": "lib/slurm/topology_tree.so",
+      "sha256": "c1a28f129880c7969718acdfff6b4bc6d56829efa33d4d74196a1f4635fe05b7",
+      "size": 220608
+    }
+  ],
+  "format": 1,
+  "note": "candidate package only; no installation or behavioral certification",
+  "project_revision": "7a06cfff70a74019a132737964cb229b1ee21b37",
+  "runtime_prefix": "/opt/time/slurm19-7a06cfff70a7"
+}

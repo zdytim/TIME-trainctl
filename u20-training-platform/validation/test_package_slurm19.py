@@ -10,6 +10,7 @@ import tarfile
 import tempfile
 
 tool = Path(sys.argv[1]).resolve()
+verifier = Path(sys.argv[2]).resolve()
 spec = importlib.util.spec_from_file_location('packager', tool)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -39,6 +40,17 @@ with tempfile.TemporaryDirectory(prefix='time-package-check-') as tmp:
         assert len(members) == len(module.REQUIRED) + 1
         assert all(member.isfile() and member.uid == 0 and member.gid == 0 for member in members)
         assert {member.name for member in members} == {item['path'] for item in manifest['files']}
+    manifest_path = first / 'manifest.json'
+    pinned = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    def verify(archive, pin):
+        return subprocess.run([sys.executable, '-B', str(verifier), '--archive', str(archive),
+                               '--manifest', str(manifest_path), '--manifest-sha256', pin],
+                              capture_output=True, text=True)
+    assert verify(first / 'controller.tar.gz', pinned).returncode == 0
+    assert verify(first / 'controller.tar.gz', '0' * 64).returncode != 0
+    damaged = base / 'damaged.tar.gz'
+    damaged.write_bytes(a[:-1] + bytes([a[-1] ^ 1]))
+    assert verify(damaged, pinned).returncode != 0
     assert package(first).returncode != 0  # never replace an output directory
     missing = stage / 'lib/slurm/auth_munge.so'
     missing.unlink()
