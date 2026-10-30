@@ -41,7 +41,7 @@ ProctrackType=proctrack/linuxproc
 TaskPlugin=task/none
 AccountingStorageType=accounting_storage/none
 GresTypes=gpu
-NodeName=time-test CPUs=2 RealMemory=256 State=UNKNOWN Gres=gpu:$gpu_count
+NodeName=time-test CPUs=2 RealMemory=1024 State=UNKNOWN Gres=gpu:$gpu_count
 PartitionName=normal Nodes=time-test Default=YES State=UP
 EOF
 if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 3 || test "${TIME_EXHAUSTED_TEST:-0}" = 4; then
@@ -100,7 +100,7 @@ for _ in $(seq 1 50); do
             if ! grep -q 'State=IDLE' "$base/log/node.out"; then
                 cat "$base/log/slurmd.out" "$base/log/node.out"; exit 1
             fi
-            job=$(sbatch --parsable --time=00:01:00 --gres="gpu:$request_gpus" --chdir="$base" --output="$base/slurm-%j.out" --wrap='sleep 30')
+            job=$(sbatch --parsable --time=00:01:00 --mem=64M --gres="gpu:$request_gpus" --chdir="$base" --output="$base/slurm-%j.out" --wrap='sleep 30')
             sleep 3
             scontrol show job "$job" > "$base/log/job.out"
             cat "$base/log/job.out"
@@ -120,7 +120,7 @@ for _ in $(seq 1 50); do
                     sleep 7
                     /validation/quota-socket-query root-active-exhausted
                     scontrol show job "$job" | grep -q 'JobState=RUNNING'
-                    next=$(sbatch --parsable --time=00:01:00 --gres=gpu:1 --chdir="$base" --output="$base/slurm-%j.out" --wrap='sleep 1')
+                    next=$(sbatch --parsable --time=00:01:00 --mem=64M --gres=gpu:1 --chdir="$base" --output="$base/slurm-%j.out" --wrap='sleep 1')
                     sleep 3
                     scontrol show job "$next" > "$base/log/next.out"
                     cat "$base/log/next.out"
