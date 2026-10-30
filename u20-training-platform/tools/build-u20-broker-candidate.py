@@ -14,6 +14,7 @@ PATCHES = (
     "u20-broker-controller-read.patch",
     "u20-broker-monthly-grant.patch",
     "u20-broker-monthly-capabilities.patch",
+    "u20-broker-month-retry-fix.patch",
 )
 
 

@@ -1,0 +1,39 @@
+--- a/pro6000d-training-api.py
++++ b/pro6000d-training-api.py
+@@ -920,14 +920,17 @@
+         except (KeyError, TypeError, ValueError):
+             raise ApiError(503, "controller_unavailable", "控制器配置不可用")
+ 
+-    def monthly_request(self, requested: Any) -> Dict[str, Any]:
++    def monthly_request(self, requested: Any, require_current: bool = True) -> Dict[str, Any]:
+         if not isinstance(requested, dict):
+             raise ApiError(400, "invalid_monthly_request", "月度申请必须是对象")
+         hours, month, key = requested.get("gpu_hours"), requested.get("month"), requested.get("client_request_id")
+         now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
+         if isinstance(hours, bool) or not isinstance(hours, int) or not 1 <= hours <= 100000:
+             raise ApiError(400, "invalid_gpu_hours", "追加 GPU 小时必须为 1 至 100000 的整数")
+-        if isinstance(month, bool) or not isinstance(month, int) or month != now.year * 100 + now.month:
++        if (isinstance(month, bool) or not isinstance(month, int) or
++                month // 100 < 1970 or month // 100 > 9999 or not 1 <= month % 100 <= 12):
++            raise ApiError(400, "invalid_month", "申请月份无效")
++        if require_current and month != now.year * 100 + now.month:
+             raise ApiError(409, "month_changed", "请刷新并申请本月额度")
+         if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9-]{8,80}", key):
+             raise ApiError(400, "request_id_required", "月度申请需要稳定请求编号")
+@@ -972,13 +975,14 @@
+             raise ApiError(400, "reason_required", "理由长度需为 5 到 2000 字符")
+         requested = payload.get("requested")
+         if kind == "monthly_gpu_hours":
+-            self.monthly_controller_bridge()
+-            requested = self.monthly_request(requested)
++            requested = self.monthly_request(requested, require_current=False)
+             prior = self.store.db.execute("SELECT a.* FROM monthly_request_keys k JOIN applications a ON a.id=k.application_id WHERE k.uid=? AND k.request_id=?", (ident["uid"], requested["client_request_id"])).fetchone()
+             if prior:
+                 if json_object(prior["requested_json"], {}) != requested or prior["reason"] != reason:
+                     raise ApiError(409, "idempotency_conflict", "同一请求编号不能对应不同申请")
+                 return dict(prior)
++            requested = self.monthly_request(requested)
++            self.monthly_controller_bridge()
+         elif kind == "temporary_job":
+             if not self.config.get("temporary_authorizations", {}).get("enabled", False):
+                 raise ApiError(409, "temporary_authorization_disabled", "临时资源授权尚未开启")
