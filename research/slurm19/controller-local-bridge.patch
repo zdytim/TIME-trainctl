@@ -1,0 +1,230 @@
+--- /dev/null
++++ b/src/slurmctld/monthly_quota_control.c
+@@ -0,0 +1,167 @@
++/* Local root-broker bridge for the disabled-by-default monthly quota candidate. */
++#define _GNU_SOURCE
++#include "config.h"
++#include <errno.h>
++#include <fcntl.h>
++#include <inttypes.h>
++#include <poll.h>
++#include <pthread.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/time.h>
++#include <sys/un.h>
++#include <unistd.h>
++#include "src/common/log.h"
++#include "src/slurmctld/locks.h"
++#include "src/slurmctld/monthly_quota.h"
++#include "src/slurmctld/slurmctld.h"
++
++static int listener = -1, wakepipe[2] = {-1, -1};
++static pthread_t thread;
++static bool started;
++static char socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
++static dev_t socket_dev;
++static ino_t socket_ino;
++
++static int number(const char *s, uint64_t *out)
++{
++	char *end;
++	unsigned long long value;
++	const unsigned char *p = (const unsigned char *)s;
++	if (!*p) return -1;
++	for (; *p; p++) if (*p < '0' || *p > '9') return -1;
++	errno = 0;
++	value = strtoull(s, &end, 10);
++	if (errno || *end) return -1;
++	*out = value;
++	return 0;
++}
++
++static void handle(int fd)
++{
++	struct ucred peer;
++	socklen_t peer_len = sizeof(peer);
++	struct timeval timeout = {2, 0};
++	char buf[512], reply[1024], *part[7], *save, *p;
++	size_t length = 0, count = 0;
++	ssize_t n;
++	uint64_t uid, month, sec;
++	int rc = -1;
++	monthly_quota_snapshot_t view;
++	slurmctld_lock_t config_lock = {READ_LOCK, NO_LOCK, NO_LOCK, NO_LOCK, NO_LOCK};
++
++	if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &peer_len) ||
++	    peer_len != sizeof(peer) || peer.uid != 0)
++		return;
++	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
++	setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
++	while (length < sizeof(buf) - 1) {
++		n = recv(fd, buf + length, 1, 0);
++		if (n < 0 && errno == EINTR) continue;
++		if (n != 1) return;
++		if (buf[length++] == '\n') break;
++	}
++	if (!length || buf[length - 1] != '\n' || memchr(buf, '\0', length)) return;
++	buf[length - 1] = '\0';
++	p = strtok_r(buf, " ", &save);
++	while (p && count < 7) { part[count++] = p; p = strtok_r(NULL, " ", &save); }
++	if (p || count < 2 || number(part[1], &uid) || uid > UINT32_MAX) return;
++	lock_slurmctld(config_lock);
++	if (count == 2 && !strcmp(part[0], "SNAP")) {
++		rc = monthly_quota_snapshot((uid_t)uid, &view);
++		if (!rc) {
++			snprintf(reply, sizeof(reply),
++				 "OK %u %u %" PRIu64 " %u %" PRIu64 " %u "
++				 "%" PRIu64 " %u %" PRIu64 " %u %" PRIu64 " %u "
++				 "%" PRIu64 " %u %" PRIu64 " %u %" PRIu64 "\n",
++				 view.month, (unsigned)view.tier, view.used.sec, view.used.nsec,
++				 view.granted.sec, view.granted.nsec, view.capacity.sec, view.capacity.nsec,
++				 view.remaining.sec, view.remaining.nsec, view.overage.sec, view.overage.nsec,
++				 view.active_gpu_count, view.active_allocation_count,
++				 view.observed_sec, view.observed_nsec, view.wal_sequence);
++		}
++	} else if (count == 6 && !strcmp(part[0], "GRANT") &&
++		   !number(part[2], &month) && month <= UINT32_MAX &&
++		   !number(part[3], &sec)) {
++		rc = monthly_quota_grant((uid_t)uid, (uint32_t)month, sec, part[4], part[5]);
++		if (!rc) snprintf(reply, sizeof(reply), "OK\n");
++	}
++	unlock_slurmctld(config_lock);
++	if (rc) snprintf(reply, sizeof(reply), "ERROR unavailable_or_invalid\n");
++	(void)send(fd, reply, strlen(reply), MSG_NOSIGNAL);
++}
++
++static void *serve(void *unused)
++{
++	struct pollfd fds[2] = {{0}};
++	(void)unused;
++	fds[0].fd = listener; fds[0].events = POLLIN;
++	fds[1].fd = wakepipe[0]; fds[1].events = POLLIN;
++	for (;;) {
++		int fd, ready = poll(fds, 2, -1);
++		if (ready < 0 && errno == EINTR) continue;
++		if (ready < 0) break;
++		if (fds[1].revents) break;
++		if (!(fds[0].revents & POLLIN)) continue;
++		fd = accept4(listener, NULL, NULL, SOCK_CLOEXEC);
++		if (fd >= 0) { handle(fd); close(fd); }
++	}
++	return NULL;
++}
++
++int monthly_quota_control_start(void)
++{
++	struct sockaddr_un addr = {0};
++	struct stat dir, sock;
++	int rc;
++	if (!monthly_quota_enabled()) return 0;
++	if (started || !slurmctld_conf.state_save_location ||
++	    lstat(slurmctld_conf.state_save_location, &dir) || !S_ISDIR(dir.st_mode) ||
++	    dir.st_uid != geteuid() || (dir.st_mode & 0022)) return -1;
++	rc = snprintf(socket_path, sizeof(socket_path), "%s/time-quota.sock",
++		      slurmctld_conf.state_save_location);
++	if (rc < 0 || (size_t)rc >= sizeof(socket_path)) return -1;
++	/* Never unlink an existing path: recovery of a stale socket is manual. */
++	listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
++	if (listener < 0) return -1;
++	addr.sun_family = AF_UNIX;
++	memcpy(addr.sun_path, socket_path, strlen(socket_path) + 1);
++	if (bind(listener, (struct sockaddr *)&addr, sizeof(addr))) goto fail;
++	if (lstat(socket_path, &sock) || !S_ISSOCK(sock.st_mode) ||
++	    sock.st_uid != geteuid()) goto fail_path;
++	socket_dev = sock.st_dev; socket_ino = sock.st_ino;
++	if (chmod(socket_path, 0600) || listen(listener, 8) || pipe2(wakepipe, O_CLOEXEC))
++		goto fail_path;
++	if (pthread_create(&thread, NULL, serve, NULL)) goto fail_path;
++	started = true;
++	return 0;
++fail_path:
++	if (!lstat(socket_path, &sock) && S_ISSOCK(sock.st_mode) &&
++	    sock.st_uid == geteuid() && sock.st_dev == socket_dev && sock.st_ino == socket_ino)
++		unlink(socket_path);
++fail:
++	if (wakepipe[0] >= 0) close(wakepipe[0]);
++	if (wakepipe[1] >= 0) close(wakepipe[1]);
++	wakepipe[0] = wakepipe[1] = -1;
++	close(listener); listener = -1;
++	return -1;
++}
++
++void monthly_quota_control_stop(void)
++{
++	struct stat sock;
++	if (!started) return;
++	(void)write(wakepipe[1], "x", 1);
++	pthread_join(thread, NULL);
++	close(listener); close(wakepipe[0]); close(wakepipe[1]);
++	listener = wakepipe[0] = wakepipe[1] = -1;
++	if (!lstat(socket_path, &sock) && S_ISSOCK(sock.st_mode) &&
++	    sock.st_dev == socket_dev && sock.st_ino == socket_ino && sock.st_uid == geteuid())
++		unlink(socket_path);
++	started = false;
++}
+--- a/src/slurmctld/controller.c
++++ b/src/slurmctld/controller.c
+@@ -727,6 +727,10 @@
+ 		if (slurm_mcs_init() != SLURM_SUCCESS)
+ 			fatal("failed to initialize mcs plugin");
+ 
++		/* Optional root-only local quota control, independent of allocation. */
++		if (monthly_quota_control_start())
++			error("monthly quota control socket unavailable");
++
+ 		/*
+ 		 * create attached thread to process RPCs
+ 		 */
+@@ -767,6 +771,7 @@
+ 		slurm_priority_fini();
+ 		slurmctld_plugstack_fini();
+ 		shutdown_state_save();
++		monthly_quota_control_stop();
+ 		monthly_quota_fini();
+ 		slurm_mutex_lock(&purge_thread_lock);
+ 		slurm_cond_signal(&purge_thread_cond); /* wake up last time */
+--- a/src/slurmctld/monthly_quota.h
++++ b/src/slurmctld/monthly_quota.h
+@@ -88,6 +88,8 @@
+ 
+ /* Called after job/select/GRES state has been restored, before scheduling. */
+ extern int monthly_quota_reconcile(List job_list);
++extern int monthly_quota_control_start(void);
++extern void monthly_quota_control_stop(void);
+ extern void monthly_quota_fini(void);
+ extern bool monthly_quota_enabled(void);
+ 
+--- a/src/slurmctld/Makefile.am
++++ b/src/slurmctld/Makefile.am
+@@ -38,6 +38,7 @@
+ 	locks.c   	\
+ 	locks.h  	\
+ 	monthly_quota.c \
++	monthly_quota_control.c \
+ 	monthly_quota.h \
+ 	node_mgr.c 	\
+ 	node_scheduler.c \
+--- a/src/slurmctld/Makefile.in
++++ b/src/slurmctld/Makefile.in
+@@ -155,6 +155,7 @@
+ 	groups.$(OBJEXT) heartbeat.$(OBJEXT) job_mgr.$(OBJEXT) \
+ 	job_scheduler.$(OBJEXT) job_submit.$(OBJEXT) \
+ 	licenses.$(OBJEXT) locks.$(OBJEXT) monthly_quota.$(OBJEXT) \
++	monthly_quota_control.$(OBJEXT) \
+ 	node_mgr.$(OBJEXT) node_scheduler.$(OBJEXT) partition_mgr.$(OBJEXT) \
+ 	ping_nodes.$(OBJEXT) port_mgr.$(OBJEXT) power_save.$(OBJEXT) \
+ 	powercapping.$(OBJEXT) preempt.$(OBJEXT) proc_req.$(OBJEXT) \
+@@ -530,6 +531,7 @@
+ 	locks.c   	\
+ 	locks.h  	\
+ 	monthly_quota.c \
++	monthly_quota_control.c \
+ 	monthly_quota.h \
+ 	node_mgr.c 	\
+ 	node_scheduler.c \
