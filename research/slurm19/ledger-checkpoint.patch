@@ -1,0 +1,128 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -39,6 +39,7 @@
+ #define MQ_WAL_VERSION                 "U20MQ1"
+ #define MQ_ENABLE_TOKEN                "MonthlyGpuQuota"
+ #define MQ_STATE_FILE                  "monthly-quota.wal"
++#define MQ_CHECKPOINT_FILE             "monthly-quota.checkpoint"
+ #define MQ_NSEC_PER_SEC                1000000000U
+ #define MQ_SECONDS_PER_DAY             86400LL
+ #define MQ_SHANGHAI_OFFSET             (8LL * 60LL * 60LL)
+@@ -86,6 +87,7 @@
+ 
+ static pthread_mutex_t mq_lock = PTHREAD_MUTEX_INITIALIZER;
+ static int mq_fd = -1;
++static int mq_checkpoint_fd = -1;
+ static bool mq_initialized;
+ static bool mq_enabled;
+ static bool mq_healthy;
+@@ -336,6 +338,32 @@
+ 	return 0;
+ }
+ 
++/* WAL is durable before the checkpoint. A crash between those writes is
++ * deliberately detected as ambiguous on recovery, never silently repaired. */
++static int _write_checkpoint(uint64_t seq)
++{
++	char buf[96];
++	int len;
++	size_t offset = 0;
++	ssize_t written;
++
++	len = snprintf(buf, sizeof(buf), MQ_WAL_VERSION "|CHECKPOINT|%" PRIu64 "\n", seq);
++	if (mq_checkpoint_fd < 0 || len < 0 || (size_t)len >= sizeof(buf))
++		return -1;
++	while (offset < (size_t)len) {
++		written = pwrite(mq_checkpoint_fd, buf + offset, (size_t)len - offset,
++				 (off_t)offset);
++		if (written < 0 && errno == EINTR)
++			continue;
++		if (written <= 0)
++			return -1;
++		offset += (size_t)written;
++	}
++	if (ftruncate(mq_checkpoint_fd, len) || fsync(mq_checkpoint_fd))
++		return -1;
++	return 0;
++}
++
+ static int _append_event(const char *format, ...)
+ {
+ 	char body[900], line[1024];
+@@ -354,7 +382,7 @@
+ 				   "|%s\n", seq, body);
+ 	if (line_len < 0 || (size_t)line_len >= sizeof(line))
+ 		return -1;
+-	if (_write_all(line, (size_t)line_len))
++	if (_write_all(line, (size_t)line_len) || _write_checkpoint(seq))
+ 		return -1;
+ 	mq_seq = seq;
+ 	return 0;
+@@ -852,9 +880,29 @@
+ 	return rc;
+ }
+ 
++/* Must match the last fully replayed WAL event; no implicit initialization. */
++static int _read_checkpoint(uint64_t *seq)
++{
++	char buf[96], *value;
++	ssize_t len;
++	const char prefix[] = MQ_WAL_VERSION "|CHECKPOINT|";
++
++	do {
++		len = pread(mq_checkpoint_fd, buf, sizeof(buf), 0);
++	} while (len < 0 && errno == EINTR);
++	if (len <= (ssize_t)sizeof(prefix) || len >= (ssize_t)sizeof(buf) ||
++	    memcmp(buf, prefix, sizeof(prefix) - 1) || buf[len - 1] != '\n')
++		return -1;
++	buf[len - 1] = '\0';
++	value = buf + sizeof(prefix) - 1;
++	return _parse_u64(value, seq);
++}
++
+ static int _open_wal(void)
+ {
+ 	struct stat stat_buf;
++	char *checkpoint_path;
++	uint64_t checkpoint_seq;
+ 	/* Never silently recreate a lost ledger. Initial provisioning is a
+ 	 * separate, explicit administrative operation outside this module. */
+ 	int flags = O_RDWR | O_APPEND;
+@@ -881,11 +929,24 @@
+ 	    stat_buf.st_uid != geteuid() || stat_buf.st_nlink != 1 ||
+ 	    (stat_buf.st_mode & 0077))
+ 		goto fail;
+-	if (stat_buf.st_size == 0 || _replay_wal()) {
++	if (stat_buf.st_size == 0 || _replay_wal())
+ 		goto fail;
+-	}
++	checkpoint_path = xstrdup_printf("%s/%s", slurmctld_conf.state_save_location,
++					MQ_CHECKPOINT_FILE);
++	mq_checkpoint_fd = open(checkpoint_path, flags & ~O_APPEND);
++	xfree(checkpoint_path);
++	if (mq_checkpoint_fd < 0 || flock(mq_checkpoint_fd, LOCK_EX | LOCK_NB) < 0 ||
++	    fstat(mq_checkpoint_fd, &stat_buf) < 0 || !S_ISREG(stat_buf.st_mode) ||
++	    stat_buf.st_uid != geteuid() || stat_buf.st_nlink != 1 ||
++	    (stat_buf.st_mode & 0077) || _read_checkpoint(&checkpoint_seq) ||
++	    checkpoint_seq != mq_seq)
++		goto fail;
+ 	return 0;
+ fail:
++	if (mq_checkpoint_fd >= 0) {
++		close(mq_checkpoint_fd);
++		mq_checkpoint_fd = -1;
++	}
+ 	close(mq_fd);
+ 	mq_fd = -1;
+ 	return -1;
+@@ -1485,6 +1546,10 @@
+ 		close(mq_fd);
+ 		mq_fd = -1;
+ 	}
++	if (mq_checkpoint_fd >= 0) {
++		close(mq_checkpoint_fd);
++		mq_checkpoint_fd = -1;
++	}
+ 	_free_memory();
+ 	xfree(mq_path);
+ 	mq_path = NULL;
