@@ -1,0 +1,5 @@
+# Monthly quota tier projection candidate
+
+`tier-projection.patch` applies after `a636a7f`. It adds a read-only controller helper that projects a user's settled and running GPU-seconds at a supplied timestamp and returns debug before 5 hours, important before 105 total hours, normal before 605 hours plus approved normal grants, and exhausted thereafter. A missing, disabled, unhealthy, overflowed, or unprojectable ledger returns an error instead of a tier. Actual duration uses the existing per-allocation GPU count; grants add to normal capacity, so existing overage is absorbed first.
+
+This is a building block, not scheduler integration: multiple calls do not make an atomic multi-user ledger snapshot, and changing values during a comparator would violate sorting consistency. A scheduler must build a stable snapshot under appropriate locking, handle FIFO, backfill, reservation and user priority rules, and recheck eligibility before actual GPU allocation. No routing or authenticated grant transport exists. The controller remains disabled; no tests, runtime jobs or deployment were performed.

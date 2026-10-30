@@ -1,0 +1,71 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -977,6 +977,46 @@
+ 	return (_amount_cmp(&capacity, &usage) > 0) ? 1 : 0;
+ }
+ 
++int monthly_quota_tier_at(uid_t uid, uint64_t sec, uint32_t nsec,
++			  monthly_quota_tier_t *tier)
++{
++	mq_time_t now;
++	mq_amount_t usage, debug_limit, important_limit, normal_limit;
++	mq_month_record_t *record;
++	uint32_t month;
++	int rc = -1;
++
++	if (!tier || nsec >= MQ_NSEC_PER_SEC || (uid_t)(uint32_t)uid != uid)
++		return -1;
++	now.sec = sec;
++	now.nsec = nsec;
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || _month_key(&now, &month) ||
++	    _project_usage((uint32_t)uid, month, &now, &usage))
++		goto out;
++	debug_limit.sec = 5ULL * 60 * 60;
++	debug_limit.nsec = 0;
++	important_limit.sec = 105ULL * 60 * 60;
++	important_limit.nsec = 0;
++	normal_limit.sec = MQ_CAPACITY_GPU_SECONDS;
++	normal_limit.nsec = 0;
++	record = _find_month((uint32_t)uid, month, false);
++	if (record && _amount_add_amount(&normal_limit, &record->grants))
++		goto out;
++	if (_amount_cmp(&usage, &debug_limit) < 0)
++		*tier = MONTHLY_QUOTA_DEBUG;
++	else if (_amount_cmp(&usage, &important_limit) < 0)
++		*tier = MONTHLY_QUOTA_IMPORTANT;
++	else if (_amount_cmp(&usage, &normal_limit) < 0)
++		*tier = MONTHLY_QUOTA_NORMAL;
++	else
++		*tier = MONTHLY_QUOTA_EXHAUSTED;
++	rc = 0;
++out:
++	pthread_mutex_unlock(&mq_lock);
++	return rc;
++}
++
+ static int _check_shape_and_quota(struct job_record *job_ptr,
+ 					  uint64_t *tres_req_cnt,
+ 					  bool test_only,
+--- a/src/slurmctld/monthly_quota.h
++++ b/src/slurmctld/monthly_quota.h
+@@ -15,6 +15,19 @@
+ #include "src/common/list.h"
+ 
+ struct job_record;
++
++/* Ordered user consumption tiers; unknown must never be treated as normal. */
++typedef enum {
++	MONTHLY_QUOTA_DEBUG = 0,
++	MONTHLY_QUOTA_IMPORTANT = 1,
++	MONTHLY_QUOTA_NORMAL = 2,
++	MONTHLY_QUOTA_EXHAUSTED = 3
++} monthly_quota_tier_t;
++
++/* Read-only projected tier at an explicit realtime value. Calls are not an
++ * atomic multi-user ledger snapshot. Returns -1 for disabled/unknown state. */
++extern int monthly_quota_tier_at(uid_t uid, uint64_t sec, uint32_t nsec,
++				 monthly_quota_tier_t *tier);
+ 
+ /*
+  * Return values for the read-only and prepare calls:
