@@ -5,6 +5,8 @@ test "${TIME_ISOLATED_VALIDATION:-}" = 1
 test -f /.dockerenv
 base=/tmp/time-isolated
 prefix=${TIME_VALIDATION_PREFIX:-/opt/time/slurm19-2f57b3225733}
+service_user=${TIME_SERVICE_USER:-root}
+case "$service_user" in root|slurm) ;; *) exit 2;; esac
 gpu_count=${TIME_FAKE_GPU_COUNT:-1}
 case "$gpu_count" in 1|4) ;; *) echo 'Only 1 or 4 synthetic GPUs supported' >&2; exit 2;; esac
 request_gpus=${TIME_REQUEST_GPUS:-$gpu_count}
@@ -24,7 +26,7 @@ export SLURM_CONF="$base/slurm.conf"
 cat > "$SLURM_CONF" <<EOF
 ClusterName=time-isolated
 SlurmctldHost=time-test
-SlurmUser=root
+SlurmUser=$service_user
 AuthType=auth/munge
 CredType=cred/munge
 SlurmctldPort=16817
@@ -32,9 +34,9 @@ SlurmdPort=16818
 SlurmdParameters=config_overrides
 StateSaveLocation=$base/state
 SlurmdSpoolDir=$base/spool
-SlurmctldPidFile=$base/slurmctld.pid
+SlurmctldPidFile=$base/state/slurmctld.pid
 SlurmdPidFile=$base/slurmd.pid
-SlurmctldLogFile=$base/log/slurmctld.log
+SlurmctldLogFile=$base/state/slurmctld.log
 SlurmdLogFile=$base/log/slurmd.log
 PluginDir=$prefix/lib/slurm
 SlurmctldParameters=MonthlyGpuQuota
@@ -107,6 +109,10 @@ if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 
 fi
 chmod 600 "$base/state/monthly-quota.wal"
 if test -f "$base/state/monthly-quota.checkpoint"; then chmod 600 "$base/state/monthly-quota.checkpoint"; fi
+if test "$service_user" = slurm; then
+    chmod 755 "$base" /run/munge
+    chown -R slurm:slurm "$base/state"
+fi
 munged --force --foreground --key-file="$base/munge.key" --socket=/run/munge/munge.socket.2 \
     --pid-file="$base/munge.pid" --log-file="$base/log/munge.log" --seed-file="$base/seed" &
 munge_pid=$!
