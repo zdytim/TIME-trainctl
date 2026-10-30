@@ -69,6 +69,14 @@ if test "${TIME_EXHAUSTED_TEST:-0}" = 11; then
     printf 'preserve-me\n' > "$base/state/time-quota.sock"
     chmod 600 "$base/state/time-quota.sock"
 fi
+listener_pid=''
+if test "${TIME_EXHAUSTED_TEST:-0}" = 12; then
+    /validation/quota-socket-query listen &
+    listener_pid=$!
+    for _ in $(seq 1 30); do test -S "$base/state/time-quota.sock" && break; sleep .1; done
+    test -S "$base/state/time-quota.sock"
+    original_socket=$(stat -c '%d:%i' "$base/state/time-quota.sock")
+fi
 if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8 || test "${TIME_EXHAUSTED_TEST:-0}" = 9 || test "${TIME_EXHAUSTED_TEST:-0}" = 10; then
     if test "$gpu_count" = 4; then
         touch "$base/fakegpu0" "$base/fakegpu1" "$base/fakegpu2" "$base/fakegpu3"
@@ -83,7 +91,7 @@ if test -f "$base/state/monthly-quota.checkpoint"; then chmod 600 "$base/state/m
 munged --force --foreground --key-file="$base/munge.key" --socket=/run/munge/munge.socket.2 \
     --pid-file="$base/munge.pid" --log-file="$base/log/munge.log" --seed-file="$base/seed" &
 munge_pid=$!
-trap 'kill "$munge_pid" 2>/dev/null || true' EXIT
+trap 'kill "$munge_pid" 2>/dev/null || true; if test -n "$listener_pid"; then kill "$listener_pid" 2>/dev/null || true; fi' EXIT
 for _ in $(seq 1 30); do test -S /run/munge/munge.socket.2 && break; sleep .1; done
 if ! test -S /run/munge/munge.socket.2; then cat "$base/log/munge.log"; exit 1; fi
 timeout 45 slurmctld -D -v -f "$SLURM_CONF" > "$base/log/controller.out" 2>&1 &
@@ -93,7 +101,13 @@ for _ in $(seq 1 50); do
        grep -Eq '^Slurmctld\(primary\) at .* is UP' "$base/log/ping.out" &&
        kill -0 "$controller_pid" 2>/dev/null; then
         cat "$base/log/ping.out"
-        if test "${TIME_EXHAUSTED_TEST:-0}" = 11; then
+        if test "${TIME_EXHAUSTED_TEST:-0}" = 12; then
+            test -S "$base/state/time-quota.sock"
+            test "$(stat -c '%d:%i' "$base/state/time-quota.sock")" = "$original_socket"
+            kill -0 "$listener_pid"
+            grep -q 'monthly quota control socket unavailable' "$base/log/controller.out"
+            echo 'PASS: existing active listener was preserved'
+        elif test "${TIME_EXHAUSTED_TEST:-0}" = 11; then
             test -f "$base/state/time-quota.sock"
             test "$(cat "$base/state/time-quota.sock")" = preserve-me
             grep -q 'monthly quota control socket unavailable' "$base/log/controller.out"

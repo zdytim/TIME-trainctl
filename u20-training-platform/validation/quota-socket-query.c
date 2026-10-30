@@ -1,6 +1,7 @@
 /* Container-only helper for the isolated controller validation socket. */
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +24,16 @@ int main(int argc, char **argv)
     addr.sun_family = AF_UNIX;
     strcpy(addr.sun_path, "/tmp/time-isolated/state/time-quota.sock");
     fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (argc == 2 && !strcmp(argv[1], "listen")) {
+        if (fd < 0) return 1;
+        umask(0077);
+        if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) || listen(fd, 4)) return 1;
+        for (;;) {
+            int peer = accept(fd, NULL, NULL);
+            if (peer < 0) return 1;
+            close(peer);
+        }
+    }
     if (fd < 0 || connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         perror("isolated quota socket"); return 1;
     }
