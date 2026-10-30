@@ -26,3 +26,9 @@
   manifest. It does not modify system services, Slurm, or backend versions.
 - Monthly quota is shown as unknown when runtime capability discovery is absent;
   the client makes no enforcement claim and refuses monthly requests.
+
+- A request ID already present in the per-user ledger cannot be sent again,
+  including when its outcome is pending or unknown. Inspect `timectl
+  request-status <id>` first. This local guard cannot prevent retries made
+  from a different machine or state directory; server-side payload binding is
+  still required for cross-device idempotency.

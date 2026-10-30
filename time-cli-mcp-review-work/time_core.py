@@ -325,6 +325,13 @@ class RequestLedger(object):
                                 prior.get("body", {})) != prior.get("request_hash"):
                     raise TimeError("request_ledger_corrupt",
                                     "request ID record was modified and cannot be reused")
+                # The legacy broker does not guarantee idempotency for every
+                # mutation. A prior attempt may have succeeded even when its
+                # response was lost: never resend it automatically.
+                raise TimeError("request_already_attempted",
+                                "request ID was already attempted; inspect it with timectl request-status before taking further action",
+                                status=409, details={"request_id": request_id,
+                                                     "outcome": prior.get("outcome", "unknown")})
             else:
                 ledger["requests"][request_id] = {
                     "request_id": request_id,
