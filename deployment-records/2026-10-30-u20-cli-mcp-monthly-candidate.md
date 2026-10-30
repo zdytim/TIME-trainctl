@@ -1,0 +1,6 @@
+# u20 CLI/MCP candidate update, read-only MCP
+
+- Source commit `0858424`, pushed to `u20-slurm19` before deployment; target `u20-Z790-S-DDR4`, account `u20`, 2026-10-30 11:41 Asia/Shanghai.
+- Staged manifest-verified files in `/home/u20/.local/share/time/candidate-0858424/`. Repointed only the user's `~/.local/bin/timectl` and `~/.local/bin/time-mcp` wrappers from `candidate-a738651`; exact old contents and ownership were checked and saved in `/home/u20/.local/share/time/backup-before-0858424/`. The MCP wrapper explicitly unsets `TIME_MCP_CONSENT_FD`, so this entry stays read-only. The terminal-consent launcher was not installed. No server, controller, database, configuration, or job changed.
+- Deployment health: `timectl whoami` identified the authenticated `u20` user; MCP initialized, listed 10 tools and exposed none of submit, cancel, monthly request, decision or reconciliation. `slurmctld`, `slurmd` and `pro6000d-training` reported active. No behavior tests, prompts, mutations or training jobs were performed. The live broker has no new monthly capability, so monthly CLI creation remains locally refused.
+- Rollback not required or exercised. Verify wrappers still point to `candidate-0858424`, then restore their exact previous files from the backup. Monthly GPU-hour enforcement remains disabled and unverified.
