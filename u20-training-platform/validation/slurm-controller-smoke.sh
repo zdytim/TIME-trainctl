@@ -11,6 +11,9 @@ request_gpus=${TIME_REQUEST_GPUS:-$gpu_count}
 case "$request_gpus" in 1|4) ;; *) exit 2;; esac
 test "$request_gpus" -le "$gpu_count"
 export TIME_EXPECT_GPUS="$request_gpus"
+gpu_spec="gpu:$gpu_count"
+request_spec="gpu:$request_gpus"
+if test "${TIME_EXHAUSTED_TEST:-0}" = 14; then gpu_spec="gpu:fixture:$gpu_count"; request_spec="gpu:fixture:$request_gpus"; fi
 mkdir -p "$base/state" "$base/spool" "$base/log" /run/munge
 chmod 700 "$base" "$base/state" "$base/spool" /run/munge
 dd if=/dev/urandom of="$base/munge.key" bs=1024 count=1 status=none
@@ -41,7 +44,7 @@ ProctrackType=proctrack/linuxproc
 TaskPlugin=task/none
 AccountingStorageType=accounting_storage/none
 GresTypes=gpu
-NodeName=time-test CPUs=2 RealMemory=1024 State=UNKNOWN Gres=gpu:$gpu_count
+NodeName=time-test CPUs=2 RealMemory=1024 State=UNKNOWN Gres=$gpu_spec
 PartitionName=normal Nodes=time-test Default=YES State=UP
 EOF
 if test "${TIME_EXHAUSTED_TEST:-0}" = 13; then
@@ -89,13 +92,17 @@ if test "${TIME_EXHAUSTED_TEST:-0}" = 12; then
     test -S "$base/state/time-quota.sock"
     original_socket=$(stat -c '%d:%i' "$base/state/time-quota.sock")
 fi
-if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8 || test "${TIME_EXHAUSTED_TEST:-0}" = 9 || test "${TIME_EXHAUSTED_TEST:-0}" = 10 || test "${TIME_EXHAUSTED_TEST:-0}" = 13; then
+if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8 || test "${TIME_EXHAUSTED_TEST:-0}" = 9 || test "${TIME_EXHAUSTED_TEST:-0}" = 10 || test "${TIME_EXHAUSTED_TEST:-0}" = 13 || test "${TIME_EXHAUSTED_TEST:-0}" = 14; then
     if test "$gpu_count" = 4; then
         touch "$base/fakegpu0" "$base/fakegpu1" "$base/fakegpu2" "$base/fakegpu3"
         printf 'NodeName=time-test Name=gpu File=%s/fakegpu[0-3]\n' "$base" > "$base/gres.conf"
     else
         touch "$base/fakegpu"
-        printf 'NodeName=time-test Name=gpu File=%s/fakegpu\n' "$base" > "$base/gres.conf"
+        if test "${TIME_EXHAUSTED_TEST:-0}" = 14; then
+            printf 'NodeName=time-test Name=gpu Type=fixture File=%s/fakegpu\n' "$base" > "$base/gres.conf"
+        else
+            printf 'NodeName=time-test Name=gpu File=%s/fakegpu\n' "$base" > "$base/gres.conf"
+        fi
     fi
 fi
 chmod 600 "$base/state/monthly-quota.wal"
@@ -180,12 +187,17 @@ for _ in $(seq 1 50); do
             if test "$TIME_EXHAUSTED_TEST" = 8; then
                 job=$(sbatch --parsable --time=00:01:00 --mem=64M --chdir="$base" --output="$base/slurm-%j.out" --wrap='sleep 30')
             else
-                job=$(sbatch --parsable --time=00:01:00 --mem=64M --gres="gpu:$request_gpus" --chdir="$base" --output="$base/slurm-%j.out" --wrap='sleep 30')
+                job=$(sbatch --parsable --time=00:01:00 --mem=64M --gres="$request_spec" --chdir="$base" --output="$base/slurm-%j.out" --wrap='sleep 30')
             fi
             if test "$TIME_EXHAUSTED_TEST" = 7 || test "$TIME_EXHAUSTED_TEST" = 8; then sleep 10; else sleep 3; fi
             scontrol show job "$job" > "$base/log/job.out"
             cat "$base/log/job.out"
-            if test "$TIME_EXHAUSTED_TEST" = 8; then
+            if test "$TIME_EXHAUSTED_TEST" = 14; then
+                grep -q 'JobState=PENDING' "$base/log/job.out"
+                grep -Eq 'NodeList=\(null\)' "$base/log/job.out"
+                grep -q 'MonthlyGpuQuota:typed' "$base/log/job.out"
+                echo 'PASS: unsupported typed GPU request remains unallocated'
+            elif test "$TIME_EXHAUSTED_TEST" = 8; then
                 grep -q 'JobState=RUNNING' "$base/log/job.out"
                 echo "PASS: CPU-only job runs alone with ledger fixture ${TIME_CORRUPT_KIND:-missing}"
             elif test "$TIME_EXHAUSTED_TEST" = 7; then
