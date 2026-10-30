@@ -54,7 +54,7 @@ if test "${TIME_EXHAUSTED_TEST:-0}" = 20; then
     # The release-layout plugin embeds this config directory. Require a
     # container-private tmpfs instead of writing a live host configuration.
     test "$(stat -f -c %T /etc/slurm-llnl)" = tmpfs
-    cp /validation/job_submit.lua /etc/slurm-llnl/job_submit.lua
+    install -m 644 /validation/job_submit.lua /etc/slurm-llnl/job_submit.lua
 fi
 if test "${TIME_EXHAUSTED_TEST:-0}" = 13; then
     now=$(date +%s)
