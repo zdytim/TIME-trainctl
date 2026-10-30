@@ -134,11 +134,13 @@ def main():
     gpu_count=len(inventory)
     if gpu_count!=1 or inventory!=['0']: raise RuntimeError('u20 test policy expects exactly GPU index 0')
     cfg.update({'socket_path':'/run/pro6000d-training/backend.sock','socket_group':'pro6000d-training','training_group':'pro6000d-training','admin_group':'pro6000d-admin','job_group':'pro6000d-gpu','partition':'gpu','admission_required':True,'admission_plugin':not args.skip_slurm,'admission_plugin_path':'/etc/slurm-llnl/job_submit.lua','slurm_conf':'/etc/slurm-llnl/slurm.conf','jobcomp_path':'/var/log/slurm/jobcomp.log','max_requested_gpu':gpu_count,'max_cpu':cpus,'max_memory_mb':usable_mem,'max_time_minutes':4320,'default_quota':{'gpu_limit':1,'concurrent_job_limit':1,'concurrent_gpu_limit':1,'active_job_limit':8},'temporary_authorizations':{'enabled':not args.skip_slurm}})
-    cfg.update({'capacity':{'gpu':gpu_count,'cpu':cpus,'memory_mb':usable_mem},'max_job_minutes':4320,'jobcomp_log':'/var/log/slurm/jobcomp.log'})
+    if pwd.getpwnam(args.admin).pw_uid == 0:
+        raise SystemExit('GPU monitoring requires a non-root administrator account')
+    cfg.update({'capacity':{'gpu':gpu_count,'cpu':cpus,'memory_mb':usable_mem},'max_job_minutes':4320,'jobcomp_log':'/var/log/slurm/jobcomp.log','gpu_probe_user':args.admin})
     existing=Path('/etc/pro6000d-training/config.json')
     if existing.exists():
         previous=json.loads(existing.read_text())
-        for key in ('default_quota','qos','user_roots'):
+        for key in ('default_quota','qos','user_roots','gpu_probe_user'):
             if key in previous: cfg[key]=previous[key]
     install.write(existing,json.dumps(cfg,indent=2,ensure_ascii=False)+'\n',0o640)
     install.copy(ROOT/'backend/pro6000d-training-api.py','/usr/local/lib/pro6000d-training/pro6000d-training-api.py',0o644)

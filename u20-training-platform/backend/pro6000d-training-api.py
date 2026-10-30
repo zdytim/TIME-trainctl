@@ -471,12 +471,29 @@ class Service:
         if self.last_reconcile_ok:
             self.dispatch_waiting()
 
+    def gpu_probe_argv(self, executable: str) -> List[str]:
+        """Never invoke NVIDIA tooling with root's device-changing privileges."""
+        argv = [executable, "-q", "-x"]
+        if os.geteuid() != 0:
+            return argv
+        name = self.config.get("gpu_probe_user")
+        if not isinstance(name, str) or not name:
+            raise ValueError("未配置非特权 GPU 监控账户")
+        try:
+            user = pwd.getpwnam(name)
+        except KeyError:
+            raise ValueError("GPU 监控账户不存在")
+        if user.pw_uid <= 0:
+            raise ValueError("GPU 监控账户不能是 root")
+        return ["/usr/bin/setpriv", "--reuid", str(user.pw_uid), "--regid", str(user.pw_gid),
+                "--clear-groups"] + argv
+
     def gpu_xml(self) -> bytes:
         """One fixed read-only probe, bounded in wall time and captured bytes."""
         executable = shutil.which("nvidia-smi")
         if not executable:
             raise ValueError("nvidia-smi 未安装")
-        process = subprocess.Popen([executable, "-q", "-x"], stdin=subprocess.DEVNULL,
+        process = subprocess.Popen(self.gpu_probe_argv(executable), stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    env={"PATH":"/usr/bin:/bin", "LANG":"C.UTF-8"})
         selector = selectors.DefaultSelector()
