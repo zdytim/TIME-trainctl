@@ -1,0 +1,13 @@
+--- a/pro6000d-training-api.py
++++ b/pro6000d-training-api.py
+@@ -959,7 +959,9 @@
+                 if applied != 1:
+                     raise ApiError(409, "grant_state_inconsistent", "控制器可能已生效，但申请状态不一致，需管理员核对")
+                 self.store.audit(ident["uid"], ident["username"], "grant_applied", "application", aid, {"approved_by_uid": row["actor_uid"]}, "confirmed")
+-                self.add_notification(row["target_uid"], "application_decision", "额度追加已生效", "控制器已确认本月额度追加")
++                month = row["month"]
++                self.add_notification(row["target_uid"], "application_decision", "额度追加已生效",
++                                      "控制器已确认 %04d 年 %02d 月的额度追加" % (month // 100, month % 100))
+             db.execute("COMMIT")
+         except Exception:
+             db.execute("ROLLBACK")
