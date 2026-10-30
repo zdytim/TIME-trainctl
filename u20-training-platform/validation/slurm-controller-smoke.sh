@@ -137,7 +137,7 @@ for _ in $(seq 1 50); do
                 cat "$base/log/slurmd.out" "$base/log/node.out"; exit 1
             fi
             job=$(sbatch --parsable --time=00:01:00 --mem=64M --gres="gpu:$request_gpus" --chdir="$base" --output="$base/slurm-%j.out" --wrap='sleep 30')
-            sleep 3
+            if test "$TIME_EXHAUSTED_TEST" = 7; then sleep 10; else sleep 3; fi
             scontrol show job "$job" > "$base/log/job.out"
             cat "$base/log/job.out"
             if test "$TIME_EXHAUSTED_TEST" = 7; then
