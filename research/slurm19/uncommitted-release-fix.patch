@@ -1,0 +1,24 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -805,8 +805,7 @@
+ 		    to.nsec >= MQ_NSEC_PER_SEC)
+ 			return -1;
+ 		active = _find_active(job_id, generation);
+-		if (!active ||
+-		    ((!active->committed) && strcmp(event, "RELEASE")) ||
++		if (!active || !active->committed ||
+ 		    _time_cmp(&active->anchor, &to) > 0)
+ 			return -1;
+ 		if (_charge_interval(active, &active->anchor, &to))
+@@ -1453,6 +1452,11 @@
+ 	}
+ 	active = _find_active_job(job_ptr->job_id);
+ 	if (!active) {
++		pthread_mutex_unlock(&mq_lock);
++		return;
++	}
++	if (!active->committed) {
++		_mark_unhealthy("release encountered uncommitted allocation");
+ 		pthread_mutex_unlock(&mq_lock);
+ 		return;
+ 	}
