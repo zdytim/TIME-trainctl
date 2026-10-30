@@ -535,13 +535,19 @@ def job_outcome(job, mutation):
     if reason == "cancellation_requested" and state not in (
             "CANCELLED", "CANCELED", "COMPLETED", "FAILED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY"):
         return "accepted_pending"
-    if state == "SUBMITTING" or "uncertain" in reason or state == "COMPLETION_UNKNOWN":
+    if (state == "SUBMITTING" or "uncertain" in reason or
+            reason == "completion_unknown" or state == "COMPLETION_UNKNOWN"):
         return "unknown"
     if state == "CANCELLATION_REQUESTED":
         return "accepted_pending"
     if state == "REJECTED":
         return "rejected"
-    return "confirmed"
+    if state in ("WAITING_QUOTA", "PENDING", "RUNNING", "COMPLETING", "SUSPENDED",
+                 "CANCELLED", "CANCELED", "COMPLETED", "FAILED", "TIMEOUT",
+                 "NODE_FAIL", "OUT_OF_MEMORY", "EXPIRED", "PREEMPTED", "BOOT_FAIL",
+                 "DEADLINE", "REVOKED", "SPECIAL_EXIT"):
+        return "confirmed"
+    return "unknown"
 
 
 def mutation_result_outcome(method, path, data):
@@ -563,6 +569,8 @@ def mutation_result_outcome(method, path, data):
                 not application["status"]):
             return "unknown"
         if path != "/api/v1/applications" and application["id"] != path.split("/")[-2]:
+            return "unknown"
+        if application["status"].upper() not in ("PENDING", "APPROVED", "REJECTED", "EXPIRED"):
             return "unknown"
     return "confirmed"
 
