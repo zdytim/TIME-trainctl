@@ -1,0 +1,15 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -1442,6 +1442,12 @@
+ 		return;
+ 	pthread_mutex_lock(&mq_lock);
+ 	if (!mq_enabled) {
++		pthread_mutex_unlock(&mq_lock);
++		return;
++	}
++	/* Never append to a ledger with unresolved or failed durable writes.
++	 * Keep the active record as evidence; recovery will remain fail-closed. */
++	if (!mq_healthy || !mq_reconciled) {
+ 		pthread_mutex_unlock(&mq_lock);
+ 		return;
+ 	}

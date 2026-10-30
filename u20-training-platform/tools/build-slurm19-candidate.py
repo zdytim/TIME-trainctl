@@ -22,7 +22,7 @@ PATCHES = (
     "tier-scheduler-integration.patch", "ledger-checkpoint.patch", "checkpoint-parser-fix.patch",
     "grant-global-id-fix.patch", "controller-read-snapshot.patch", "cpu-array-shape-fix.patch",
     "controller-local-bridge.patch", "controller-local-bridge-io-fix.patch",
-    "selector-ambiguous-fix.patch", "replay-identity-fix.patch",
+    "selector-ambiguous-fix.patch", "replay-identity-fix.patch", "unhealthy-release-fix.patch",
 )
 
 
