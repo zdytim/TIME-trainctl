@@ -68,7 +68,7 @@
     },
     {
       "path": "time_mcp.py",
-      "sha256": "20d73d465898efa21ffa9b50c8b390a9dec0b72e6c42b009b0ece515f9449693",
+      "sha256": "d9f037c2a6d4a4da7ddf79dc64ad7784191f36e90d1c295f89f9459a9d481909",
       "mode": "0o755"
     },
     {
@@ -78,7 +78,7 @@
     },
     {
       "path": "timectl.py",
-      "sha256": "54066c68b07dc33db4dcbf5f5662efd5e144c4ab5cc2eb3a0771faa68b5c451d",
+      "sha256": "888e0c2e77adcdd99373b487dbf38dcd7d82970d11c49de30ee49b211b7a6c81",
       "mode": "0o755"
     },
     {

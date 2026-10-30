@@ -292,79 +292,83 @@ def authenticated_uid(client):
     return uid
 
 
+def request_status(client, ledger, request_id):
+    record = ledger.get(request_id)
+    if not record:
+        raise TimeError("request_not_found", "request ID is not in local ledger", status=404)
+    # Job request IDs only identify POST /jobs.  Do not correlate a
+    # cancellation, approval or other mutation with an unrelated job.
+    if (record.get("outcome") in ("pending", "unknown") and
+            record.get("method") == "POST" and record.get("path") == "/api/v1/jobs"):
+        try:
+            uid = authenticated_uid(client)
+            jobs = command_jobs(client)
+            matches = [job for job in jobs
+                       if type(job.get("owner_uid")) is int and job.get("owner_uid") == uid and
+                       job.get("client_request_id") == request_id]
+            if len(matches) == 1:
+                record = dict(record)
+                record["outcome"] = job_outcome(matches[0], mutation=True)
+                record["result"] = {"job": matches[0]}
+                ledger.update(request_id, outcome=record["outcome"], result=record["result"])
+        except TimeError:
+            pass
+    # A cancellation is correlated by its explicit target job, never by
+    # the submit request ID. A terminal non-cancelled state is not proof
+    # that the cancellation succeeded.
+    cancel_path = re.fullmatch(r"/api/v1/jobs/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/cancel",
+                               record.get("path", ""))
+    if (record.get("outcome") in ("pending", "unknown", "accepted_pending") and
+            record.get("method") == "POST" and cancel_path):
+        try:
+            jobs = command_jobs(client)
+            matches = [job for job in jobs if str(job.get("id")) == cancel_path.group(1)]
+            if len(matches) == 1:
+                job = matches[0]
+                state = str(job.get("state", "")).upper()
+                reason = str(job.get("reason_code", "")).lower()
+                if state in ("CANCELLED", "CANCELED"):
+                    outcome = "confirmed"
+                elif state in ("COMPLETED", "FAILED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY"):
+                    outcome = "unknown"
+                elif reason == "cancellation_requested" or state == "CANCELLATION_REQUESTED":
+                    outcome = "accepted_pending"
+                else:
+                    outcome = "unknown"
+                record = dict(record)
+                record["outcome"] = outcome
+                record["result"] = {"job": job}
+                ledger.update(request_id, outcome=outcome, result=record["result"])
+        except TimeError:
+            pass
+    if (record.get("outcome") in ("pending", "unknown") and
+            record.get("method") == "POST" and record.get("path") == "/api/v1/applications" and
+            record.get("body", {}).get("kind") == "monthly_gpu_hours"):
+        try:
+            body = record["body"]
+            uid = authenticated_uid(client)
+            applications = request_read(client, "GET", "/api/v1/applications").get("applications", [])
+            matches = [item for item in applications if item.get("kind") == "monthly_gpu_hours" and
+                       type(item.get("owner_uid")) is int and item.get("owner_uid") == uid and
+                       item.get("requested") == body.get("requested") and item.get("reason") == body.get("reason")]
+            if len(matches) == 1:
+                record = dict(record)
+                record["outcome"] = "confirmed"
+                record["result"] = {"application": matches[0]}
+                ledger.update(request_id, outcome="confirmed", result=record["result"])
+        except TimeError:
+            pass
+    return response_envelope(True, record, request_id=request_id,
+                             outcome=record.get("outcome", "unknown"))
+
+
 def handle(args):
     client, ledger = client_and_ledger(args)
     command = args.command
     if command == "capabilities":
         return response_envelope(True, feature_capabilities(discover_capabilities(client)))
     if command == "request-status":
-        record = ledger.get(args.request_id)
-        if not record:
-            raise TimeError("request_not_found", "request ID is not in local ledger", status=404)
-        # Job request IDs only identify POST /jobs.  Do not correlate a
-        # cancellation, approval or other mutation with an unrelated job.
-        if (record.get("outcome") in ("pending", "unknown") and
-                record.get("method") == "POST" and record.get("path") == "/api/v1/jobs"):
-            try:
-                uid = authenticated_uid(client)
-                jobs = command_jobs(client)
-                matches = [job for job in jobs
-                           if type(job.get("owner_uid")) is int and job.get("owner_uid") == uid and
-                           job.get("client_request_id") == args.request_id]
-                if len(matches) == 1:
-                    record = dict(record)
-                    record["outcome"] = job_outcome(matches[0], mutation=True)
-                    record["result"] = {"job": matches[0]}
-                    ledger.update(args.request_id, outcome=record["outcome"], result=record["result"])
-            except TimeError:
-                pass
-        # A cancellation is correlated by its explicit target job, never by
-        # the submit request ID. A terminal non-cancelled state is not proof
-        # that the cancellation succeeded.
-        cancel_path = re.fullmatch(r"/api/v1/jobs/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/cancel",
-                                   record.get("path", ""))
-        if (record.get("outcome") in ("pending", "unknown", "accepted_pending") and
-                record.get("method") == "POST" and cancel_path):
-            try:
-                jobs = command_jobs(client)
-                matches = [job for job in jobs if str(job.get("id")) == cancel_path.group(1)]
-                if len(matches) == 1:
-                    job = matches[0]
-                    state = str(job.get("state", "")).upper()
-                    reason = str(job.get("reason_code", "")).lower()
-                    if state in ("CANCELLED", "CANCELED"):
-                        outcome = "confirmed"
-                    elif state in ("COMPLETED", "FAILED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY"):
-                        outcome = "unknown"
-                    elif reason == "cancellation_requested" or state == "CANCELLATION_REQUESTED":
-                        outcome = "accepted_pending"
-                    else:
-                        outcome = "unknown"
-                    record = dict(record)
-                    record["outcome"] = outcome
-                    record["result"] = {"job": job}
-                    ledger.update(args.request_id, outcome=outcome, result=record["result"])
-            except TimeError:
-                pass
-        if (record.get("outcome") in ("pending", "unknown") and
-                record.get("method") == "POST" and record.get("path") == "/api/v1/applications" and
-                record.get("body", {}).get("kind") == "monthly_gpu_hours"):
-            try:
-                body = record["body"]
-                uid = authenticated_uid(client)
-                applications = request_read(client, "GET", "/api/v1/applications").get("applications", [])
-                matches = [item for item in applications if item.get("kind") == "monthly_gpu_hours" and
-                           type(item.get("owner_uid")) is int and item.get("owner_uid") == uid and
-                           item.get("requested") == body.get("requested") and item.get("reason") == body.get("reason")]
-                if len(matches) == 1:
-                    record = dict(record)
-                    record["outcome"] = "confirmed"
-                    record["result"] = {"application": matches[0]}
-                    ledger.update(args.request_id, outcome="confirmed", result=record["result"])
-            except TimeError:
-                pass
-        return response_envelope(True, record, request_id=args.request_id,
-                                 outcome=record.get("outcome", "unknown"))
+        return request_status(client, ledger, args.request_id)
     if command == "whoami":
         return response_envelope(True, request_read(client, "GET", "/api/v1/me"))
     if command == "doctor":

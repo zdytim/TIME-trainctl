@@ -14,6 +14,7 @@ import sys
 import traceback
 
 from time_consent import ConsentUnavailable, inherited_host_consent
+from timectl import request_status
 from time_core import (BrokerClient, RequestLedger, TimeError, UnknownOutcome,
                        discover_server_capabilities,
                        error_envelope, feature_capabilities,
@@ -88,6 +89,8 @@ TOOLS = [
                                 required=["job_id", "confirm", "user_intent"])},
     {"name": "time_list_requests", "description": "List broker resource applications visible to this user.",
      "inputSchema": obj_schema({})},
+    {"name": "time_request_status", "description": "Inspect and reconcile one local request ID without repeating the operation.",
+     "inputSchema": obj_schema({"request_id": STRING}, required=["request_id"])},
     {"name": "time_create_request", "description": "Create an idempotent monthly GPU-hour application after host approval; requires advertised server support.",
      "inputSchema": obj_schema({
          "kind": {"type": "string", "enum": ["monthly_gpu_hours"]},
@@ -266,6 +269,11 @@ class Server(object):
             return response_envelope(True, data, request_id=request_id, outcome=outcome)
         if name == "time_list_requests":
             return response_envelope(True, self.read("GET", "/api/v1/applications"))
+        if name == "time_request_status":
+            request_id = require_string(args, "request_id")
+            if not re.fullmatch(r"[A-Za-z0-9-]{8,80}", request_id):
+                raise TimeError("invalid_arguments", "invalid client request ID", status=400)
+            return request_status(self.client, self.ledger or RequestLedger(), request_id)
         if name == "time_create_request":
             require_intent(args, "create_request")
             if args.get("kind") != "monthly_gpu_hours":
