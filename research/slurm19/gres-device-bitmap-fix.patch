@@ -1,0 +1,36 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -667,14 +667,19 @@
+ 			return -1;
+ 		}
+ 		if (allocated) {
+-			if (gpu_state->node_cnt != 1 || !gpu_state->gres_cnt_node_alloc) {
++			if (gpu_state->node_cnt != 1 || !gpu_state->gres_cnt_node_alloc ||
++			    !gpu_state->gres_bit_alloc || !gpu_state->gres_bit_alloc[0]) {
+ 				*why = "single-node GPU allocation is not provable";
+ 				return -1;
+ 			}
+ 			count = gpu_state->gres_cnt_node_alloc[0];
++			if (count != (uint64_t)bit_set_count(gpu_state->gres_bit_alloc[0])) {
++				*why = "GPU allocation bitmap disagrees with count";
++				return -1;
++			}
+ 		} else {
+ 			if (!nodes || bit_set_count(nodes) != 1 ||
+-			    !gpu_state->gres_cnt_node_select ||
++			    !gpu_state->gres_cnt_node_select || !gpu_state->gres_bit_select ||
+ 			    gpu_state->total_node_cnt != (uint32_t)bit_size(nodes)) {
+ 				*why = "single-node GPU selection is not provable";
+ 				return -1;
+@@ -685,6 +690,11 @@
+ 				return -1;
+ 			}
+ 			count = gpu_state->gres_cnt_node_select[index];
++			if (!gpu_state->gres_bit_select[index] ||
++			    count != (uint64_t)bit_set_count(gpu_state->gres_bit_select[index])) {
++				*why = "GPU selection bitmap disagrees with count";
++				return -1;
++			}
+ 		}
+ 		if (!count || count != gpu_state->gres_per_node ||
+ 		    count != gpu_state->total_gres) {

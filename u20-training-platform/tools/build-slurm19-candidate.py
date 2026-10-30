@@ -26,6 +26,7 @@ PATCHES = (
     "grant-scheduler-wakeup.patch", "tier-stale-queue-fix.patch", "quota-denial-timestamps-fix.patch",
     "untracked-completing-recovery-fix.patch", "uncommitted-release-fix.patch", "strict-grant-replay-fix.patch",
     "wal-empty-fields-fix.patch", "typed-gpu-admission-fix.patch", "single-node-gres-fallback.patch",
+    "gres-device-bitmap-fix.patch",
 )
 
 
