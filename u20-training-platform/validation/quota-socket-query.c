@@ -58,5 +58,11 @@ int main(int argc, char **argv)
         (fields[12] != expected_gpus || fields[13] != 1 || fields[2] < 1)) {
         fprintf(stderr, "running allocation or elapsed usage is not accounted for\n"); return 1;
     }
+    if (argc == 2 && !strcmp(argv[1], "root-tier")) {
+        const char *value = getenv("TIME_EXPECT_TIER");
+        if (!value || fields[1] != strtoull(value, NULL, 10)) {
+            fprintf(stderr, "synthetic user has an unexpected tier\n"); return 1;
+        }
+    }
     return 0;
 }

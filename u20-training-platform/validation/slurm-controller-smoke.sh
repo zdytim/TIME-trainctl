@@ -41,9 +41,11 @@ GresTypes=gpu
 NodeName=time-test CPUs=2 RealMemory=256 State=UNKNOWN Gres=gpu:$gpu_count
 PartitionName=normal Nodes=time-test Default=YES State=UP
 EOF
-if test "${TIME_EXHAUSTED_TEST:-0}" = 1; then
+if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 3; then
     now=$(date +%s)
-    start=$((now - 544500))
+    seeded=${TIME_SEED_GPU_SECONDS:-2178000}
+    test "$seeded" -gt 0 && test $((seeded % 4)) -eq 0
+    start=$((now - seeded / 4))
     test "$(date -u -d "@$((now + 28800))" +%Y%m)" = "$(date -u -d "@$((start + 28800))" +%Y%m)"
     printf 'U20MQ1|HEADER|1\nU20MQ1|1|PREPARE|900000|0|1|4|%s|0\nU20MQ1|2|COMMIT|900000|1\nU20MQ1|3|RELEASE|900000|1|%s|0\n' "$start" "$now" > "$base/state/monthly-quota.wal"
     printf 'U20MQ1|CHECKPOINT|3\n' > "$base/state/monthly-quota.checkpoint"
@@ -51,7 +53,7 @@ else
     printf 'U20MQ1|HEADER|1\n' > "$base/state/monthly-quota.wal"
     printf 'U20MQ1|CHECKPOINT|0\n' > "$base/state/monthly-quota.checkpoint"
 fi
-if test "${TIME_EXHAUSTED_TEST:-0}" != 0; then
+if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2; then
     if test "$gpu_count" = 4; then
         touch "$base/fakegpu0" "$base/fakegpu1" "$base/fakegpu2" "$base/fakegpu3"
         printf 'NodeName=time-test Name=gpu File=%s/fakegpu[0-3]\n' "$base" > "$base/gres.conf"
@@ -74,7 +76,10 @@ for _ in $(seq 1 50); do
        grep -Eq '^Slurmctld\(primary\) at .* is UP' "$base/log/ping.out" &&
        kill -0 "$controller_pid" 2>/dev/null; then
         cat "$base/log/ping.out"
-        if test "${TIME_EXHAUSTED_TEST:-0}" != 0; then
+        if test "${TIME_EXHAUSTED_TEST:-0}" = 3; then
+            /validation/quota-socket-query root-tier
+            echo 'PASS: expected monthly tier at seeded usage'
+        elif test "${TIME_EXHAUSTED_TEST:-0}" != 0; then
             if test "$TIME_EXHAUSTED_TEST" = 1; then
                 /validation/quota-socket-query root
             else
