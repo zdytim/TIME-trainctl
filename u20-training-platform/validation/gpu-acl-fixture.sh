@@ -15,6 +15,7 @@ trainer_uid=$(id -u timzhang)
 trainer_gid=$(id -g timzhang)
 admin_uid=$(id -u u20)
 setfacl -m "u:$admin_uid:rw,g:$training_gid:---,g:$runtime_gid:rw,o::---" "$file"
+if id gdm >/dev/null 2>&1; then setfacl -m "u:$(id -u gdm):rw" "$file"; fi
 export TIME_ACL_FILE="$file"
 check='import os; p=os.environ["TIME_ACL_FILE"]; expected=os.environ["TIME_ACL_EXPECT"]; allowed=False
 try:
@@ -26,5 +27,6 @@ assert allowed == (expected == "allow")'
 TIME_ACL_EXPECT=deny runuser -u nobody -- python3 -c "$check"
 TIME_ACL_EXPECT=deny runuser -u timzhang -- python3 -c "$check"
 TIME_ACL_EXPECT=allow runuser -u u20 -- python3 -c "$check"
+if id gdm >/dev/null 2>&1; then TIME_ACL_EXPECT=allow runuser -u gdm -- python3 -c "$check"; fi
 TIME_ACL_EXPECT=allow setpriv --reuid="$trainer_uid" --regid="$runtime_gid" --groups="$training_gid,$trainer_gid" python3 -c "$check"
 echo 'PASS: fixture denies ordinary direct access and permits admin and scheduled runtime group'
