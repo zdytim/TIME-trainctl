@@ -1,0 +1,97 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -332,20 +332,6 @@
+ 	return 0;
+ }
+ 
+-static int _append_line(const char *format, ...)
+-{
+-	char line[1024];
+-	va_list ap;
+-	int len;
+-
+-	va_start(ap, format);
+-	len = vsnprintf(line, sizeof(line), format, ap);
+-	va_end(ap);
+-	if (len < 0 || (size_t)len >= sizeof(line))
+-		return -1;
+-	return _write_all(line, (size_t)len);
+-}
+-
+ static int _append_event(const char *format, ...)
+ {
+ 	char body[900], line[1024];
+@@ -353,6 +339,8 @@
+ 	int body_len, line_len;
+ 	uint64_t seq = mq_seq + 1;
+ 
++	if (mq_seq == UINT64_MAX)
++		return -1;
+ 	va_start(ap, format);
+ 	body_len = vsnprintf(body, sizeof(body), format, ap);
+ 	va_end(ap);
+@@ -802,6 +790,7 @@
+ 	size_t line_size = 0;
+ 	ssize_t line_len;
+ 	uint64_t seq;
++	bool header_seen = false;
+ 	int rc = -1;
+ 
+ 	if (lseek(mq_fd, 0, SEEK_SET) < 0)
+@@ -829,17 +818,19 @@
+ 		if (field || field_count < 3 || strcmp(fields[0], MQ_WAL_VERSION))
+ 			goto out;
+ 		if (!strcmp(fields[1], "HEADER")) {
+-			if (field_count != 3 || strcmp(fields[2], "1"))
++			if (header_seen || field_count != 3 || strcmp(fields[2], "1"))
+ 				goto out;
++			header_seen = true;
+ 			continue;
+ 		}
+-		if (_parse_u64(fields[1], &seq) || seq <= mq_seq)
++		if (!header_seen || mq_seq == UINT64_MAX ||
++		    _parse_u64(fields[1], &seq) || seq != mq_seq + 1)
+ 			goto out;
+ 		if (_replay_event(fields, field_count))
+ 			goto out;
+ 		mq_seq = seq;
+ 	}
+-	if (ferror(stream))
++	if (ferror(stream) || !header_seen)
+ 		goto out;
+ 	rc = 0;
+ out:
+@@ -853,7 +844,9 @@
+ static int _open_wal(void)
+ {
+ 	struct stat stat_buf;
+-	int flags = O_RDWR | O_APPEND | O_CREAT;
++	/* Never silently recreate a lost ledger. Initial provisioning is a
++	 * separate, explicit administrative operation outside this module. */
++	int flags = O_RDWR | O_APPEND;
+ 
+ 	if (!slurmctld_conf.state_save_location ||
+ 	    !slurmctld_conf.state_save_location[0])
+@@ -868,17 +861,16 @@
+ #ifdef O_NOFOLLOW
+ 	flags |= O_NOFOLLOW;
+ #endif
+-	mq_fd = open(mq_path, flags, 0600);
++	mq_fd = open(mq_path, flags);
+ 	if (mq_fd < 0)
+ 		return -1;
+ 	if (flock(mq_fd, LOCK_EX | LOCK_NB) < 0)
+ 		goto fail;
+-	if (fstat(mq_fd, &stat_buf) < 0)
++	if (fstat(mq_fd, &stat_buf) < 0 || !S_ISREG(stat_buf.st_mode) ||
++	    stat_buf.st_uid != geteuid() || stat_buf.st_nlink != 1 ||
++	    (stat_buf.st_mode & 0077))
+ 		goto fail;
+-	if (stat_buf.st_size == 0) {
+-		if (_append_line(MQ_WAL_VERSION "|HEADER|1\n"))
+-			goto fail;
+-	} else if (_replay_wal()) {
++	if (stat_buf.st_size == 0 || _replay_wal()) {
+ 		goto fail;
+ 	}
+ 	return 0;

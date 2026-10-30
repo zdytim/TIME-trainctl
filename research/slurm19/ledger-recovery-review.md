@@ -1,0 +1,5 @@
+# Slurm 19 ledger recovery candidate
+
+The `6725de1` candidate opened the ledger with `O_CREAT` and wrote a new header when a file was missing or empty. This could reset previously consumed monthly usage after loss or truncation. `ledger-recovery-fix.patch` removes implicit creation, rejects missing/empty files and files that are not regular, single-link, owned by the effective controller user, and private to its owner. It also requires exactly one first header and consecutive, non-overflowing record sequence numbers. Provisioning is explicitly outside the controller and still needs an audited initial setup procedure.
+
+These checks reduce accidental fail-open cases; they do not detect rollback to a valid earlier prefix, including a valid header-only file. The candidate does not yet have a trusted high-water mark or complete restore procedure, so the gate cannot safely be enabled. The target filesystem permissions and SlurmUser/StateSaveLocation also remain unverified against production. This patch is staged for review only; no tests or production changes were made.
