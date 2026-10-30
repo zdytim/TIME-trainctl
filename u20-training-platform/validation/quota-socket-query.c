@@ -25,7 +25,7 @@ int main(int argc, char **argv)
     if (fd < 0 || connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         perror("isolated quota socket"); return 1;
     }
-    const char *request = argc == 2 && !strcmp(argv[1], "root") ? "SNAP 0\n" : "SNAP 1001\n";
+    const char *request = argc == 2 && !strncmp(argv[1], "root", 4) ? "SNAP 0\n" : "SNAP 1001\n";
     size_t len = strlen(request);
     if (write(fd, request, len) != (ssize_t)len) { perror("snapshot write"); return 1; }
     count = read(fd, buf, sizeof(buf) - 1);
@@ -48,6 +48,9 @@ int main(int argc, char **argv)
     }
     if (argc == 2 && !strcmp(argv[1], "root") && fields[1] != 3) {
         fprintf(stderr, "synthetic user is not exhausted\n"); return 1;
+    }
+    if (argc == 2 && !strcmp(argv[1], "root-eligible") && fields[1] != 0) {
+        fprintf(stderr, "synthetic user is not in debug tier\n"); return 1;
     }
     return 0;
 }
