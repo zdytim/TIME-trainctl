@@ -12,6 +12,7 @@ import tempfile
 import time
 from urllib.parse import quote
 
+sys.dont_write_bytecode = True
 assert os.geteuid() == 0
 assert os.environ.get('TIME_SHADOW_MIGRATION') == '1'
 assert len(sys.argv) == 2
