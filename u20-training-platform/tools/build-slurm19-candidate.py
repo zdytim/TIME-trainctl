@@ -32,6 +32,7 @@ PATCHES = (
     "stale-control-socket-fix.patch",
     "wal-checkpoint-sha256.patch",
     "root-witness-anchor.patch",
+    "preserve-witness-fd.patch",
 )
 
 # u20's live configuration requires these plugins.  A successful compiler
