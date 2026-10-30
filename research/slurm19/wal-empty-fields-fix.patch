@@ -1,0 +1,30 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -851,20 +851,23 @@
+ 		return -1;
+ 	while ((line_len = getline(&line, &line_size, stream)) >= 0) {
+ 		char *fields[16];
+-		char *save = NULL;
++		char *save = line;
+ 		char *field;
+ 		int field_count = 0;
+ 
+-		if (line_len == 0 || line[line_len - 1] != '\n')
++		if (line_len == 0 || line[line_len - 1] != '\n' ||
++		    memchr(line, '\0', (size_t)line_len))
+ 			goto out;
+ 		line[line_len - 1] = '\0';
+ 		if (line_len > 1 && line[line_len - 2] == '\r')
+ 			line[line_len - 2] = '\0';
+-		field = strtok_r(line, "|", &save);
++		field = strsep(&save, "|");
+ 		while (field && field_count < (int)(sizeof(fields) /
+ 							 sizeof(fields[0]))) {
++			if (!field[0])
++				goto out;
+ 			fields[field_count++] = field;
+-			field = strtok_r(NULL, "|", &save);
++			field = strsep(&save, "|");
+ 		}
+ 		if (field || field_count < 3 || strcmp(fields[0], MQ_WAL_VERSION))
+ 			goto out;
