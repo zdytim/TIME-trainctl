@@ -71,11 +71,13 @@ def inspect(wal, checkpoint, witness):
     if not cp or not lines:
         raise ValueError('malformed checkpoint or empty witness')
     last = None
+    witness_digests = []
     for index, line in enumerate(lines):
         record = WITNESS.fullmatch(line)
         if not record or int(record.group(1)) != index:
             raise ValueError('malformed or nonconsecutive witness')
         last = record
+        witness_digests.append(record.group(2).decode())
     digest = hashlib.sha256(wal).hexdigest()
     # This is a structural count, not a replay of controller business rules.
     wal_lines = wal.splitlines(keepends=True)
@@ -88,13 +90,22 @@ def inspect(wal, checkpoint, witness):
         if len(fields) < 4 or fields[0] != b'U20MQ1' or fields[1] != str(seq).encode():
             raise ValueError('invalid WAL sequence')
     wal_seq = len(wal_lines) - 1
+    # Each witness record contains the digest of the WAL through that event.
+    # Check every available prefix, not merely the final witness record.
+    prefix = hashlib.sha256()
+    history_matches = len(witness_digests) <= len(wal_lines)
+    for index, line in enumerate(wal_lines):
+        prefix.update(line)
+        if index < len(witness_digests) and prefix.hexdigest() != witness_digests[index]:
+            history_matches = False
     checkpoint_seq, checkpoint_digest = int(cp.group(1)), cp.group(2).decode()
     witness_seq, witness_digest = int(last.group(1)), last.group(2).decode()
-    match = (wal_seq == checkpoint_seq == witness_seq and
+    match = (history_matches and wal_seq == checkpoint_seq == witness_seq and
              digest == checkpoint_digest == witness_digest)
     return {'matching': match, 'wal_sequence': wal_seq, 'checkpoint_sequence': checkpoint_seq,
             'witness_sequence': witness_seq, 'wal_sha256': digest,
             'checkpoint_sha256': checkpoint_digest, 'witness_sha256': witness_digest,
+            'witness_history_matches_wal': history_matches,
             'recovery_readiness': 'not assessed',
             'note': 'No replay or repair was performed; preserve originals and reconcile Slurm job state.'}
 
