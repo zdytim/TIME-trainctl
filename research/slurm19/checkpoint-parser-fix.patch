@@ -1,0 +1,22 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -884,7 +884,7 @@
+ static int _read_checkpoint(uint64_t *seq)
+ {
+ 	char buf[96], *value;
+-	ssize_t len;
++	ssize_t len, i;
+ 	const char prefix[] = MQ_WAL_VERSION "|CHECKPOINT|";
+ 
+ 	do {
+@@ -893,6 +893,10 @@
+ 	if (len <= (ssize_t)sizeof(prefix) || len >= (ssize_t)sizeof(buf) ||
+ 	    memcmp(buf, prefix, sizeof(prefix) - 1) || buf[len - 1] != '\n')
+ 		return -1;
++	for (i = (ssize_t)sizeof(prefix) - 1; i < len - 1; i++) {
++		if (buf[i] < '0' || buf[i] > '9')
++			return -1;
++	}
+ 	buf[len - 1] = '\0';
+ 	value = buf + sizeof(prefix) - 1;
+ 	return _parse_u64(value, seq);

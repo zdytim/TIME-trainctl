@@ -5,3 +5,5 @@
 This detects a WAL-only rollback to an older complete event prefix if the checkpoint remains current. It cannot detect rollback or coordinated modification of both files, nor same-sequence content changes; the state directory and checkpoint must be protected and an external trusted anchor or checksum/integrity design is still needed for stronger guarantees. It adds one synchronous checkpoint write per event and may affect scheduling latency. Code is unvalidated for crash/power-loss behavior; controller remains disabled and uninstalled. No tests were run.
 
 On 2026-10-30, the `1adcfef` patch applied to the isolated u20 source and `nice -n 19 make -j2 -C src` exited 0. No warning/error lines appeared in the incremental build log. Source-tree controller SHA-256: `0aa59c66267c8ddfbfc92527fe9960ee885def69f97090a17ee68ce7d68d9437`. Running `slurmctld`, `slurmd`, and `pro6000d-training` reported active afterwards. This build is not deployed or behavior-tested.
+
+`checkpoint-parser-fix.patch` follows `1adcfef` and rejects non-digit sequence bytes, including embedded NULs, before numeric parsing; it is part of the candidate and has not been behavior-tested.
