@@ -1,0 +1,104 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -15,0 +16 @@
++#include <limits.h>
+@@ -92,0 +94 @@
++static int mq_witness_fd = -1;
+@@ -375,0 +378,26 @@
++/* The descriptor was opened and locked by the root launcher before the
++ * controller dropped privileges. Append + fsync is part of each transaction. */
++static int _append_witness(uint64_t seq, const unsigned char digest[SHA256_DIGEST_LENGTH])
++{
++	char line[160], hex[SHA256_DIGEST_LENGTH * 2 + 1];
++	static const char digits[] = "0123456789abcdef";
++	ssize_t n;
++	size_t i, offset = 0;
++	int len;
++	if (mq_witness_fd < 0) return -1;
++	for (i = 0; i < SHA256_DIGEST_LENGTH; i++) {
++		hex[i * 2] = digits[digest[i] >> 4];
++		hex[i * 2 + 1] = digits[digest[i] & 15];
++	}
++	hex[sizeof(hex) - 1] = '\0';
++	len = snprintf(line, sizeof(line), "U20MQA1|%" PRIu64 "|%s\n", seq, hex);
++	if (len <= 0 || (size_t)len >= sizeof(line)) return -1;
++	while (offset < (size_t)len) {
++		n = write(mq_witness_fd, line + offset, (size_t)len - offset);
++		if (n < 0 && errno == EINTR) continue;
++		if (n <= 0) return -1;
++		offset += (size_t)n;
++	}
++	return fsync(mq_witness_fd) == 0 ? 0 : -1;
++}
++
+@@ -401 +429,2 @@
+-	    _write_all(line, (size_t)line_len) || _write_checkpoint(seq, digest))
++	    _write_all(line, (size_t)line_len) || _write_checkpoint(seq, digest) ||
++	    _append_witness(seq, digest))
+@@ -1074,0 +1104,55 @@
++/* Fail closed if the root-owned witness cannot prove the local WAL is its
++ * latest committed version. Whole-device rollback remains out of scope. */
++static int _open_witness(uint64_t expected_seq, const unsigned char digest[SHA256_DIGEST_LENGTH])
++{
++	const char *text = getenv("TIME_QUOTA_WITNESS_FD");
++	static const char digits[] = "0123456789abcdef";
++	struct stat st;
++	uint64_t raw_fd, seq, last = 0;
++	int flags, duplicate, rc = -1;
++	bool any = false;
++	char line[160], *sep, *value;
++	unsigned char last_digest[SHA256_DIGEST_LENGTH];
++	FILE *stream;
++	size_t i, len;
++	if (!text || !text[0]) return -1;
++	for (i = 0; text[i]; i++) if (text[i] < '0' || text[i] > '9') return -1;
++	if (_parse_u64(text, &raw_fd) || raw_fd < 3 || raw_fd > INT_MAX) return -1;
++	flags = fcntl((int)raw_fd, F_GETFL);
++	if (flags < 0 || (flags & O_ACCMODE) != O_RDWR || !(flags & O_APPEND) ||
++	    fstat((int)raw_fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != 0 ||
++	    st.st_nlink != 1 || (st.st_mode & 0077) || st.st_size == 0 ||
++	    flock((int)raw_fd, LOCK_EX | LOCK_NB) ||
++	    fcntl((int)raw_fd, F_SETFD, FD_CLOEXEC)) return -1;
++	mq_witness_fd = (int)raw_fd;
++	if (lseek(mq_witness_fd, 0, SEEK_SET) < 0 || (duplicate = dup(mq_witness_fd)) < 0)
++		return -1;
++	stream = fdopen(duplicate, "r");
++	if (!stream) { close(duplicate); return -1; }
++	while (fgets(line, sizeof(line), stream)) {
++		len = strlen(line);
++		if (len < 75 || line[len - 1] != '\n' || strncmp(line, "U20MQA1|", 8)) goto done;
++		line[len - 1] = '\0';
++		value = line + 8;
++		sep = strchr(value, '|');
++		if (!sep || sep == value || strlen(sep + 1) != SHA256_DIGEST_LENGTH * 2) goto done;
++		for (i = 0; i < (size_t)(sep - value); i++) if (value[i] < '0' || value[i] > '9') goto done;
++		*sep = '\0';
++		if (_parse_u64(value, &seq) || (!any && seq != 0) ||
++		    (any && (last == UINT64_MAX || seq != last + 1))) goto done;
++		for (i = 0; i < SHA256_DIGEST_LENGTH; i++) {
++			const char *high = strchr(digits, sep[1 + i * 2]);
++			const char *low = strchr(digits, sep[2 + i * 2]);
++			if (!high || !low || high == digits + 16 || low == digits + 16) goto done;
++			last_digest[i] = (unsigned char)(((high - digits) << 4) | (low - digits));
++		}
++		last = seq;
++		any = true;
++	}
++	if (!ferror(stream) && any && last == expected_seq &&
++	    !memcmp(last_digest, digest, SHA256_DIGEST_LENGTH)) rc = 0;
++ done:
++	fclose(stream);
++	return rc;
++}
++
+@@ -1117 +1201 @@
+-	    checkpoint_seq != mq_seq)
++	    checkpoint_seq != mq_seq || _open_witness(mq_seq, digest))
+@@ -1810 +1894 @@
+-		(mq_fd >= 0) && (mq_checkpoint_fd >= 0);
++		(mq_fd >= 0) && (mq_checkpoint_fd >= 0) && (mq_witness_fd >= 0);
+@@ -1834,0 +1919,4 @@
++	}
++	if (mq_witness_fd >= 0) {
++		close(mq_witness_fd);
++		mq_witness_fd = -1;

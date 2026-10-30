@@ -68,7 +68,7 @@ if test "${TIME_EXHAUSTED_TEST:-0}" = 13; then
     chmod 777 "$base/out"
     touch "$base/out/order"
     chmod 666 "$base/out/order"
-elif test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 3 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 5 || test "${TIME_EXHAUSTED_TEST:-0}" = 6 || test "${TIME_EXHAUSTED_TEST:-0}" = 16 || test "${TIME_EXHAUSTED_TEST:-0}" = 17 || test "${TIME_CORRUPT_KIND:-}" = content; then
+elif test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 3 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 5 || test "${TIME_EXHAUSTED_TEST:-0}" = 6 || test "${TIME_EXHAUSTED_TEST:-0}" = 16 || test "${TIME_EXHAUSTED_TEST:-0}" = 17 || test "${TIME_CORRUPT_KIND:-}" = content || test "${TIME_CORRUPT_KIND:-}" = rollback; then
     now=$(date +%s)
     seeded=${TIME_SEED_GPU_SECONDS:-2178000}
     test "$seeded" -gt 0 && test $((seeded % 4)) -eq 0
@@ -93,12 +93,38 @@ if test "${TIME_CHECKPOINT_SHA256:-0}" = 1; then
     checkpoint=$(tr -d '\n' < "$base/state/monthly-quota.checkpoint")
     printf '%s|%s\n' "$checkpoint" "$checksum" > "$base/state/monthly-quota.checkpoint"
 fi
+if test "${TIME_WITNESS:-0}" = 1; then
+    test "${TIME_CHECKPOINT_SHA256:-0}" = 1
+    test "$(stat -f -c %T /var/lib/time-quota-anchor)" = tmpfs
+    /opt/py310/bin/python3 - "$base/state/monthly-quota.wal" <<'PY'
+import hashlib, os, sys
+lines = open(sys.argv[1], 'rb').readlines()
+assert lines and lines[0] == b'U20MQ1|HEADER|1\n'
+h = hashlib.sha256(lines[0])
+fd = os.open('/var/lib/time-quota-anchor/witness.log', os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o600)
+with os.fdopen(fd, 'wb') as out:
+    out.write(('U20MQA1|0|%s\n' % h.hexdigest()).encode())
+    for index, line in enumerate(lines[1:], 1):
+        assert int(line.split(b'|', 2)[1]) == index
+        h.update(line)
+        out.write(('U20MQA1|%d|%s\n' % (index, h.hexdigest())).encode())
+    out.flush()
+    os.fsync(out.fileno())
+PY
+fi
 if test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8; then
     case "${TIME_CORRUPT_KIND:-missing}" in
         missing) rm "$base/state/monthly-quota.checkpoint" ;;
         truncated) printf 'U20MQ1|1|PREPARE' >> "$base/state/monthly-quota.wal" ;;
         content) sed -i 's/|PREPARE|900000|0|1|4|/|PREPARE|900000|1|1|4|/' "$base/state/monthly-quota.wal" ;;
         oldformat) ;;
+        witness_missing) ;;
+        rollback)
+            test "${TIME_WITNESS:-0}" = 1
+            printf 'U20MQ1|HEADER|1\n' > "$base/state/monthly-quota.wal"
+            checksum=$(sha256sum "$base/state/monthly-quota.wal" | cut -d' ' -f1)
+            printf 'U20MQ1|CHECKPOINT|0|%s\n' "$checksum" > "$base/state/monthly-quota.checkpoint"
+            ;;
         none) ;;
         *) exit 2 ;;
     esac
@@ -141,7 +167,11 @@ munge_pid=$!
 trap 'kill "$munge_pid" 2>/dev/null || true; if test -n "$listener_pid"; then kill "$listener_pid" 2>/dev/null || true; fi' EXIT
 for _ in $(seq 1 30); do test -S /run/munge/munge.socket.2 && break; sleep .1; done
 if ! test -S /run/munge/munge.socket.2; then cat "$base/log/munge.log"; exit 1; fi
-timeout 45 slurmctld -D -v -f "$SLURM_CONF" > "$base/log/controller.out" 2>&1 &
+controller=(slurmctld)
+if test "${TIME_WITNESS:-0}" = 1; then
+    controller=(/opt/py310/bin/python3 /validation/time-quota-anchor-exec.py "$prefix/sbin/slurmctld")
+fi
+timeout 45 "${controller[@]}" -D -v -f "$SLURM_CONF" > "$base/log/controller.out" 2>&1 &
 controller_pid=$!
 for _ in $(seq 1 50); do
     if scontrol ping > "$base/log/ping.out" 2>&1 &&
@@ -188,7 +218,7 @@ for _ in $(seq 1 50); do
             scontrol shutdown
             wait "$controller_pid" 2>/dev/null || true
             test ! -e "$base/state/time-quota.sock"
-            timeout 45 slurmctld -D -v -f "$SLURM_CONF" > "$base/log/controller-restart.out" 2>&1 &
+            timeout 45 "${controller[@]}" -D -v -f "$SLURM_CONF" > "$base/log/controller-restart.out" 2>&1 &
             controller_pid=$!
             ready=0
             for _ in $(seq 1 80); do
@@ -210,7 +240,7 @@ for _ in $(seq 1 50); do
                 kill "$controller_pid"
                 wait "$controller_pid" 2>/dev/null || true
                 test ! -e "$base/state/time-quota.sock"
-                timeout 45 slurmctld -D -v -f "$SLURM_CONF" > "$base/log/controller-restart.out" 2>&1 &
+                timeout 45 "${controller[@]}" -D -v -f "$SLURM_CONF" > "$base/log/controller-restart.out" 2>&1 &
                 controller_pid=$!
                 ready=0
                 for _ in $(seq 1 50); do
@@ -343,7 +373,7 @@ for _ in $(seq 1 50); do
                     kill -KILL "$child"
                     wait "$controller_pid" 2>/dev/null || true
                     test -S "$base/state/time-quota.sock"
-                    timeout 45 slurmctld -D -v -f "$SLURM_CONF" > "$base/log/controller-crash-restart.out" 2>&1 &
+                    timeout 45 "${controller[@]}" -D -v -f "$SLURM_CONF" > "$base/log/controller-crash-restart.out" 2>&1 &
                     controller_pid=$!
                     ready=0
                     for _ in $(seq 1 80); do
@@ -362,7 +392,7 @@ for _ in $(seq 1 50); do
                     scontrol shutdown
                     wait "$controller_pid" 2>/dev/null || true
                     test ! -e "$base/state/time-quota.sock"
-                    timeout 45 slurmctld -D -v -f "$SLURM_CONF" > "$base/log/controller-restart.out" 2>&1 &
+                    timeout 45 "${controller[@]}" -D -v -f "$SLURM_CONF" > "$base/log/controller-restart.out" 2>&1 &
                     controller_pid=$!
                     ready=0
                     for _ in $(seq 1 80); do
