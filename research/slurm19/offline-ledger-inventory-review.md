@@ -1,0 +1,5 @@
+# Staged offline ledger inventory
+
+`u20-training-platform/tools/time-quota-ledger-inspect.py` is a read-only inventory for a service-owned WAL/checkpoint pair. It refuses symlink final components, wrong ownership, permissive files, multiple hard links and busy advisory locks; obtains both locks in the controller's order; and reports size, owner, mode and SHA-256 after checking the open file metadata did not change. It does not print user data, change, repair, initialize or delete files, and does not assess ledger semantics or controller health.
+
+The lock protects against cooperating writers only; a malicious privileged process, replacement through an untrusted ancestor or restored copies remain outside the guarantee. The operator must use a trusted state path and preserve independent backups and scheduler evidence. The tool requires the controller to have released the file locks; it is not a reason to stop the controller or running jobs. It has only been syntax-parsed, not invoked or behavior-tested, and is not installed.
