@@ -44,7 +44,7 @@ def main():
     code = 'import torch; assert torch.cuda.is_available(); x=torch.ones((16,16),device="cuda"); y=x@x; torch.cuda.synchronize(); assert float(y[0,0])==16.0; print("TIME_GPU_TORCH_OK",torch.cuda.get_device_name(),float(y[0,0]),flush=True)'
     payload = {'client_request_id':request_id, 'name':'time-gpu-probe', 'qos':'debug',
                'gpu':1, 'cpu':1, 'memory_mb':2048, 'time_minutes':2,
-               'workdir':user.pw_dir, 'environment':'pytorch_2.4',
+               'workdir':user.pw_dir, 'environment':'/home/u20/miniconda3/envs/pytorch_2.4',
                'output_path':user.pw_dir+'/time-gpu-probe-%j.out',
                'command':"python -c '"+code+"'"}
     call(user, 'POST', '/api/v1/jobs/validate', payload)

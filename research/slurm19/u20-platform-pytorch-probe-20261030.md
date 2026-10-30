@@ -1,0 +1,5 @@
+# Platform PyTorch probe on u20
+
+At 2026-10-30 approximately 22:56 Asia/Shanghai, committed probe `4a26479` submitted real platform job `ab7f1acae4ea418394fca5aea9cf15c6` as `timzhang` (Slurm job 7), after checking an empty scheduler queue. It reached `FAILED` with `Conda executable not found for this user`; no PyTorch computation took place. The probe selected the environment by name, so the backend looked for Conda in the training user's home and `/opt/conda`; those paths did not exist on this host.
+
+Read-only inspection found the existing environment at `/home/u20/miniconda3/envs/pytorch_2.4`; `timzhang` could traverse and execute its Python. The follow-up probe specifies that environment by absolute path, which the existing backend handles by placing its `bin` directory in `PATH`. This is an existing administrator-owned environment, not a managed shared-environment design, and its presence or executability alone does not demonstrate PyTorch import or CUDA operation. The failed job remains recorded and is subject to the user's separately authorized history clearing at the later controlled cutover. No monthly enforcement claim follows from this probe.
