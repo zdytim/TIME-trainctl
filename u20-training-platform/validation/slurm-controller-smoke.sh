@@ -292,7 +292,14 @@ for _ in $(seq 1 50); do
             else
                 /validation/quota-socket-query root-eligible
             fi
-            slurmd -D -f "$SLURM_CONF" > "$base/log/slurmd.out" 2>&1 &
+            if test "${TIME_SYSTEM_SLURMD:-0}" = 1; then
+                # Stock u20 daemon and its stock libslurmfull, copied into this
+                # disposable image; all config/state/plugins remain synthetic.
+                test -x /stock-u20/slurmd && test -f /stock-u20/libslurmfull.so
+                LD_LIBRARY_PATH=/stock-u20 /stock-u20/slurmd -D -f "$SLURM_CONF" > "$base/log/slurmd.out" 2>&1 &
+            else
+                slurmd -D -f "$SLURM_CONF" > "$base/log/slurmd.out" 2>&1 &
+            fi
             node_pid=$!
             for _ in $(seq 1 100); do
                 if scontrol show node time-test > "$base/log/node.out" 2>&1 &&
