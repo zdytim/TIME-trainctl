@@ -56,7 +56,9 @@ with tempfile.TemporaryDirectory(prefix='time-socket-', dir='/tmp') as tmp:
     os.chmod(tmp, 0o711)
     private = pathlib.Path(tmp) / 'private'
     private.mkdir(mode=0o700)
-    endpoint = str(pathlib.Path(tmp) / 'broker.sock')
+    # The production client deliberately accepts only this fixed path. /run is
+    # container-private tmpfs in the enclosing fixture.
+    endpoint = '/run/pro6000d-training/backend.sock'
     config = private / 'config.json'
     config.write_text(json.dumps({
         'state_db': str(private / 'state.sqlite3'), 'socket_path': endpoint,
@@ -103,6 +105,30 @@ with tempfile.TemporaryDirectory(prefix='time-socket-', dir='/tmp') as tmp:
         assert bridge.snapshot(1001)['granted']['gpu_seconds'] == 7 * 3600
         assert request(1001, create)['data']['application']['id'] == aid
         print('PASS: real socket peer identity enforces approval authorization and grant')
+
+        user_state = pathlib.Path(tmp) / 'user-state'
+        user_state.mkdir(mode=0o700)
+        os.chown(user_state, 1001, 1001)
+        admin_state = private / 'admin-state'
+        admin_state.mkdir(mode=0o700)
+        def cli(uid, state, *args):
+            proc = subprocess.run([sys.executable, '/client/timectl.py', '--json', '--state-dir', str(state), *args],
+                                  preexec_fn=become_user if uid == 1001 else None,
+                                  capture_output=True, text=True, timeout=15)
+            try:
+                output = json.loads(proc.stdout)
+            except ValueError:
+                raise AssertionError((proc.returncode, proc.stdout, proc.stderr))
+            assert proc.returncode == 0 and output.get('ok'), (proc.returncode, output, proc.stderr)
+            return output
+        created = cli(1001, user_state, 'request', 'create', '--kind', 'monthly_gpu_hours',
+                      '--reason', 'Need another GPU training allocation', '--gpu-hours', '3',
+                      '--month', str(month), '--client-request-id', 'socket-cli-request-1', '--yes')
+        cli_aid = created['data']['application']['id']
+        approved = cli(0, admin_state, 'admin', 'request', 'approve', cli_aid, '--yes')
+        assert approved['data']['application']['status'] == 'APPROVED', approved
+        assert bridge.snapshot(1001)['granted']['gpu_seconds'] == 10 * 3600
+        print('PASS: actual CLI application and approval reach the real controller once')
     finally:
         server.send_signal(signal.SIGTERM)
         try:
