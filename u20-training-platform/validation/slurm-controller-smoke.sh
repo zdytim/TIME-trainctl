@@ -49,7 +49,9 @@ if ! test -S /run/munge/munge.socket.2; then cat "$base/log/munge.log"; exit 1; 
 timeout 8 slurmctld -D -v -f "$SLURM_CONF" > "$base/log/controller.out" 2>&1 &
 controller_pid=$!
 for _ in $(seq 1 50); do
-    if scontrol ping > "$base/log/ping.out" 2>&1; then
+    if scontrol ping > "$base/log/ping.out" 2>&1 &&
+       grep -Eq '^Slurmctld\(primary\) at .* is UP' "$base/log/ping.out" &&
+       kill -0 "$controller_pid" 2>/dev/null; then
         cat "$base/log/ping.out"
         echo 'PASS: isolated controller responds with a fresh ledger'
         kill "$controller_pid" 2>/dev/null || true
