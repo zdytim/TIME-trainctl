@@ -80,11 +80,19 @@ def main():
     if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o022 or sha(verifier) != VERIFIER_SHA:
         raise ValueError('untrusted or unexpected verifier')
     trusted_dir(PARENT.parent)
+    created_parent = False
     try:
         PARENT.mkdir(mode=0o755)
+        created_parent = True
     except FileExistsError:
         pass
+    if created_parent:
+        # The private-copy umask must not prevent the slurm service UID from
+        # traversing the final root-owned release path.
+        os.chmod(PARENT, 0o755)
     trusted_dir(PARENT)
+    if PARENT.stat().st_mode & 0o111 != 0o111:
+        raise ValueError('release parent is not traversable by the service user')
     if DEST.exists() or DEST.is_symlink():
         raise FileExistsError('release path already exists; refusing to replace it')
     work = Path(tempfile.mkdtemp(prefix='.time-stage-', dir=str(PARENT)))
