@@ -1,0 +1,129 @@
+--- a/src/slurmctld/job_scheduler.c
++++ b/src/slurmctld/job_scheduler.c
+@@ -245,6 +245,7 @@
+ 	job_queue_rec->job_ptr  = job_ptr;
+ 	job_queue_rec->part_ptr = part_ptr;
+ 	job_queue_rec->priority = prio;
++	job_queue_rec->monthly_tier = MONTHLY_QUOTA_NORMAL;
+ 	list_append(job_queue, job_queue_rec);
+ }
+ 
+@@ -970,6 +971,7 @@
+ 	bool is_job_array_head;
+ 	static time_t sched_update = 0;
+ 	static bool fifo_sched = false;
++	bool use_fifo;
+ 	static bool assoc_limit_stop = false;
+ 	static int sched_timeout = 0;
+ 	static int sched_max_job_start = 0;
+@@ -1315,7 +1317,8 @@
+ 	 *
+ 	 * In both cases, we test each partition associated with the job.
+ 	 */
+-	if (fifo_sched) {
++	use_fifo = fifo_sched && !monthly_quota_enabled();
++	if (use_fifo) {
+ 		slurmctld_diag_stats.schedule_queue_len = list_count(job_list);
+ 		job_iterator = list_iterator_create(job_list);
+ 	} else {
+@@ -1329,7 +1332,7 @@
+ 		/* Run some final guaranteed logic after each job iteration */
+ 		if (job_ptr)
+ 			fill_array_reasons(job_ptr, reject_array_job);
+-		if (fifo_sched) {
++		if (use_fifo) {
+ 			if (job_ptr && part_iterator &&
+ 			    IS_JOB_PENDING(job_ptr)) /* test job in next part */
+ 				goto next_part;
+@@ -1872,7 +1875,7 @@
+ 	avail_node_bitmap = save_avail_node_bitmap;
+ 	xfree(failed_parts);
+ 	xfree(failed_resv);
+-	if (fifo_sched) {
++	if (use_fifo) {
+ 		if (job_iterator)
+ 			list_iterator_destroy(job_iterator);
+ 		if (part_iterator)
+@@ -1910,6 +1913,42 @@
+  */
+ extern void sort_job_queue(List job_queue)
+ {
++	ListIterator iter;
++	job_queue_rec_t *rec;
++	uid_t *uids;
++	monthly_quota_tier_t *tiers;
++	struct timeval now;
++	size_t count, i;
++
++	/* Each entry has a fixed value throughout sorting, including CPU-only
++	 * jobs. Never read the changing ledger from the comparator itself. */
++	count = list_count(job_queue);
++	iter = list_iterator_create(job_queue);
++	while ((rec = list_next(iter)))
++		rec->monthly_tier = MONTHLY_QUOTA_NORMAL;
++	list_iterator_destroy(iter);
++	if (monthly_quota_enabled() && count && !gettimeofday(&now, NULL) &&
++	    now.tv_sec >= 0) {
++		uids = xcalloc(count, sizeof(*uids));
++		tiers = xcalloc(count, sizeof(*tiers));
++		iter = list_iterator_create(job_queue);
++		for (i = 0; i < count && (rec = list_next(iter)); i++)
++			uids[i] = rec->job_ptr->user_id;
++		list_iterator_destroy(iter);
++		if (i == count && !monthly_quota_tiers_at(
++			    uids, count, (uint64_t)now.tv_sec,
++			    (uint32_t)now.tv_usec * 1000, tiers)) {
++			iter = list_iterator_create(job_queue);
++			for (i = 0; i < count && (rec = list_next(iter)); i++) {
++				/* CPU-only work uses the neutral normal tier. */
++				if (gres_get_job_state(rec->job_ptr->gres_list, "gpu"))
++					rec->monthly_tier = tiers[i];
++			}
++			list_iterator_destroy(iter);
++		}
++		xfree(tiers);
++		xfree(uids);
++	}
+ 	list_sort(job_queue, sort_job_queue2);
+ }
+ 
+@@ -1991,6 +2030,13 @@
+ 		if (p1 > p2)
+ 			return -1;
+ 	}
++
++	/* Preserve Slurm preemption, reservation and partition precedence;
++	 * monthly tiers order jobs before their ordinary within-tier priority. */
++	if (job_rec1->monthly_tier < job_rec2->monthly_tier)
++		return -1;
++	if (job_rec1->monthly_tier > job_rec2->monthly_tier)
++		return 1;
+ 
+ 	if (bf_hetjob_prio && job_rec1->job_ptr->pack_job_id &&
+ 	    (job_rec1->job_ptr->pack_job_id !=
+--- a/src/slurmctld/job_scheduler.h
++++ b/src/slurmctld/job_scheduler.h
+@@ -51,6 +51,7 @@
+ 	struct part_record *part_ptr;	/* Pointer to partition record. Each
+ 					 * job may have multiple partitions. */
+ 	uint32_t priority;		/* Job priority in THIS partition */
++	uint32_t monthly_tier;	/* Stable queue snapshot, normal if unavailable */
+ } job_queue_rec_t;
+ 
+ /*
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -1470,7 +1470,12 @@
+ 
+ bool monthly_quota_enabled(void)
+ {
+-	return mq_enabled;
++	bool enabled;
++
++	pthread_mutex_lock(&mq_lock);
++	enabled = mq_enabled;
++	pthread_mutex_unlock(&mq_lock);
++	return enabled;
+ }
+ 
+ void monthly_quota_fini(void)
