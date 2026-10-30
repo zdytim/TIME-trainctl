@@ -126,6 +126,14 @@ with tempfile.TemporaryDirectory(prefix='time-socket-', dir='/tmp') as tmp:
         capabilities = cli(1001, user_state, 'capabilities')
         assert capabilities['data']['monthly_quota']['server_state'] == 'enforcing'
         assert capabilities['data']['monthly_quota']['enforcement_ready'] is True
+        message = {'jsonrpc':'2.0', 'id':1, 'method':'tools/call',
+                   'params':{'name':'time_capabilities', 'arguments':{}}}
+        mcp = subprocess.run([sys.executable, '/client/time_mcp.py'], input=json.dumps(message) + '\n',
+                             preexec_fn=become_user, capture_output=True, text=True, timeout=15)
+        assert mcp.returncode == 0, (mcp.stdout, mcp.stderr)
+        mcp_result = json.loads(mcp.stdout)['result']['structuredContent']
+        assert mcp_result['ok'] and mcp_result['data']['monthly_quota']['enforcement_ready'] is True
+        print('PASS: real MCP capability discovery agrees with broker')
         created = cli(1001, user_state, 'request', 'create', '--kind', 'monthly_gpu_hours',
                       '--reason', 'Need another GPU training allocation', '--gpu-hours', '3',
                       '--month', str(month), '--client-request-id', 'socket-cli-request-1', '--yes')
