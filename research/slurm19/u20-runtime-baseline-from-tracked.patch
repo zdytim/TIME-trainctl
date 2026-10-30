@@ -1,0 +1,147 @@
+--- a/pro6000d-training-api.py
++++ b/pro6000d-training-api.py
+@@ -10,7 +10,6 @@
+ from __future__ import annotations
+ 
+ import argparse
+-from monthly_quota import MonthlyLedger, month_now
+ import base64
+ import datetime as dt
+ import grp
+@@ -221,8 +220,6 @@
+             self.store.db.execute("ALTER TABLE jobs ADD COLUMN client_request_id TEXT")
+         self.store.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS jobs_request ON jobs(owner_uid,client_request_id) WHERE client_request_id IS NOT NULL")
+ 
+-        self.monthly = MonthlyLedger(self)
+-
+     # ---------- identity and authorization ----------
+     def peer_uid(self, conn: socket.socket) -> int:
+         raw = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+@@ -289,7 +286,7 @@
+                 who = self.identity(user.pw_uid)
+             except ApiError:
+                 continue
+-            users.append({**who, "quota": self.quota(user.pw_uid), "usage": self.active_usage(user.pw_uid), "monthly_quota": self.monthly.summary(user.pw_uid)})
++            users.append({**who, "quota": self.quota(user.pw_uid), "usage": self.active_usage(user.pw_uid)})
+         return sorted(users, key=lambda x: x["uid"])
+ 
+     def user_roots(self, user: pwd.struct_passwd) -> List[pathlib.Path]:
+@@ -466,7 +463,6 @@
+             return
+         self.last_tick = time.monotonic()
+         self.reconcile()
+-        self.monthly.refresh()
+         self.expire_applications()
+         if self.last_reconcile_ok:
+             self.dispatch_waiting()
+@@ -701,10 +697,6 @@
+         for row in self.store.db.execute("SELECT * FROM jobs WHERE state='WAITING_QUOTA' ORDER BY created_at,id LIMIT 256").fetchall():
+             try:
+                 ident = self.identity(row["owner_uid"])
+-                monthly_block = self.monthly.block_reason(row["owner_uid"])
+-                if monthly_block:
+-                    self.store.db.execute("UPDATE jobs SET reason_code='monthly_quota_wait',reason_text=?,updated_at=? WHERE id=?", (monthly_block,utc_now(),row["id"]))
+-                    continue
+                 quota = self.quota(row["owner_uid"])
+                 usage = self.active_usage(row["owner_uid"])
+                 job = self.row_job(row)
+@@ -795,7 +787,7 @@
+         return "\n".join(lines) + "\n"
+ 
+     def job_json(self, row: sqlite3.Row) -> Dict[str, Any]:
+-        return {**{k: row[k] for k in row.keys()}, "usage_gpu_seconds": self.monthly.job_usage(row)}
++        return {k: row[k] for k in row.keys()}
+ 
+     def jobs(self, ident: Dict[str, Any]) -> List[Dict[str, Any]]:
+         self.tick()
+@@ -887,39 +879,15 @@
+                 self.store.db.execute("UPDATE jobs SET state='EXPIRED',reason_code='approval_expired',reason_text='批准在提交调度器前已过期',finished_at=?,updated_at=? WHERE id=?", (utc_now(), utc_now(), job["id"]))
+             self.add_notification(row["owner_uid"], "application_expired", "批准已过期", "未提交给调度器的授权已失效；已提交的任务不受影响。")
+ 
+-    def monthly_request(self, requested: Any) -> Dict[str, Any]:
+-        if not isinstance(requested,dict):
+-            raise ApiError(400,"invalid_monthly_request","月度追加申请必须是对象")
+-        hours = requested.get("gpu_hours")
+-        if isinstance(hours,bool) or not isinstance(hours,int) or not 1 <= hours <= 100000:
+-            raise ApiError(400,"invalid_gpu_hours","追加 GPU 小时必须为 1 至 100000 的整数")
+-        month = requested.get("month")
+-        if month != month_now():
+-            raise ApiError(409,"month_changed","月份已切换，请刷新后重新申请本月额度")
+-        key = requested.get("client_request_id")
+-        if not isinstance(key,str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{8,128}",key):
+-            raise ApiError(400,"request_id_required","月度追加申请需要稳定请求编号")
+-        return {"gpu_hours":hours,"month":month,"client_request_id":key}
+-
+     def create_application(self, ident: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+         kind = payload.get("kind")
+-        if kind not in ("temporary_job", "quota_change", "monthly_gpu_hours"):
++        if kind not in ("temporary_job", "quota_change"):
+             raise ApiError(400, "invalid_application", "未知申请类型")
+         reason = str(payload.get("reason", "")).strip()
+         if len(reason) < 5 or len(reason) > 2000:
+             raise ApiError(400, "reason_required", "理由长度需为 5 到 2000 字符")
+         requested = payload.get("requested")
+-        if kind == "monthly_gpu_hours":
+-            if not self.monthly.summary(ident["uid"])["enforcement_ready"]:
+-                raise ApiError(409,"monthly_not_enabled","月度启动限制尚未启用，暂不受理追加申请")
+-            requested = self.monthly_request(requested)
+-            prior = self.store.db.execute("SELECT a.* FROM monthly_requests r JOIN applications a ON a.id=r.application_id WHERE r.uid=? AND r.request_id=?", (ident["uid"],requested["client_request_id"])).fetchone()
+-            if prior:
+-                old = json_object(prior["requested_json"], {})
+-                if old != requested or prior["reason"] != reason:
+-                    raise ApiError(409,"idempotency_conflict","同一请求编号不能对应不同申请")
+-                return dict(prior)
+-        elif kind == "temporary_job":
++        if kind == "temporary_job":
+             if not self.config.get("temporary_authorizations", {}).get("enabled", False):
+                 raise ApiError(409, "temporary_authorization_disabled", "临时资源授权尚未开启")
+             requested = self.validate_job(ident, requested, temporary=True)
+@@ -931,8 +899,6 @@
+         db=self.store.db; db.execute("BEGIN IMMEDIATE")
+         try:
+             db.execute("INSERT INTO applications(id,owner_uid,owner_name,kind,status,requested_json,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", (aid, ident["uid"], ident["username"], kind, "PENDING", json.dumps(requested, sort_keys=True), reason, utc_now(), utc_now()))
+-            if kind == "monthly_gpu_hours":
+-                db.execute("INSERT INTO monthly_requests VALUES(?,?,?)", (ident["uid"],requested["client_request_id"],aid))
+             self.store.audit(ident["uid"], ident["username"], "create", "application", aid, {"kind":kind}, "pending")
+             for uid in self.admin_uids():
+                 self.add_notification(uid, "application_pending", "有新的资源申请", ident["username"] + "：" + reason)
+@@ -974,11 +940,7 @@
+             adjusted = payload.get("approved", {}) if action == "approve_adjusted" else {}
+             if not isinstance(adjusted, dict):
+                 raise ApiError(400, "invalid_approved", "批准内容必须是对象")
+-            if row["kind"] == "monthly_gpu_hours":
+-                if not self.monthly.summary(row["owner_uid"])["enforcement_ready"]:
+-                    raise ApiError(409,"monthly_not_enabled","月度启动限制尚未启用，暂不能批准追加额度")
+-                approved = self.monthly_request({**approved, **{k:v for k,v in adjusted.items() if k == "gpu_hours"}})
+-            elif row["kind"] == "temporary_job":
++            if row["kind"] == "temporary_job":
+                 for key in ("gpu", "cpu", "memory_mb", "time_minutes", "qos"):
+                     if key in adjusted: approved[key] = adjusted[key]
+                 approved = self.validate_job(self.identity(row["owner_uid"]), approved, temporary=True)
+@@ -993,8 +955,6 @@
+         try:
+             changed=db.execute("UPDATE applications SET status=?,approved_json=?,decision_reason=?,expires_at=?,updated_at=? WHERE id=? AND status='PENDING'", (status,json.dumps(approved,sort_keys=True) if status=="APPROVED" else None,reason or "管理员批准",expiry,utc_now(),aid)).rowcount
+             if changed != 1: raise ApiError(409,"application_already_decided","申请已处理")
+-            if status == "APPROVED" and row["kind"] == "monthly_gpu_hours":
+-                db.execute("INSERT INTO monthly_additions VALUES(?,?,?,?,?,?,?)", (aid,row["owner_uid"],approved["month"],approved["gpu_hours"]*3600,ident["uid"],reason or "管理员批准",utc_now()))
+             if status == "APPROVED" and row["kind"] == "quota_change":
+                 self.write_quota(row["owner_uid"], approved)
+             self.add_notification(row["owner_uid"],"application_decision","申请已批准" if status=="APPROVED" else "申请已拒绝",reason or "管理员批准")
+@@ -1109,16 +1069,8 @@
+         payload = request.get("body") or {}
+         if not isinstance(payload,dict): raise ApiError(400,"invalid_body","请求正文必须是对象")
+         if method == "GET" and path == "/api/v1/me": return {"identity": ident, "version": VERSION}
+-        if method == "GET" and path == "/api/v1/capabilities":
+-            return {"schema_version": "1.0", "api_version": VERSION,
+-                    "identity_source": "unix_peer_uid", "execution": "shell_command",
+-                    "logs": {"mode": "bounded_tail", "follow": False},
+-                    "multi_node": "unknown",
+-                    "monthly_quota": {"accounting": self.monthly.status,
+-                                      "mode": "staged" if self.monthly.enabled else "disabled",
+-                                      "enforcement_ready": False}}
+         if method == "GET" and path == "/api/v1/state":
+-            return {"identity": ident, "hostname": socket.gethostname(), "jobs": self.jobs(ident), "monthly_quota": self.monthly.summary(uid), "monthly_accounts": [{"uid":a["uid"],"username":a["username"],**a["monthly_quota"]} for a in self.accounts(ident)] if ident["is_admin"] else [], "gpus": self.gpu_inventory(ident), "metrics": self.metrics(ident), "quota": self.quota(uid), "usage": self.active_usage(uid), "accounts": self.accounts(ident), "default_quota": {**self.default_quota,"concurrent_job_limit":self.default_quota["concurrent_gpu_limit"]}, "temporary_authorizations_enabled": bool(self.config.get("temporary_authorizations", {}).get("enabled", False)), "applications": self.applications(ident), "notifications": self.notifications(ident), "rules": self.qos, "scheduler_available": self.last_reconcile_ok, "scheduler_error": self.scheduler_error, "observed_at": utc_now()}
++            return {"identity": ident, "hostname": socket.gethostname(), "jobs": self.jobs(ident), "gpus": self.gpu_inventory(ident), "metrics": self.metrics(ident), "quota": self.quota(uid), "accounts": self.accounts(ident), "default_quota": {**self.default_quota,"concurrent_job_limit":self.default_quota["concurrent_gpu_limit"]}, "temporary_authorizations_enabled": bool(self.config.get("temporary_authorizations", {}).get("enabled", False)), "applications": self.applications(ident), "notifications": self.notifications(ident), "rules": self.qos, "scheduler_available": self.last_reconcile_ok, "scheduler_error": self.scheduler_error, "observed_at": utc_now()}
+         if method == "GET" and path == "/api/v1/jobs": return {"jobs": self.jobs(ident)}
+         if method == "POST" and path == "/api/v1/jobs/validate": return {"job": self.validate_job(ident, payload), "quota": self.quota(uid), "usage": self.active_usage(uid)}
+         if method == "POST" and path == "/api/v1/jobs": return {"job": self.submit(ident, payload)}

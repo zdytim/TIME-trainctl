@@ -1,0 +1,5 @@
+# Reproducible u20 broker candidate
+
+The live u20 backend baseline differs from the repository's staged backend. `u20-runtime-baseline-from-tracked.patch` reconstructs the captured u20 baseline (SHA-256 `65d213100a0e0ebd3f9fe87b51d1625f8539acf954ca572b43fa48a07c43173c`) from the already tracked backend without copying a second full source file into Git. The builder applies that patch, verifies the exact baseline hash, then applies the idempotency, controller-read, monthly-grant and capabilities patches in order and includes the committed bridge client. Every input must match committed HEAD; output must be a new directory. Python AST checks are performed, but the resulting broker is not executed or installed.
+
+The captured runtime source contains no discovered credentials and no configuration, database, logs or server backups are included. The result still requires re-checking the current live source and migration/rollback strategy before deployment. This assembly does not run behavior tests or prove the monthly gate safe.
