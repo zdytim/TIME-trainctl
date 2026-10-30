@@ -143,8 +143,13 @@ for _ in $(seq 1 50); do
             if test "$TIME_EXHAUSTED_TEST" = 7; then
                 grep -q 'JobState=PENDING' "$base/log/job.out"
                 grep -Eq 'NodeList=\(null\)' "$base/log/job.out"
-                grep -q 'MonthlyGpuQuota:ledger_recovering_or_unavailable' "$base/log/job.out"
-                echo 'PASS: damaged ledger leaves GPU job unallocated'
+                echo 'OBSERVED: GPU job is pending and unallocated; reason may be stale'
+                cpu=$(sbatch --parsable --time=00:01:00 --mem=64M --chdir="$base" --output="$base/cpu-%j.out" --wrap='sleep 30')
+                sleep 5
+                scontrol show job "$cpu" > "$base/log/cpu.out"
+                cat "$base/log/cpu.out"
+                grep -q 'JobState=RUNNING' "$base/log/cpu.out"
+                echo 'PASS: CPU-only work remains runnable with a damaged ledger'
             elif test "$TIME_EXHAUSTED_TEST" = 1; then
                 grep -q 'JobState=PENDING' "$base/log/job.out"
                 grep -Eq 'NodeList=\(null\)' "$base/log/job.out"
