@@ -61,7 +61,7 @@ if test "${TIME_EXHAUSTED_TEST:-0}" = 13; then
     chmod 777 "$base/out"
     touch "$base/out/order"
     chmod 666 "$base/out/order"
-elif test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 3 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 5 || test "${TIME_EXHAUSTED_TEST:-0}" = 6; then
+elif test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 3 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 5 || test "${TIME_EXHAUSTED_TEST:-0}" = 6 || test "${TIME_EXHAUSTED_TEST:-0}" = 16; then
     now=$(date +%s)
     seeded=${TIME_SEED_GPU_SECONDS:-2178000}
     test "$seeded" -gt 0 && test $((seeded % 4)) -eq 0
@@ -94,7 +94,7 @@ if test "${TIME_EXHAUSTED_TEST:-0}" = 12; then
     test -S "$base/state/time-quota.sock"
     original_socket=$(stat -c '%d:%i' "$base/state/time-quota.sock")
 fi
-if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8 || test "${TIME_EXHAUSTED_TEST:-0}" = 9 || test "${TIME_EXHAUSTED_TEST:-0}" = 10 || test "${TIME_EXHAUSTED_TEST:-0}" = 13 || test "${TIME_EXHAUSTED_TEST:-0}" = 14; then
+if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8 || test "${TIME_EXHAUSTED_TEST:-0}" = 9 || test "${TIME_EXHAUSTED_TEST:-0}" = 10 || test "${TIME_EXHAUSTED_TEST:-0}" = 13 || test "${TIME_EXHAUSTED_TEST:-0}" = 14 || test "${TIME_EXHAUSTED_TEST:-0}" = 16; then
     if test "$gpu_count" = 4; then
         touch "$base/fakegpu0" "$base/fakegpu1" "$base/fakegpu2" "$base/fakegpu3"
         printf 'NodeName=time-test Name=gpu File=%s/fakegpu[0-3]\n' "$base" > "$base/gres.conf"
@@ -183,7 +183,7 @@ for _ in $(seq 1 50); do
             /validation/quota-socket-query root-tier
             echo 'PASS: expected monthly tier at seeded usage'
         elif test "${TIME_EXHAUSTED_TEST:-0}" != 0; then
-            if test "$TIME_EXHAUSTED_TEST" = 1; then
+            if test "$TIME_EXHAUSTED_TEST" = 1 || test "$TIME_EXHAUSTED_TEST" = 16; then
                 /validation/quota-socket-query root
             elif test "$TIME_EXHAUSTED_TEST" = 4; then
                 TIME_EXPECT_TIER=2 /validation/quota-socket-query root-tier
@@ -234,11 +234,24 @@ for _ in $(seq 1 50); do
                 grep -Eq 'NodeList=\(null\)' "$base/log/cpu.out"
                 test "$(sha256sum "$base/state/monthly-quota.wal" | cut -d' ' -f1)" = "$corrupt_wal_hash"
                 echo 'OBSERVED: mixed queue is conservatively paused; damaged WAL remains unchanged'
-            elif test "$TIME_EXHAUSTED_TEST" = 1; then
+            elif test "$TIME_EXHAUSTED_TEST" = 1 || test "$TIME_EXHAUSTED_TEST" = 16; then
                 grep -q 'JobState=PENDING' "$base/log/job.out"
                 grep -Eq 'NodeList=\(null\)' "$base/log/job.out"
                 grep -q 'MonthlyGpuQuota:monthly_capacity_exhausted' "$base/log/job.out"
                 echo 'PASS: exhausted synthetic user remains pending without a node allocation'
+                if test "$TIME_EXHAUSTED_TEST" = 16; then
+                    test "$service_user" = slurm
+                    TIME_VALIDATION_BROKER_DIR=/broker TIME_TEST_TARGET_UID=0 /opt/py310/bin/python3 /validation/test_real_controller_outbox.py
+                    started=0
+                    for _ in $(seq 1 100); do
+                        scontrol show job "$job" > "$base/log/after-grant.out"
+                        if grep -q 'JobState=RUNNING' "$base/log/after-grant.out"; then started=1; break; fi
+                        sleep .1
+                    done
+                    if test "$started" != 1; then cat "$base/log/after-grant.out" "$base/log/controller.out"; exit 1; fi
+                    grep -q 'NodeList=time-test' "$base/log/after-grant.out"
+                    echo 'PASS: pending job starts after confirmed broker grant'
+                fi
             else
                 if ! grep -q 'JobState=RUNNING' "$base/log/job.out"; then
                     cat "$base/log/controller.out" "$base/log/slurmd.out"

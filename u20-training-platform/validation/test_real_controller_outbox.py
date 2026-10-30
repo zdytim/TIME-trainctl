@@ -17,9 +17,11 @@ service.require_admin = lambda ident: None if ident.get('is_admin') else (_ for 
 service.add_notification = lambda uid, kind, title, body: service.store.db.execute(
     'INSERT INTO notifications VALUES(?,?)', (uid, title))
 admin = {'uid': 1000, 'username': 'admin', 'is_admin': True}
-before = bridge.snapshot(1001)
+target_uid = int(os.environ.get('TIME_TEST_TARGET_UID', '1001'))
+assert target_uid in (0, 1001)
+before = bridge.snapshot(target_uid)
 assert before['granted']['gpu_seconds'] == 0, before
-service.store.db.execute('UPDATE monthly_grant_outbox SET month=?', (before['month'],))
+service.store.db.execute('UPDATE monthly_grant_outbox SET target_uid=?,month=?', (target_uid, before['month']))
 
 class LostReply:
     def grant(self, *args):
@@ -33,16 +35,16 @@ try:
 except module.ApiError as exc:
     assert exc.code == 'grant_unconfirmed', exc
 assert service.store.db.execute('SELECT state FROM monthly_grant_outbox').fetchone()[0] == 'PENDING'
-assert bridge.snapshot(1001)['granted']['gpu_seconds'] == 36000
+assert bridge.snapshot(target_uid)['granted']['gpu_seconds'] == 36000
 service.monthly_controller_bridge = lambda: bridge
 assert service.finish_monthly_grant(admin, 'app-123')['status'] == 'APPROVED'
 assert service.store.db.execute('SELECT state FROM monthly_grant_outbox').fetchone()[0] == 'APPLIED'
-assert bridge.snapshot(1001)['granted']['gpu_seconds'] == 36000
+assert bridge.snapshot(target_uid)['granted']['gpu_seconds'] == 36000
 try:
-    bridge.grant(1001, before['month'], 36001, 'app-123', 'uid-1000')
+    bridge.grant(target_uid, before['month'], 36001, 'app-123', 'uid-1000')
     raise AssertionError('conflicting grant ID must not succeed')
 except module.ControllerOutcomeUnknown:
     pass
-assert bridge.snapshot(1001)['granted']['gpu_seconds'] == 36000
+assert bridge.snapshot(target_uid)['granted']['gpu_seconds'] == 36000
 print('PASS: real controller grant survives lost reply and idempotent broker retry')
 service.store.db.close()
