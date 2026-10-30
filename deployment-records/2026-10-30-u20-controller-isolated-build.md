@@ -1,0 +1,6 @@
+# u20 isolated controller build stage
+
+- Committed source inputs: `6725de1`, `41aaabf`, `b9f9f9b`, `a636a7f`, `d4f0371`, `eb0fd27`, `89d30b5`, `6d9ae4e`; all pushed on `u20-slurm19`. Target: `u20-Z790-S-DDR4`, user `u20`, 2026-10-30 around 10:58 Asia/Shanghai.
+- Components: Slurm 19 source compiled and installed only under `/home/u20/.local/share/time/builds/slurm19-6725de1/stage/`; no system binary, service, configuration, or job changed. New isolated stage, so no previous stage needed backup. No rollback was required or exercised; removing this stage would not change running services.
+- `make -j2 -C src` and user-prefix `make -j2 -C src install` exited 0. Candidate `stage/sbin/slurmctld` SHA-256 `a7d94e6a08f0784a8afdb7a96cd646328d80eac3fc0dc6f41228d0ecbbd607ef`; `ldd` resolved `libslurmfull.so` to the isolated stage. `slurmctld`, `slurmd` and `pro6000d-training` reported active following the build.
+- This is a build stage, not production deployment. No behavior tests, workload simulations, or training jobs were run. This does not establish installed-package ABI compatibility, correct tier ordering, complete ledger rollback protection, or safe activation. Monthly quota enforcement remains disabled.
