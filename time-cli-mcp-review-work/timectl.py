@@ -228,7 +228,11 @@ def request_read(client, method, path, body=None, timeout=10):
 
 
 def request_write(client, ledger, request_id, method, path, body, timeout):
-    ledger.reserve(request_id, method, path, body)
+    try:
+        ledger.reserve(request_id, method, path, body)
+    except TimeError as exc:
+        exc.request_id = request_id
+        raise
     try:
         data = client.request(method, path, body, timeout=timeout, mutation=True)
     except TimeError as exc:

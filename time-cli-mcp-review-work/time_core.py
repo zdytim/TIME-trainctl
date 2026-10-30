@@ -214,6 +214,14 @@ class RequestLedger(object):
         return True
 
     def _ensure_directory(self):
+        try:
+            self._ensure_directory_impl()
+        except OSError as exc:
+            raise TimeError("request_ledger_unavailable",
+                            "cannot prepare the local request state directory",
+                            status=503, details=str(exc)) from exc
+
+    def _ensure_directory_impl(self):
         self._assert_no_symlink_components(self.directory)
         if self.directory.exists() or self.directory.is_symlink():
             directory_stat = os.lstat(str(self.directory))
@@ -323,6 +331,10 @@ class RequestLedger(object):
             os.fchmod(fd, 0o600)
             fcntl.flock(fd, fcntl.LOCK_EX)
             yield
+        except OSError as exc:
+            raise TimeError("request_ledger_unavailable",
+                            "cannot safely access or persist local request state",
+                            status=503, details=str(exc)) from exc
         finally:
             try:
                 fcntl.flock(fd, fcntl.LOCK_UN)

@@ -192,7 +192,11 @@ class Server(object):
             raise TimeError("consent_unavailable", str(exc), status=503)
         if not approved:
             raise TimeError("confirmation_declined", "host did not approve this action", status=403)
-        self.ledger.reserve(request_id, method, path, payload)
+        try:
+            self.ledger.reserve(request_id, method, path, payload)
+        except TimeError as exc:
+            exc.request_id = request_id
+            raise
         try:
             result = self.client.request(method, path, payload, timeout=timeout,
                                          mutation=True)
