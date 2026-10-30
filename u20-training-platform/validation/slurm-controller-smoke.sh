@@ -217,7 +217,7 @@ for _ in $(seq 1 50); do
                 cat "$base/log/slurmd.out" "$base/log/node.out"; exit 1
             fi
             if test "$TIME_EXHAUSTED_TEST" = 17; then
-                job=$(sbatch --parsable --uid=1001 --gid=1001 --time=00:01:00 --mem=64M --gres="$request_spec" --chdir="$base/out" --output="$base/out/slurm-%j.out" --wrap='sleep 30')
+                job=$(sbatch --parsable --uid=1001 --gid=1001 --time=00:01:00 --mem=64M --gres="$request_spec" --chdir="$base/out" --output="$base/out/slurm-%j.out" --wrap='id -u; sleep 3')
             elif test "$TIME_EXHAUSTED_TEST" = 8; then
                 job=$(sbatch --parsable --time=00:01:00 --mem=64M --chdir="$base" --output="$base/slurm-%j.out" --wrap='sleep 30')
             else
@@ -264,7 +264,18 @@ for _ in $(seq 1 50); do
                     done
                     if test "$started" != 1; then cat "$base/log/after-grant.out" "$base/log/controller.out"; exit 1; fi
                     grep -q 'NodeList=time-test' "$base/log/after-grant.out"
-                    if test "$TIME_EXHAUSTED_TEST" = 17; then grep -q 'UserId=timefixture(1001)' "$base/log/after-grant.out"; fi
+                    if test "$TIME_EXHAUSTED_TEST" = 17; then
+                        grep -q 'UserId=timefixture(1001)' "$base/log/after-grant.out"
+                        finished=0
+                        for _ in $(seq 1 100); do
+                            scontrol show job "$job" > "$base/log/after-finish.out"
+                            if grep -q 'JobState=COMPLETED' "$base/log/after-finish.out" && grep -q 'ExitCode=0:0' "$base/log/after-finish.out"; then finished=1; break; fi
+                            sleep .1
+                        done
+                        if test "$finished" != 1; then cat "$base/log/after-finish.out"; exit 1; fi
+                        grep -qx '1001' "$base/out/slurm-$job.out"
+                        echo 'PASS: ordinary user command executes and completes after grant'
+                    fi
                     echo 'PASS: pending job starts after confirmed broker grant'
                 fi
             else
