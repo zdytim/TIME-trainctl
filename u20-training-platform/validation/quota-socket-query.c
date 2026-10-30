@@ -15,6 +15,7 @@ int main(int argc, char **argv)
     int fd;
     unsigned long long fields[17];
     char *cursor, *end;
+    char grant_request[256];
     time_t local_time;
     struct tm civil;
     if (access("/.dockerenv", F_OK) || !getenv("TIME_ISOLATED_VALIDATION") ||
@@ -26,6 +27,16 @@ int main(int argc, char **argv)
         perror("isolated quota socket"); return 1;
     }
     const char *request = argc == 2 && !strncmp(argv[1], "root", 4) ? "SNAP 0\n" : "SNAP 1001\n";
+    if (argc == 4 && (!strcmp(argv[1], "grant") || !strcmp(argv[1], "grant-conflict"))) {
+        time_t now = time(NULL) + 8 * 60 * 60;
+        struct tm current;
+        if (!gmtime_r(&now, &current) || strspn(argv[2], "0123456789") != strlen(argv[2]) ||
+            strspn(argv[3], "abcdefghijklmnopqrstuvwxyz0123456789-") != strlen(argv[3])) return 2;
+        int month = (current.tm_year + 1900) * 100 + current.tm_mon + 1;
+        int written = snprintf(grant_request, sizeof(grant_request), "GRANT 0 %d %s %s validator\n", month, argv[2], argv[3]);
+        if (written < 0 || (size_t)written >= sizeof(grant_request)) return 2;
+        request = grant_request;
+    }
     size_t len = strlen(request);
     if (write(fd, request, len) != (ssize_t)len) { perror("snapshot write"); return 1; }
     count = read(fd, buf, sizeof(buf) - 1);
@@ -33,6 +44,8 @@ int main(int argc, char **argv)
     buf[count] = '\0';
     fputs(buf, stdout);
     close(fd);
+    if (argc == 4 && !strcmp(argv[1], "grant")) return strcmp(buf, "OK\n") != 0;
+    if (argc == 4 && !strcmp(argv[1], "grant-conflict")) return strcmp(buf, "ERROR unavailable_or_invalid\n") != 0;
     if (strncmp(buf, "OK ", 3)) return 1;
     cursor = buf + 3;
     for (int i = 0; i < 17; i++) {
@@ -69,5 +82,9 @@ int main(int argc, char **argv)
             fprintf(stderr, "synthetic user has an unexpected tier\n"); return 1;
         }
     }
+    if (argc == 2 && !strcmp(argv[1], "root-overage") &&
+        (fields[1] != 3 || fields[4] != 20 || fields[10] != 20 || fields[11] != 0)) return 1;
+    if (argc == 2 && !strcmp(argv[1], "root-granted") &&
+        (fields[1] != 2 || fields[4] != 60 || fields[8] != 20 || fields[9] != 0)) return 1;
     return 0;
 }

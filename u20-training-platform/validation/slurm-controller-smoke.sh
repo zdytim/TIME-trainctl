@@ -44,7 +44,7 @@ GresTypes=gpu
 NodeName=time-test CPUs=2 RealMemory=1024 State=UNKNOWN Gres=gpu:$gpu_count
 PartitionName=normal Nodes=time-test Default=YES State=UP
 EOF
-if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 3 || test "${TIME_EXHAUSTED_TEST:-0}" = 4; then
+if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 3 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 5; then
     now=$(date +%s)
     seeded=${TIME_SEED_GPU_SECONDS:-2178000}
     test "$seeded" -gt 0 && test $((seeded % 4)) -eq 0
@@ -79,7 +79,15 @@ for _ in $(seq 1 50); do
        grep -Eq '^Slurmctld\(primary\) at .* is UP' "$base/log/ping.out" &&
        kill -0 "$controller_pid" 2>/dev/null; then
         cat "$base/log/ping.out"
-        if test "${TIME_EXHAUSTED_TEST:-0}" = 3; then
+        if test "${TIME_EXHAUSTED_TEST:-0}" = 5; then
+            /validation/quota-socket-query grant 20 grant-one
+            /validation/quota-socket-query grant 20 grant-one
+            /validation/quota-socket-query grant-conflict 24 grant-one
+            /validation/quota-socket-query root-overage
+            /validation/quota-socket-query grant 40 grant-two
+            /validation/quota-socket-query root-granted
+            echo 'PASS: grants offset overage and retries remain idempotent'
+        elif test "${TIME_EXHAUSTED_TEST:-0}" = 3; then
             /validation/quota-socket-query root-tier
             echo 'PASS: expected monthly tier at seeded usage'
         elif test "${TIME_EXHAUSTED_TEST:-0}" != 0; then
