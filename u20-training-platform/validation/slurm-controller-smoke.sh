@@ -140,6 +140,19 @@ for _ in $(seq 1 50); do
         elif test "${TIME_EXHAUSTED_TEST:-0}" = 15; then
             test "$service_user" = slurm
             TIME_VALIDATION_BROKER_DIR=/broker /opt/py310/bin/python3 /validation/test_real_controller_outbox.py
+            scontrol shutdown
+            wait "$controller_pid" 2>/dev/null || true
+            test ! -e "$base/state/time-quota.sock"
+            timeout 45 slurmctld -D -v -f "$SLURM_CONF" > "$base/log/controller-restart.out" 2>&1 &
+            controller_pid=$!
+            ready=0
+            for _ in $(seq 1 80); do
+                if scontrol ping > "$base/log/ping-restart.out" 2>&1 &&
+                   grep -Eq '^Slurmctld\(primary\) at .* is UP' "$base/log/ping-restart.out"; then ready=1; break; fi
+                sleep .1
+            done
+            if test "$ready" != 1; then cat "$base/log/controller-restart.out"; exit 1; fi
+            PYTHONPATH=/broker /opt/py310/bin/python3 -c 'from controller_bridge import ControllerBridge; s=ControllerBridge("/tmp/time-isolated/state/time-quota.sock",64030).snapshot(1001); assert s["granted"]["gpu_seconds"] == 36000, s; print("PASS: integrated grant remains after controller restart")'
         elif test "${TIME_EXHAUSTED_TEST:-0}" = 5 || test "${TIME_EXHAUSTED_TEST:-0}" = 6; then
             /validation/quota-socket-query grant 20 grant-one
             /validation/quota-socket-query grant 20 grant-one
