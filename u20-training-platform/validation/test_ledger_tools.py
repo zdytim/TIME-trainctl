@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise ledger initialization and inspection only in a disposable container."""
 import fcntl
+import hashlib
 import json
 import os
 import pathlib
@@ -35,7 +36,7 @@ assert result.returncode == 0, result.stderr
 wal = state / 'monthly-quota.wal'
 checkpoint = state / 'monthly-quota.checkpoint'
 assert wal.read_bytes() == b'U20MQ1|HEADER|1\n'
-assert checkpoint.read_bytes() == b'U20MQ1|CHECKPOINT|0\n'
+assert checkpoint.read_bytes() == b'U20MQ1|CHECKPOINT|0|' + hashlib.sha256(wal.read_bytes()).hexdigest().encode() + b'\n'
 assert all(p.stat().st_uid == 64030 and p.stat().st_mode & 0o777 == 0o600
            for p in (wal, checkpoint))
 result = call(init, '--state-dir', state, '--new-empty-ledger')

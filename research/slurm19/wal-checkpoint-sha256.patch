@@ -1,0 +1,117 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -16,0 +17 @@
++#include <openssl/sha.h>
+@@ -97,0 +99 @@
++static SHA256_CTX mq_wal_digest;
+@@ -344,3 +346,3 @@
+-static int _write_checkpoint(uint64_t seq)
+-{
+-	char buf[96];
++static int _write_checkpoint(uint64_t seq, const unsigned char digest[SHA256_DIGEST_LENGTH])
++{
++	char buf[160], hex[SHA256_DIGEST_LENGTH * 2 + 1];
+@@ -348 +350 @@
+-	size_t offset = 0;
++	size_t offset = 0, i;
+@@ -350,2 +352,8 @@
+-
+-	len = snprintf(buf, sizeof(buf), MQ_WAL_VERSION "|CHECKPOINT|%" PRIu64 "\n", seq);
++	static const char digits[] = "0123456789abcdef";
++
++	for (i = 0; i < SHA256_DIGEST_LENGTH; i++) {
++		hex[i * 2] = digits[digest[i] >> 4];
++		hex[i * 2 + 1] = digits[digest[i] & 15];
++	}
++	hex[sizeof(hex) - 1] = '\0';
++	len = snprintf(buf, sizeof(buf), MQ_WAL_VERSION "|CHECKPOINT|%" PRIu64 "|%s\n", seq, hex);
+@@ -373,0 +382,2 @@
++	SHA256_CTX next, finalized;
++	unsigned char digest[SHA256_DIGEST_LENGTH];
+@@ -386,2 +396,8 @@
+-	if (_write_all(line, (size_t)line_len) || _write_checkpoint(seq))
+-		return -1;
++	next = mq_wal_digest;
++	if (SHA256_Update(&next, line, (size_t)line_len) != 1)
++		return -1;
++	finalized = next;
++	if (SHA256_Final(digest, &finalized) != 1 ||
++	    _write_all(line, (size_t)line_len) || _write_checkpoint(seq, digest))
++		return -1;
++	mq_wal_digest = next;
+@@ -1009,5 +1025,29 @@
+-/* Must match the last fully replayed WAL event; no implicit initialization. */
+-static int _read_checkpoint(uint64_t *seq)
+-{
+-	char buf[96], *value;
+-	ssize_t len, i;
++/* Recompute a digest over the complete locked WAL without changing its
++ * append offset. Coordinated rollback of both files remains out of scope. */
++static int _hash_wal(unsigned char digest[SHA256_DIGEST_LENGTH])
++{
++	char block[8192];
++	off_t offset = 0;
++	ssize_t n;
++	SHA256_CTX finalized;
++	if (SHA256_Init(&mq_wal_digest) != 1)
++		return -1;
++	for (;;) {
++		do { n = pread(mq_fd, block, sizeof(block), offset); }
++		while (n < 0 && errno == EINTR);
++		if (n < 0) return -1;
++		if (n == 0) break;
++		if (offset > INT64_MAX - n || SHA256_Update(&mq_wal_digest, block, (size_t)n) != 1)
++			return -1;
++		offset += n;
++	}
++	finalized = mq_wal_digest;
++	return SHA256_Final(digest, &finalized) == 1 ? 0 : -1;
++}
++
++/* Reject old, incomplete, sequence-mismatched or content-mismatched state. */
++static int _read_checkpoint(uint64_t *seq, const unsigned char digest[SHA256_DIGEST_LENGTH])
++{
++	char buf[160], *value, *separator;
++	ssize_t len;
++	size_t i;
+@@ -1015,4 +1055,3 @@
+-
+-	do {
+-		len = pread(mq_checkpoint_fd, buf, sizeof(buf), 0);
+-	} while (len < 0 && errno == EINTR);
++	static const char digits[] = "0123456789abcdef";
++	do { len = pread(mq_checkpoint_fd, buf, sizeof(buf), 0); }
++	while (len < 0 && errno == EINTR);
+@@ -1022,4 +1060,0 @@
+-	for (i = (ssize_t)sizeof(prefix) - 1; i < len - 1; i++) {
+-		if (buf[i] < '0' || buf[i] > '9')
+-			return -1;
+-	}
+@@ -1027,0 +1063,9 @@
++	separator = strchr(value, '|');
++	if (!separator || separator == value || strlen(separator + 1) != SHA256_DIGEST_LENGTH * 2)
++		return -1;
++	for (i = 0; i < (size_t)(separator - value); i++)
++		if (value[i] < '0' || value[i] > '9') return -1;
++	for (i = 0; i < SHA256_DIGEST_LENGTH; i++)
++		if (separator[1 + i * 2] != digits[digest[i] >> 4] ||
++		    separator[2 + i * 2] != digits[digest[i] & 15]) return -1;
++	*separator = '\0';
+@@ -1035,0 +1080 @@
++	unsigned char digest[SHA256_DIGEST_LENGTH];
+@@ -1062 +1107 @@
+-	if (stat_buf.st_size == 0 || _replay_wal())
++	if (stat_buf.st_size == 0 || _replay_wal() || _hash_wal(digest))
+@@ -1071 +1116 @@
+-	    (stat_buf.st_mode & 0077) || _read_checkpoint(&checkpoint_seq) ||
++	    (stat_buf.st_mode & 0077) || _read_checkpoint(&checkpoint_seq, digest) ||
+--- a/src/slurmctld/Makefile.am
++++ b/src/slurmctld/Makefile.am
+@@ -82 +82 @@
+-slurmctld_LDADD = $(depend_libs) $(LIB_SLURM) $(DL_LIBS)
++slurmctld_LDADD = $(depend_libs) $(LIB_SLURM) $(DL_LIBS) -lcrypto
+--- a/src/slurmctld/Makefile.in
++++ b/src/slurmctld/Makefile.in
+@@ -571 +571 @@
+-slurmctld_LDADD = $(depend_libs) $(LIB_SLURM) $(DL_LIBS)
++slurmctld_LDADD = $(depend_libs) $(LIB_SLURM) $(DL_LIBS) -lcrypto

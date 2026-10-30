@@ -6,6 +6,7 @@ that this is a fresh ledger. Never use this to recover or replace a ledger.
 """
 
 import argparse
+import hashlib
 import os
 import pathlib
 import stat
@@ -13,6 +14,7 @@ import sys
 
 CHECKPOINT = "monthly-quota.checkpoint"
 WAL = "monthly-quota.wal"
+WAL_HEADER = b"U20MQ1|HEADER|1\n"
 
 
 def checked_directory(path):
@@ -74,9 +76,10 @@ def main():
             raise FileExistsError("refusing to replace existing %s" % name)
         # A partial provisioning is intentionally left as evidence; the
         # controller fails closed and a later attempt cannot overwrite it.
-        create_file(directory, CHECKPOINT, b"U20MQ1|CHECKPOINT|0\n")
+        checkpoint = b"U20MQ1|CHECKPOINT|0|" + hashlib.sha256(WAL_HEADER).hexdigest().encode("ascii") + b"\n"
+        create_file(directory, CHECKPOINT, checkpoint)
         os.fsync(directory)
-        create_file(directory, WAL, b"U20MQ1|HEADER|1\n")
+        create_file(directory, WAL, WAL_HEADER)
         os.fsync(directory)
         print("Created new empty ledger in %s for uid %d" % (path, os.geteuid()))
         print("Quota enforcement remains disabled until separately installed and activated.")

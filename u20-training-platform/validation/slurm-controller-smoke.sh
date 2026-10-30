@@ -68,7 +68,7 @@ if test "${TIME_EXHAUSTED_TEST:-0}" = 13; then
     chmod 777 "$base/out"
     touch "$base/out/order"
     chmod 666 "$base/out/order"
-elif test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 3 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 5 || test "${TIME_EXHAUSTED_TEST:-0}" = 6 || test "${TIME_EXHAUSTED_TEST:-0}" = 16 || test "${TIME_EXHAUSTED_TEST:-0}" = 17; then
+elif test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 3 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 5 || test "${TIME_EXHAUSTED_TEST:-0}" = 6 || test "${TIME_EXHAUSTED_TEST:-0}" = 16 || test "${TIME_EXHAUSTED_TEST:-0}" = 17 || test "${TIME_CORRUPT_KIND:-}" = content; then
     now=$(date +%s)
     seeded=${TIME_SEED_GPU_SECONDS:-2178000}
     test "$seeded" -gt 0 && test $((seeded % 4)) -eq 0
@@ -88,10 +88,16 @@ else
     printf 'U20MQ1|HEADER|1\n' > "$base/state/monthly-quota.wal"
     printf 'U20MQ1|CHECKPOINT|0\n' > "$base/state/monthly-quota.checkpoint"
 fi
+if test "${TIME_CHECKPOINT_SHA256:-0}" = 1; then
+    checksum=$(sha256sum "$base/state/monthly-quota.wal" | cut -d' ' -f1)
+    checkpoint=$(tr -d '\n' < "$base/state/monthly-quota.checkpoint")
+    printf '%s|%s\n' "$checkpoint" "$checksum" > "$base/state/monthly-quota.checkpoint"
+fi
 if test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8; then
     case "${TIME_CORRUPT_KIND:-missing}" in
         missing) rm "$base/state/monthly-quota.checkpoint" ;;
         truncated) printf 'U20MQ1|1|PREPARE' >> "$base/state/monthly-quota.wal" ;;
+        content) sed -i 's/|PREPARE|900000|0|1|4|/|PREPARE|900000|1|1|4|/' "$base/state/monthly-quota.wal" ;;
         none) ;;
         *) exit 2 ;;
     esac

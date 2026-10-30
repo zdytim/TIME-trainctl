@@ -30,6 +30,7 @@ PATCHES = (
     "public-gres-api-fix.patch", "calendar-year-fix.patch", "selector-count-only-fix.patch",
     "cpu-only-queue-failure-fix.patch",
     "stale-control-socket-fix.patch",
+    "wal-checkpoint-sha256.patch",
 )
 
 # u20's live configuration requires these plugins.  A successful compiler
