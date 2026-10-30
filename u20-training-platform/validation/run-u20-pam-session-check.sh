@@ -25,8 +25,13 @@ trap cleanup EXIT
 umask 077
 for name in "$positive" "$negative"; do
     # Never overwrite a preexisting PAM service.
-    (set -o noclobber; printf '%s\n' 'auth requisite pam_deny.so' 'account requisite pam_deny.so' 'password requisite pam_deny.so' 'session required pam_systemd.so' > "/etc/pam.d/$name")
+    (set -o noclobber; printf '%s\n' 'auth requisite pam_deny.so' 'account requisite pam_deny.so' 'password requisite pam_deny.so' > "/etc/pam.d/$name")
     created+=("/etc/pam.d/$name")
+    if test "${TIME_PAM_COMMON_SESSION:-0}" = 1; then
+        printf '%s\n' 'session include common-session' >> "/etc/pam.d/$name"
+    else
+        printf '%s\n' 'session required pam_systemd.so' >> "/etc/pam.d/$name"
+    fi
 done
 printf 'session required pam_exec.so type=open_session quiet %s\n' "$guard" >> "/etc/pam.d/$positive"
 printf '%s\n' 'session required pam_exec.so type=open_session quiet /bin/false' >> "/etc/pam.d/$negative"
