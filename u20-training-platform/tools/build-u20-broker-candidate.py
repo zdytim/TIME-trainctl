@@ -16,6 +16,7 @@ PATCHES = (
     "u20-broker-monthly-capabilities.patch",
     "u20-broker-month-retry-fix.patch",
     "u20-broker-grant-month-notice-fix.patch",
+    "u20-broker-console-monthly-view.patch",
 )
 
 
@@ -38,6 +39,7 @@ def main():
     repo = pathlib.Path(__file__).resolve().parents[2]
     base = checked(repo, "u20-training-platform/backend/pro6000d-training-api.py")
     bridge = checked(repo, "u20-training-platform/backend/controller_bridge.py")
+    view = checked(repo, "u20-training-platform/backend/controller_view.py")
     patches = [(name, checked(repo, "research/slurm19/" + name)) for name in PATCHES]
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=str(repo), text=True).strip()
     output = args.output.absolute()
@@ -45,13 +47,14 @@ def main():
     broker = output / "pro6000d-training-api.py"
     broker.write_bytes(base)
     (output / "controller_bridge.py").write_bytes(bridge)
+    (output / "controller_view.py").write_bytes(view)
     for index, (name, data) in enumerate(patches):
         patch = output / ("%02d-" % index + name)
         patch.write_bytes(data)
         subprocess.run(["patch", "--batch", "--forward", "-p1", "-i", str(patch)], cwd=str(output), check=True)
         if index == 0 and hashlib.sha256(broker.read_bytes()).hexdigest() != BASE_HASH:
             raise ValueError("reconstructed u20 runtime baseline hash mismatch")
-    for path in (broker, output / "controller_bridge.py"):
+    for path in (broker, output / "controller_bridge.py", output / "controller_view.py"):
         ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     print("project commit:", revision)
     print("u20 baseline SHA-256:", BASE_HASH)

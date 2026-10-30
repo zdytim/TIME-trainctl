@@ -1,0 +1,63 @@
+--- a/pro6000d-training-api.py
++++ b/pro6000d-training-api.py
+@@ -35,6 +35,7 @@
+ import xml.etree.ElementTree as ET
+ from collections import deque
+ from controller_bridge import ControllerBridge, ControllerUnavailable, ControllerOutcomeUnknown
++from controller_view import snapshot_view, unavailable
+ from typing import Any, Dict, Iterable, List, Optional, Tuple
+ 
+ 
+@@ -1183,21 +1184,23 @@
+         return {"applied":True,"impacts":json_object(row["impacts_json"],[])}
+ 
+     def controller_monthly_snapshot(self, uid: int) -> Dict[str, Any]:
+-        # An absent or unavailable controller is never reported as zero usage.
++        # A release must explicitly mark activation verified; a successful
++        # live controller snapshot is additionally required on every read.
+         config = self.config.get("monthly_controller", {})
+-        if not isinstance(config, dict) or not config.get("read_enabled", False):
+-            return {"state": "unknown", "enforcement_ready": False,
+-                    "reason": "controller quota snapshot is not configured"}
++        if not isinstance(config, dict):
++            return unavailable()
++        verified = config.get("activation_verified") is True
++        if config.get("read_enabled") is not True:
++            return unavailable(verified)
+         try:
+             controller = pwd.getpwnam(config.get("controller_user", "slurm"))
+             bridge = ControllerBridge(config.get("socket_path", "/var/lib/slurm/ctld/time-quota.sock"),
+                                       controller.pw_uid)
+-            return {"state": "observed", "enforcement_ready": False,
+-                    "snapshot": bridge.snapshot(uid),
+-                    "reason": "controller snapshot is staged; enforcement not verified"}
++            result = snapshot_view(bridge.snapshot(uid), verified)
++            result["request_available"] = verified and config.get("grant_enabled") is True
++            return result
+         except (KeyError, ControllerUnavailable, ValueError, TypeError):
+-            return {"state": "unknown", "enforcement_ready": False,
+-                    "reason": "controller quota snapshot unavailable"}
++            return unavailable(verified)
+ 
+     def handle(self, uid: int, request: Dict[str, Any]) -> Dict[str, Any]:
+         if not isinstance(request, dict): raise ApiError(400,"invalid_request","请求必须是对象")
+@@ -1209,11 +1212,16 @@
+         if method == "GET" and path == "/api/v1/me": return {"identity": ident, "version": VERSION}
+         if method == "GET" and path == "/api/v1/capabilities":
+             monthly_config = self.config.get("monthly_controller", {})
+-            available = isinstance(monthly_config, dict) and monthly_config.get("grant_enabled") is True
+-            return {"schema_version": "1.0", "monthly_quota": {"mode": "staged", "enforcement_ready": False, "accounting": "controller_snapshot_if_configured"},
++            monthly = self.controller_monthly_snapshot(uid)
++            available = (isinstance(monthly_config, dict) and monthly_config.get("grant_enabled") is True
++                         and monthly.get("enforcement_ready") is True)
++            return {"schema_version": "1.0", "monthly_quota": {"mode": monthly["mode"], "enforcement_ready": monthly["enforcement_ready"], "accounting": "controller_snapshot_if_configured"},
+                     "monthly_requests": {"available": available, "idempotency": "owner-request-id-v1", "reconcile": "application-grant-v1"}}
+         if method == "GET" and path == "/api/v1/state":
+-            return {"identity": ident, "hostname": socket.gethostname(), "monthly_quota": self.controller_monthly_snapshot(uid), "jobs": self.jobs(ident), "gpus": self.gpu_inventory(ident), "metrics": self.metrics(ident), "quota": self.quota(uid), "accounts": self.accounts(ident), "default_quota": {**self.default_quota,"concurrent_job_limit":self.default_quota["concurrent_gpu_limit"]}, "temporary_authorizations_enabled": bool(self.config.get("temporary_authorizations", {}).get("enabled", False)), "applications": self.applications(ident), "notifications": self.notifications(ident), "rules": self.qos, "scheduler_available": self.last_reconcile_ok, "scheduler_error": self.scheduler_error, "observed_at": utc_now()}
++            accounts = self.accounts(ident)
++            monthly_accounts = ([{**self.controller_monthly_snapshot(a["uid"]), "uid": a["uid"], "username": a["username"]}
++                                 for a in accounts] if ident["is_admin"] else [])
++            return {"identity": ident, "hostname": socket.gethostname(), "monthly_quota": self.controller_monthly_snapshot(uid), "monthly_accounts": monthly_accounts, "jobs": self.jobs(ident), "gpus": self.gpu_inventory(ident), "metrics": self.metrics(ident), "quota": self.quota(uid), "accounts": accounts, "default_quota": {**self.default_quota,"concurrent_job_limit":self.default_quota["concurrent_gpu_limit"]}, "temporary_authorizations_enabled": bool(self.config.get("temporary_authorizations", {}).get("enabled", False)), "applications": self.applications(ident), "notifications": self.notifications(ident), "rules": self.qos, "scheduler_available": self.last_reconcile_ok, "scheduler_error": self.scheduler_error, "observed_at": utc_now()}
+         if method == "GET" and path == "/api/v1/jobs": return {"jobs": self.jobs(ident)}
+         if method == "POST" and path == "/api/v1/jobs/validate": return {"job": self.validate_job(ident, payload), "quota": self.quota(uid), "usage": self.active_usage(uid)}
+         if method == "POST" and path == "/api/v1/jobs": return {"job": self.submit(ident, payload)}
