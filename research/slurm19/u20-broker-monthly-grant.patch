@@ -1,0 +1,150 @@
+--- a/pro6000d-training-api.py
++++ b/pro6000d-training-api.py
+@@ -34,7 +34,7 @@
+ import uuid
+ import xml.etree.ElementTree as ET
+ from collections import deque
+-from controller_bridge import ControllerBridge, ControllerUnavailable
++from controller_bridge import ControllerBridge, ControllerUnavailable, ControllerOutcomeUnknown
+ from typing import Any, Dict, Iterable, List, Optional, Tuple
+ 
+ 
+@@ -222,6 +222,17 @@
+         if "client_request_hash" not in columns:
+             self.store.db.execute("ALTER TABLE jobs ADD COLUMN client_request_hash TEXT")
+         self.store.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS jobs_request ON jobs(owner_uid,client_request_id) WHERE client_request_id IS NOT NULL")
++        self.store.db.executescript("""
++            CREATE TABLE IF NOT EXISTS monthly_request_keys (
++              uid INTEGER NOT NULL, request_id TEXT NOT NULL, application_id TEXT NOT NULL UNIQUE,
++              PRIMARY KEY(uid, request_id)
++            );
++            CREATE TABLE IF NOT EXISTS monthly_grant_outbox (
++              application_id TEXT PRIMARY KEY, target_uid INTEGER NOT NULL, month INTEGER NOT NULL,
++              gpu_seconds INTEGER NOT NULL, actor_uid INTEGER NOT NULL, state TEXT NOT NULL,
++              created_at TEXT NOT NULL, updated_at TEXT NOT NULL
++            );
++        """)
+ 
+     # ---------- identity and authorization ----------
+     def peer_uid(self, conn: socket.socket) -> int:
+@@ -899,15 +910,76 @@
+                 self.store.db.execute("UPDATE jobs SET state='EXPIRED',reason_code='approval_expired',reason_text='批准在提交调度器前已过期',finished_at=?,updated_at=? WHERE id=?", (utc_now(), utc_now(), job["id"]))
+             self.add_notification(row["owner_uid"], "application_expired", "批准已过期", "未提交给调度器的授权已失效；已提交的任务不受影响。")
+ 
++    def monthly_controller_bridge(self) -> ControllerBridge:
++        config = self.config.get("monthly_controller", {})
++        if not isinstance(config, dict) or config.get("grant_enabled") is not True:
++            raise ApiError(409, "monthly_not_enabled", "月度额度追加尚未启用")
++        try:
++            user = pwd.getpwnam(config.get("controller_user", "slurm"))
++            return ControllerBridge(config.get("socket_path", "/var/lib/slurm/ctld/time-quota.sock"), user.pw_uid)
++        except (KeyError, TypeError, ValueError):
++            raise ApiError(503, "controller_unavailable", "控制器配置不可用")
++
++    def monthly_request(self, requested: Any) -> Dict[str, Any]:
++        if not isinstance(requested, dict):
++            raise ApiError(400, "invalid_monthly_request", "月度申请必须是对象")
++        hours, month, key = requested.get("gpu_hours"), requested.get("month"), requested.get("client_request_id")
++        now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
++        if isinstance(hours, bool) or not isinstance(hours, int) or not 1 <= hours <= 100000:
++            raise ApiError(400, "invalid_gpu_hours", "追加 GPU 小时必须为 1 至 100000 的整数")
++        if isinstance(month, bool) or not isinstance(month, int) or month != now.year * 100 + now.month:
++            raise ApiError(409, "month_changed", "请刷新并申请本月额度")
++        if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9-]{8,80}", key):
++            raise ApiError(400, "request_id_required", "月度申请需要稳定请求编号")
++        return {"gpu_hours": hours, "month": month, "client_request_id": key}
++
++    def finish_monthly_grant(self, ident: Dict[str, Any], aid: str) -> Dict[str, Any]:
++        self.require_admin(ident)
++        row = self.store.db.execute("SELECT * FROM monthly_grant_outbox WHERE application_id=?", (aid,)).fetchone()
++        if not row:
++            raise ApiError(404, "grant_not_found", "追加额度记录不存在")
++        if row["state"] == "APPLIED":
++            return dict(self.store.db.execute("SELECT * FROM applications WHERE id=?", (aid,)).fetchone())
++        bridge = self.monthly_controller_bridge()
++        try:
++            bridge.grant(row["target_uid"], row["month"], row["gpu_seconds"], aid,
++                         "uid-%s" % row["actor_uid"])
++        except (ControllerUnavailable, ControllerOutcomeUnknown, ValueError):
++            # The durable intent and original actor/amount stay unchanged for retry.
++            raise ApiError(503, "grant_unconfirmed", "控制器结果未确认，保留原申请等待核对", {"application_id": aid})
++        db = self.store.db
++        db.execute("BEGIN IMMEDIATE")
++        try:
++            changed = db.execute("UPDATE monthly_grant_outbox SET state='APPLIED',updated_at=? WHERE application_id=? AND state='PENDING'", (utc_now(), aid)).rowcount
++            if changed:
++                applied = db.execute("UPDATE applications SET status='APPROVED',updated_at=? WHERE id=? AND status='GRANT_PENDING'", (utc_now(), aid)).rowcount
++                if applied != 1:
++                    raise ApiError(409, "grant_state_inconsistent", "控制器可能已生效，但申请状态不一致，需管理员核对")
++                self.store.audit(ident["uid"], ident["username"], "grant_applied", "application", aid, {"approved_by_uid": row["actor_uid"]}, "confirmed")
++                self.add_notification(row["target_uid"], "application_decision", "额度追加已生效", "控制器已确认本月额度追加")
++            db.execute("COMMIT")
++        except Exception:
++            db.execute("ROLLBACK")
++            raise
++        return dict(db.execute("SELECT * FROM applications WHERE id=?", (aid,)).fetchone())
++
+     def create_application(self, ident: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+         kind = payload.get("kind")
+-        if kind not in ("temporary_job", "quota_change"):
++        if kind not in ("temporary_job", "quota_change", "monthly_gpu_hours"):
+             raise ApiError(400, "invalid_application", "未知申请类型")
+         reason = str(payload.get("reason", "")).strip()
+         if len(reason) < 5 or len(reason) > 2000:
+             raise ApiError(400, "reason_required", "理由长度需为 5 到 2000 字符")
+         requested = payload.get("requested")
+-        if kind == "temporary_job":
++        if kind == "monthly_gpu_hours":
++            self.monthly_controller_bridge()
++            requested = self.monthly_request(requested)
++            prior = self.store.db.execute("SELECT a.* FROM monthly_request_keys k JOIN applications a ON a.id=k.application_id WHERE k.uid=? AND k.request_id=?", (ident["uid"], requested["client_request_id"])).fetchone()
++            if prior:
++                if json_object(prior["requested_json"], {}) != requested or prior["reason"] != reason:
++                    raise ApiError(409, "idempotency_conflict", "同一请求编号不能对应不同申请")
++                return dict(prior)
++        elif kind == "temporary_job":
+             if not self.config.get("temporary_authorizations", {}).get("enabled", False):
+                 raise ApiError(409, "temporary_authorization_disabled", "临时资源授权尚未开启")
+             requested = self.validate_job(ident, requested, temporary=True)
+@@ -919,6 +991,8 @@
+         db=self.store.db; db.execute("BEGIN IMMEDIATE")
+         try:
+             db.execute("INSERT INTO applications(id,owner_uid,owner_name,kind,status,requested_json,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", (aid, ident["uid"], ident["username"], kind, "PENDING", json.dumps(requested, sort_keys=True), reason, utc_now(), utc_now()))
++            if kind == "monthly_gpu_hours":
++                db.execute("INSERT INTO monthly_request_keys(uid,request_id,application_id) VALUES(?,?,?)", (ident["uid"], requested["client_request_id"], aid))
+             self.store.audit(ident["uid"], ident["username"], "create", "application", aid, {"kind":kind}, "pending")
+             for uid in self.admin_uids():
+                 self.add_notification(uid, "application_pending", "有新的资源申请", ident["username"] + "：" + reason)
+@@ -956,6 +1030,23 @@
+             raise ApiError(400, "decision_reason_required", "拒绝或调整批准需要填写理由")
+         approved = json_object(row["requested_json"], {})
+         expiry = None
++        if row["kind"] == "monthly_gpu_hours" and action != "reject":
++            self.monthly_controller_bridge()
++            adjusted = payload.get("approved", {}) if action == "approve_adjusted" else {}
++            if not isinstance(adjusted, dict) or set(adjusted) - {"gpu_hours"}:
++                raise ApiError(400, "invalid_approved", "仅允许调整追加 GPU 小时")
++            approved = self.monthly_request({**approved, **adjusted})
++            db = self.store.db
++            db.execute("BEGIN IMMEDIATE")
++            try:
++                changed = db.execute("UPDATE applications SET status='GRANT_PENDING',approved_json=?,decision_reason=?,updated_at=? WHERE id=? AND status='PENDING'", (json.dumps(approved, sort_keys=True), reason or "管理员批准", utc_now(), aid)).rowcount
++                if changed != 1: raise ApiError(409, "application_already_decided", "申请已处理")
++                db.execute("INSERT INTO monthly_grant_outbox VALUES(?,?,?,?,?,'PENDING',?,?)", (aid, row["owner_uid"], approved["month"], approved["gpu_hours"] * 3600, ident["uid"], utc_now(), utc_now()))
++                self.store.audit(ident["uid"], ident["username"], action, "application", aid, {"approved": approved, "reason": reason}, "grant_pending")
++                db.execute("COMMIT")
++            except Exception:
++                db.execute("ROLLBACK"); raise
++            return self.finish_monthly_grant(ident, aid)
+         if action != "reject":
+             adjusted = payload.get("approved", {}) if action == "approve_adjusted" else {}
+             if not isinstance(adjusted, dict):
+@@ -1114,6 +1205,8 @@
+         if method == "POST" and path.startswith("/api/v1/jobs/") and path.endswith("/cancel"): return {"job": self.cancel(ident, path.split("/")[-2])}
+         if method == "GET" and path.startswith("/api/v1/jobs/") and path.endswith("/log"): return self.log(ident, path.split("/")[-2])
+         if method == "GET" and path == "/api/v1/applications": return {"applications": self.applications(ident)}
++        if method == "POST" and path.startswith("/api/v1/applications/") and path.endswith("/grant-reconcile"):
++            return {"application": self.finish_monthly_grant(ident, path.split("/")[-2])}
+         if method == "POST" and path == "/api/v1/applications": return {"application": self.create_application(ident, payload)}
+         if method == "POST" and path.startswith("/api/v1/applications/") and path.endswith("/decision"): return {"application": self.decide_application(ident, path.split("/")[-2], payload)}
+         if method == "POST" and path.startswith("/api/v1/notifications/") and path.endswith("/read"): self.read_notification(ident, path.split("/")[-2]); return {"ok": True}
