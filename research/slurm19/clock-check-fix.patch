@@ -1,0 +1,11 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -1001,7 +1001,7 @@
+ 		_set_pending_reason(job_ptr, why ? why : "unsupported job shape");
+ 		return -1;
+ 	}
+-	if (!_now(&now) || _month_key(&now, &month)) {
++	if (_now(&now) || _month_key(&now, &month)) {
+ 		_set_pending_reason(job_ptr, "clock or month conversion unavailable");
+ 		return -1;
+ 	}
