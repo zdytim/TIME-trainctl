@@ -1,0 +1,7 @@
+# u20 用量显示修正
+
+- 2026-10-31 16:34 CST；主机 u20-Z790-S-DDR4；部署提交 `87e5884`，分支 `u20-slurm19`。
+- 仅更新 `/usr/share/cockpit/pro6000d-training/app.js`：非零但不足显示精度的用量显示为 `＜0.01`；缺失任务用量显示“暂无任务用量明细”。未修改账本、后端、Slurm 或作业。
+- 原文件备份 `/var/backups/pro6000d-training/usage-display-6k4hjhvi/app.js.before`；安装后的 SHA-256 为 `49ea825569063d09ed53be85f7363ef3bc15f342951a137f1cdb5c2b34840e09`。本机 JS 语法检查通过；安装后 Slurm 两个服务和训练后端均 active，队列为空。
+- 现有 Cockpit 登录会话刷新后仍显示旧文案，实际界面效果尚未验证；文件哈希匹配不能证明现有会话已加载新代码。未强制断开会话或重启服务。
+- 未执行回滚。如需回滚，先核对当前文件仍为上述新哈希，再以 root 将备份原子恢复到原路径并验证原哈希 `7f77635814abdaf9bb611ba35e87e0fd64619cd58eb66d0349591b0e641f2fb3`；评估 Cockpit 会话缓存后核验界面。
