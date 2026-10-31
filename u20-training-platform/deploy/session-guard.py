@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Fail closed for enrolled login sessions that escaped their systemd user slice."""
+"""Require human training logins to be enrolled and inside a restricted slice."""
 import grp
 import glob
 import os
@@ -43,13 +43,22 @@ def main():
     name = os.environ.get('PAM_USER','')
     try:
         user = pwd.getpwnam(name)
+    except KeyError:
+        return 1
+    # Do not interfere with root recovery or non-login system service accounts.
+    # An empty shell is a login shell for this purpose and is not exempted.
+    if user.pw_uid < 1000 or Path(user.pw_shell).name in ('nologin', 'false', 'sync', 'shutdown', 'halt'):
+        return 0
+    try:
         memberships = set(os.getgrouplist(name,user.pw_gid))
         training = grp.getgrnam('pro6000d-training').gr_gid
         admin = grp.getgrnam('pro6000d-admin').gr_gid
-    except KeyError:
+    except (KeyError, OSError):
+        return 1
+    if admin in memberships:
         return 0
-    if training not in memberships or admin in memberships:
-        return 0
+    if training not in memberships:
+        return 1
     try:
         query = subprocess.run(['/usr/bin/systemctl', 'show', 'user-%d.slice' % user.pw_uid,
                                 '--property=DevicePolicy',
