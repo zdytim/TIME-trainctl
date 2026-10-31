@@ -67,10 +67,14 @@ def main():
                   "assert any(':devices:' in x and '/user-1001.slice/' in x for x in c),c; "
                   "exec(\"try:\\n os.open(p,os.O_RDWR)\\nexcept OSError as e:\\n assert e.errno==errno.EPERM,e\\n print('SSH_GPU_DEVICE_DENIED_BY_CGROUP')\\nelse:\\n raise AssertionError('device opened')\")")
             command='/usr/bin/python3 -c '+shlex.quote(code)
-            result=run(['/usr/bin/ssh','-F','/dev/null','-o','BatchMode=yes','-o','IdentitiesOnly=yes',
-                        '-o','StrictHostKeyChecking=yes','-o','UserKnownHostsFile='+str(root/'known_hosts'),
-                        '-o','ConnectTimeout=5','-i',str(root/'client'),'-p',str(port),
-                        'timzhang@127.0.0.1',command])
+            try:
+                result=run(['/usr/bin/ssh','-F','/dev/null','-o','BatchMode=yes','-o','IdentitiesOnly=yes',
+                            '-o','StrictHostKeyChecking=yes','-o','UserKnownHostsFile='+str(root/'known_hosts'),
+                            '-o','ConnectTimeout=5','-i',str(root/'client'),'-p',str(port),
+                            'timzhang@127.0.0.1',command])
+            except subprocess.CalledProcessError as exc:
+                print('SSH device check failed; remote stderr:',exc.stderr[-2000:],flush=True)
+                raise
             if 'SSH_GPU_DEVICE_DENIED_BY_CGROUP' not in result.stdout:
                 raise ValueError('SSH login probe did not report expected denial')
             print('PASS: real SSH/PAM login placed timzhang in closed devices slice and denied GPU node',flush=True)
