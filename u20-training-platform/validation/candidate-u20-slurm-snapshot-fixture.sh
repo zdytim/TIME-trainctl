@@ -68,6 +68,12 @@ for _ in $(seq 1 100); do
     sleep .1
 done
 if test "$ready" != 1; then echo 'FAIL: isolated candidate controller did not start with copied state' >&2; exit 1; fi
+for _ in $(seq 1 100); do
+    test ! -S "$base/state/time-quota.sock" || break
+    kill -0 "$controller_pid" 2>/dev/null || break
+    sleep .1
+done
+test -S "$base/state/time-quota.sock" || { echo 'FAIL: candidate quota socket unavailable' >&2; exit 1; }
 PYTHONPATH=/broker /opt/py310/bin/python3 - "$base/state/time-quota.sock" <<'PY'
 import sys
 from controller_bridge import ControllerBridge
