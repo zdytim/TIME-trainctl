@@ -56,4 +56,19 @@ with sqlite3.connect(source.DB) as db: assert db.execute('SELECT COUNT(*) FROM j
 source.JOBCOMP.write_bytes((backup/'jobcomp.log').read_bytes())
 assert rollback.restore(backup,source,core,history,migration)['jobcomp_restored']
 with sqlite3.connect(source.DB) as db: assert db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]==7
+backup,source=setup('new-database-data')
+migration.apply(backup,source,history,core,log)
+with sqlite3.connect(source.DB) as db:
+    db.execute("INSERT INTO job_request_tombstones(owner_uid,client_request_id) VALUES(9999,'newer')")
+try: rollback.restore(backup,source,core,history,migration)
+except ValueError as exc: assert 'database' in str(exc)
+else: raise AssertionError('rollback accepted newer database data')
+assert source.JOBCOMP.stat().st_size==0
+backup,source=setup('database-commit-before-journal')
+migration.apply(backup,source,history,core,log)
+journal=backup/'history-migration.jsonl'
+journal.write_text(journal.read_text().splitlines()[0]+'\n')
+source.JOBCOMP.write_bytes((backup/'jobcomp.log').read_bytes())
+assert rollback.restore(backup,source,core,history,migration)['database_restored']
+with sqlite3.connect(source.DB) as db: assert db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]==7
 print('PASS: private snapshot migration, rollback, and rejection of newer data')
