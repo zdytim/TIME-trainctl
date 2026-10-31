@@ -53,3 +53,13 @@ exact slice or a child. This establishes the real SSH/PAM path for the current
 account and GPU major/minor even when DAC on the temporary node is permissive;
 it does not establish Cockpit, all execution paths, device major changes, reboot
 or privileged-user behavior. Device mode recreation remains unresolved.
+
+Later on 2026-10-31, a real Cockpit terminal session authenticated as
+`timzhang` reported UID 1001 and devices cgroup
+`/user.slice/user-1001.slice`. Opening the existing `/dev/nvidia0` for
+read/write returned `EACCES`; the device was mode 0660 owned by root:root.
+This confirms the Cockpit session's placement and that this direct open was
+denied, but the error does not distinguish cgroup enforcement from filesystem
+permissions. The earlier permissive-node `EPERM` evidence covers SSH and the
+transient user-slice service, not this Cockpit session. Afterward, both Slurm
+services were active and the queue was empty.
