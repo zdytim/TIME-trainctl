@@ -23,6 +23,21 @@ check_file "$runner" "$runner_sha" 700
 check_file "$probe" "$probe_sha" 700
 test "$(stat -c '%u:%g:%a' /usr/local/libexec)" = 0:0:755
 grep -Fxq 'session required pam_exec.so quiet /usr/local/libexec/pro6000d-session-guard' /etc/pam.d/common-session
+# Do not silently change login access for an account that appeared since the
+# inventory. A future additional account needs a separate enrollment review.
+/usr/bin/python3 - <<'PY'
+import grp, os, pwd
+allowed = {'u20', 'timzhang'}
+excluded = {'nologin', 'false', 'sync', 'shutdown', 'halt'}
+human = {p.pw_name for p in pwd.getpwall()
+         if p.pw_uid >= 1000 and os.path.basename(p.pw_shell) not in excluded}
+if human != allowed:
+    raise SystemExit('Human login account inventory changed; refusing guard replacement')
+for user, group in (('u20', 'pro6000d-admin'), ('timzhang', 'pro6000d-training')):
+    account = pwd.getpwnam(user)
+    if grp.getgrnam(group).gr_gid not in os.getgrouplist(user, account.pw_gid):
+        raise SystemExit('Expected administrator or training enrollment changed')
+PY
 systemctl is-active --quiet slurmctld
 systemctl is-active --quiet slurmd
 systemctl is-active --quiet pro6000d-training
