@@ -111,7 +111,7 @@ def project(data):
                     raise ValueError('invalid settlement')
                 end = _instant(fields[7], fields[8])
             else:
-                if len(fields) != 7:
+                if len(fields) != 7 or not a['committed']:
                     raise ValueError('invalid release')
                 end = _instant(fields[5], fields[6])
             for month, amount in _segments(a['anchor'], end, a['gpu']):
