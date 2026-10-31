@@ -1,0 +1,5 @@
+# Read-only replay helper from candidate controller source
+
+`build-quota-replay-helper.py` accepts only the exact SHA-256 of the `7a06cff` candidate's `monthly_quota.c`, extracts its actual WAL replay, event, calendar and accounting dependencies, and compiles a standalone read-only helper. On u20, the source was independently reconstructed from the pinned Slurm archive and committed `7a06cff` patch stack; its SHA-256 matched the source used for the staged controller build. The helper opens only a single regular, single-link WAL file without following a final symlink, caps input size and CPU time, and on Linux caps address space. It does not alter the WAL.
+
+The helper can exercise the controller's source-level WAL semantic replay, including allocation lifecycle and grant events. It is not the running controller binary: extracted dependency stubs, compiler behavior, resource bounds and source-to-binary provenance need review. A successful replay does not validate witness or checkpoint, current Slurm jobs, SQLite approval consistency, concurrent activity, actual storage durability, or authority to repair. It has no installation or production integration yet.
