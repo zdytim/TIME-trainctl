@@ -63,3 +63,14 @@ denied, but the error does not distinguish cgroup enforcement from filesystem
 permissions. The earlier permissive-node `EPERM` evidence covers SSH and the
 transient user-slice service, not this Cockpit session. Afterward, both Slurm
 services were active and the queue was empty.
+
+A subsequent Cockpit check used the same authenticated `timzhang` terminal
+and a temporary mode-0666 character node with the current `/dev/nvidia0` device
+number. Its directory was accessible to root and the user's group; root opened
+the node successfully, while the Cockpit session's read/write open returned
+`EPERM`. This confirms device-cgroup denial for this session and current GPU
+device number even when the temporary node's DAC mode permits access. The
+temporary node and directory were removed, the real node remained root:root
+mode 0660, both Slurm services were active, and the queue was empty. This does
+not establish protection for other users or execution paths, changed device
+numbers, privileged processes, reboot, or all device recreation paths.
