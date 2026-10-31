@@ -25,15 +25,17 @@ TERMINAL = ('COMPLETED', 'FAILED', 'CANCELLED', 'TIMEOUT', 'OUT_OF_MEMORY',
             'NODE_FAIL', 'BOOT_FAIL', 'DEADLINE', 'PREEMPTED', 'EXPIRED')
 
 
-def checked_file(path, sha=None):
+def checked_file(path, sha=None, require_root_group=True, private=False):
     path = Path(path)
     for item in reversed((path,) + tuple(path.parents)):
         st = item.lstat()
         directory = item != path
-        if (stat.S_ISLNK(st.st_mode) or st.st_uid != 0 or st.st_gid != 0 or st.st_mode & 0o022 or
+        if (stat.S_ISLNK(st.st_mode) or st.st_uid != 0 or
+                ((directory or require_root_group) and st.st_gid != 0) or st.st_mode & 0o022 or
                 (not stat.S_ISDIR(st.st_mode) if directory else not stat.S_ISREG(st.st_mode))):
             raise ValueError('untrusted path: ' + str(item))
     if path.lstat().st_nlink != 1: raise ValueError('unexpected link count: ' + str(path))
+    if private and path.lstat().st_mode & 0o077: raise ValueError('file must be private: ' + str(path))
     data = path.read_bytes()
     if sha and hashlib.sha256(data).hexdigest() != sha: raise ValueError('unexpected digest: ' + str(path))
     return data
@@ -81,7 +83,7 @@ def preflight(input_dir):
             not isinstance(monthly, dict) or any(monthly.get(k) is True for k in
             ('read_enabled', 'grant_enabled', 'activation_verified'))):
         raise ValueError('unexpected platform config or already-enabled monthly controller')
-    checked_file('/var/lib/pro6000d-training/state.sqlite3')
+    checked_file('/var/lib/pro6000d-training/state.sqlite3', require_root_group=False, private=True)
     uri = 'file:/var/lib/pro6000d-training/state.sqlite3?mode=ro'
     with sqlite3.connect(uri, uri=True, timeout=5) as db:
         marks = ','.join('?' for _ in TERMINAL)
