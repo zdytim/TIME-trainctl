@@ -182,3 +182,21 @@ NVIDIA device-node permissions durable. The live modeset node was not modified;
 no training service was restarted. When inspected before the probe the slice
 was inactive and had no live cgroup, so its configured `DevicePolicy=closed`
 alone was not treated as proof of an active cgroup.
+
+At 18:16 CST a bounded descriptor-handoff probe used a temporary mode-0666
+character node under a private `/dev/time-fd-handoff-*` directory, with the
+same device number as `/dev/nvidia0`; it never changed the real node's mode.
+Root opened the duplicate as a positive control. A `timzhang` process in a
+transient `user-1001.slice` service received `EPERM` opening that duplicate
+directly. A separate same-UID process launched from root's unrestricted SSH
+service context opened the duplicate and passed its file descriptor through a
+Unix socket using `SCM_RIGHTS`; the restricted process received an open
+character-device descriptor. The probe (`sha256:f4b3f0a1060998d6ce563bd667a04b31e21fa7c4d69a1e939141ced0caf99ac4`)
+used no CUDA ioctl or computation, and the sender was a controlled surrogate,
+not an actual Slurm job. Thus it establishes a file-descriptor transfer path
+across the tested cgroup boundary, not successful unscheduled CUDA execution.
+It strengthens the previously documented need to investigate job-to-login
+FD transfer before describing the isolation as resistant to intentional
+bypass. Temporary nodes and the transient service were removed; afterwards the
+queue was empty, all three services were active and the three core device ACLs
+still had `other::---`.
