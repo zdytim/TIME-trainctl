@@ -1,5 +1,18 @@
 # Preserving request identities when clearing training history
 
+On 2026-10-31, `3372778` added an optional check inside the history purge's
+`BEGIN IMMEDIATE` transaction and a guarded cutover helper. The helper compares
+the complete logical live SQLite database to a hash-verified stopped snapshot
+while holding the write lock, and refuses if they differ. In a networkless
+container using synthetic private SQLite data (image SHA-256
+`c68bffd60a53479fa7bccd1f94d19e378aae6f9b8c44ee96d79e1dea387e077a`), a stale
+backup was rejected, a matching backup permitted the atomic deletion, and audit
+rows plus the retired-request guard remained. This is not a live purge and does
+not establish scheduler, log or approval cleanup. A second fixture against a
+private copy of u20's actual snapshot was prepared but did not run: its upload
+was absent when u20 connectivity became intermittent. Repeat it only after
+checking the transfer and the previous command's terminal status.
+
 On 2026-10-31 a read-only query of u20's platform database found seven
 completed/failed jobs with client request IDs, including two rows with request
 fingerprints. `job_request_fingerprints.job_id` references `jobs.id` with
