@@ -22,7 +22,8 @@ expected = {
     'pro6000d-training-api.py': '24afd69cff5eac856f2ccaaf8a97b95c1823c911c83f40338745cd4ab813e821',
     'controller_bridge.py': '30ac4668f6ea6f0a413f4a4a834b27d42c5db069900600058d18da58e2b04a70',
     'controller_view.py': '10be510b5bee9afaec955293dbff499140e099ff612eed1186e7e96e299a637d',
-    'u20-history-purge-core.py': '2c4f2df69d01d61d2aaa6e7320989e3849cd6583aab013167a91aea9d30dad73',
+    'u20-history-purge-core.py': '21b7cd7c990b020c021dc9161ebaa15e007c9f79e39296f201558a7538f9ade5',
+    'old.py': '4224e6aa116532585c6c9e837ee102e9d508ef00b04e6e685bd5e6f092e88821',
 }
 
 
@@ -98,5 +99,30 @@ for uid, request_id in request_ids:
 assert db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0] == 0
 assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
 service.store.db.close()
-print('PASS: shadow purge removed %d jobs; rejected %d old request IDs; preserved other tables' % (deleted, len(request_ids)))
+# The previously deployed broker does not consult tombstones. Exercise its
+# real insertion path with scheduler operations stubbed; SQLite guards must
+# still reject every old ID without writing job or audit rows.
+old = load('shadow_old_history_broker', code / 'old.py')
+restored = old.Service(str(config))
+restored.tick = lambda: None
+restored.scheduler_available = lambda: True
+restored.admission_available = lambda: True
+restored.quota = lambda uid: {'gpu_limit': 1, 'active_job_limit': 8}
+restored.active_usage = lambda uid: {'active_jobs': 0}
+restored.dispatch_waiting = lambda: None
+restored.validate_job = lambda ident, payload, **kwargs: {
+    'name':'shadow', 'gpu':1, 'cpu':1, 'memory_mb':64, 'time_minutes':1,
+    'qos':'normal', 'workdir':'/tmp', 'environment':'system',
+    'command':'true', 'output_path':'/tmp/shadow.log'}
+for uid, request_id in request_ids:
+    try:
+        restored.submit({'uid':uid, 'username':'shadow'}, {'client_request_id':request_id})
+        raise AssertionError('old broker accepted purged request')
+    except sqlite3.IntegrityError as exc:
+        if 'historical request id retired' not in str(exc): raise
+assert restored.store.db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0] == 0
+assert {name: digest_table(restored.store.db, name) for name in unchanged} == before
+assert restored.store.db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+restored.store.db.close()
+print('PASS: shadow purge removed %d jobs; candidate and old broker rejected %d request IDs; preserved other tables' % (deleted, len(request_ids)))
 print('Live database, services and jobs were not modified.')

@@ -39,8 +39,24 @@ def purge(conn):
             raise ValueError('active, ambiguous or approval-linked job exists')
         if conn.execute('SELECT 1 FROM applications WHERE bound_job_id IS NOT NULL LIMIT 1').fetchone():
             raise ValueError('approval is bound to a job')
-        conn.execute('INSERT OR IGNORE INTO job_request_tombstones(owner_uid,client_request_id) '
-                     'SELECT owner_uid,client_request_id FROM jobs WHERE client_request_id IS NOT NULL')
+        # Database-level guards remain effective even if an older broker that
+        # does not know about tombstones is later started against this DB.
+        # Create them in the same transaction as the tombstones and deletion.
+        condition = ('NEW.client_request_id IS NOT NULL AND EXISTS ('
+                     'SELECT 1 FROM job_request_tombstones WHERE owner_uid=NEW.owner_uid '
+                     'AND client_request_id=NEW.client_request_id)')
+        for event, name in (('INSERT', 'time_history_request_insert_guard'),
+                            ('UPDATE OF owner_uid,client_request_id', 'time_history_request_update_guard')):
+            conn.execute('CREATE TRIGGER ' + name + ' BEFORE ' + event + ' ON jobs '
+                         'WHEN ' + condition + " BEGIN SELECT RAISE(ABORT, 'historical request id retired'); END")
+        conn.execute('INSERT INTO job_request_tombstones(owner_uid,client_request_id) '
+                     'SELECT owner_uid,client_request_id FROM jobs WHERE client_request_id IS NOT NULL '
+                     'ON CONFLICT(owner_uid,client_request_id) DO NOTHING')
+        missing = conn.execute('SELECT 1 FROM jobs j LEFT JOIN job_request_tombstones t '
+                               'ON t.owner_uid=j.owner_uid AND t.client_request_id=j.client_request_id '
+                               'WHERE j.client_request_id IS NOT NULL AND t.client_request_id IS NULL LIMIT 1').fetchone()
+        if missing:
+            raise ValueError('historical request identity was not preserved')
         conn.execute('DELETE FROM jobs')
         remaining = conn.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]
         if remaining or conn.execute('PRAGMA foreign_key_check').fetchone():

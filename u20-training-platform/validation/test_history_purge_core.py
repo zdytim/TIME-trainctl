@@ -32,6 +32,13 @@ class HistoryPurgeTests(unittest.TestCase):
         self.assertEqual(self.db.execute('SELECT * FROM job_request_fingerprints').fetchall(), [])
         self.assertEqual(self.db.execute('SELECT * FROM job_request_tombstones').fetchall(), [(1001, 'request1')])
         self.assertEqual(self.db.execute('SELECT * FROM audit_log').fetchall(), [('retain',)])
+        # A broker unaware of tombstones still cannot reinsert or update a job
+        # to a retired identity: the guards are part of the same transaction.
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.db.execute("INSERT INTO jobs VALUES('job2',1001,'request1','WAITING_QUOTA',NULL,NULL)")
+        self.db.execute("INSERT INTO jobs VALUES('job2',1001,'fresh-id','WAITING_QUOTA',NULL,NULL)")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.db.execute("UPDATE jobs SET client_request_id='request1' WHERE id='job2'")
 
     def test_refuses_active_or_ambiguous_jobs(self):
         for state, finished, application in (('RUNNING', 'now', None), ('COMPLETED', None, None),
@@ -56,6 +63,13 @@ class HistoryPurgeTests(unittest.TestCase):
         self.db.execute('DROP TRIGGER unexpected')
         self.db.execute('PRAGMA foreign_keys=OFF')
         with self.assertRaises(ValueError): core.purge(self.db)
+
+    def test_constraint_failure_rolls_back_guards_and_jobs(self):
+        self.db.execute('DROP TABLE job_request_tombstones')
+        self.db.execute('CREATE TABLE job_request_tombstones(owner_uid INTEGER NOT NULL, client_request_id TEXT NOT NULL CHECK(length(client_request_id)<3), PRIMARY KEY(owner_uid,client_request_id))')
+        with self.assertRaises(sqlite3.IntegrityError): core.purge(self.db)
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0], 1)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger'").fetchone()[0], 0)
 
 
 if __name__ == '__main__':

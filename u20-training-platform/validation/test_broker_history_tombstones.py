@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sqlite3
 import sys
 import tempfile
 
@@ -61,4 +62,20 @@ with tempfile.TemporaryDirectory(prefix='time-history-fixture-') as tmp:
     other = {'uid': 1002, 'username': 'other'}
     assert service.submit(other, payload)['id'] != job['id']
     service.store.db.close()
-print('PASS: history purge preserves request IDs and blocks replay without deleting audit')
+    old = load('old_history_broker', Path(os.environ['TIME_VALIDATION_OLD_BROKER']).resolve(strict=True))
+    restored = old.Service(str(config))
+    restored.tick = lambda: None
+    restored.scheduler_available = lambda: True
+    restored.admission_available = lambda: True
+    restored.quota = lambda uid: {'gpu_limit': 1, 'active_job_limit': 8}
+    restored.active_usage = lambda uid: {'active_jobs': 0}
+    restored.dispatch_waiting = lambda: None
+    restored.validate_job = service.validate_job
+    try:
+        restored.submit(user, payload)
+        raise AssertionError('old broker recreated a purged historical request')
+    except sqlite3.IntegrityError as exc:
+        assert 'historical request id retired' in str(exc), exc
+    assert restored.store.db.execute('SELECT COUNT(*) FROM jobs WHERE owner_uid=?', (user['uid'],)).fetchone()[0] == 0
+    restored.store.db.close()
+print('PASS: history purge blocks replay on candidate and old broker without deleting audit')
