@@ -1,0 +1,33 @@
+--- a/pro6000d-training-api.py
++++ b/pro6000d-training-api.py
+@@ -225,6 +225,10 @@
+         self.store.db.execute("CREATE TABLE IF NOT EXISTS job_request_fingerprints (job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE, request_hash TEXT NOT NULL)")
+         self.store.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS jobs_request ON jobs(owner_uid,client_request_id) WHERE client_request_id IS NOT NULL")
+         self.store.db.executescript("""
++            CREATE TABLE IF NOT EXISTS job_request_tombstones (
++              owner_uid INTEGER NOT NULL, client_request_id TEXT NOT NULL,
++              PRIMARY KEY(owner_uid, client_request_id)
++            );
+             CREATE TABLE IF NOT EXISTS monthly_request_keys (
+               uid INTEGER NOT NULL, request_id TEXT NOT NULL, application_id TEXT NOT NULL UNIQUE,
+               PRIMARY KEY(uid, request_id)
+@@ -766,6 +770,8 @@
+             except (TypeError, ValueError):
+                 raise ApiError(400, "invalid_request", "请求无法规范化")
+             request_digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
++            if self.store.db.execute("SELECT 1 FROM job_request_tombstones WHERE owner_uid=? AND client_request_id=?", (uid, request_id)).fetchone():
++                raise ApiError(409, "historical_request_expired", "该请求对应的历史任务已清理，请使用新请求编号")
+             prior = self.store.db.execute("SELECT * FROM jobs WHERE owner_uid=? AND client_request_id=?", (uid, request_id)).fetchone()
+             if prior:
+                 fingerprint = self.store.db.execute("SELECT request_hash FROM job_request_fingerprints WHERE job_id=?", (prior["id"],)).fetchone()
+@@ -805,6 +811,10 @@
+         db = self.store.db
+         db.execute("BEGIN IMMEDIATE")
+         try:
++            # A purge may have committed since the preflight check. Serialize
++            # this check with insertion so an old ID cannot create a new job.
++            if request_id is not None and db.execute("SELECT 1 FROM job_request_tombstones WHERE owner_uid=? AND client_request_id=?", (uid, request_id)).fetchone():
++                raise ApiError(409, "historical_request_expired", "该请求对应的历史任务已清理，请使用新请求编号")
+             if app:
+                 changed = db.execute("UPDATE applications SET authorization_used=1,bound_job_id=?,updated_at=? WHERE id=? AND status='APPROVED' AND authorization_used=0 AND bound_job_id IS NULL", (jid, utc_now(), app_id)).rowcount
+                 if changed != 1:
