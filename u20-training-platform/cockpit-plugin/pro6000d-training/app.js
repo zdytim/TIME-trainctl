@@ -47,6 +47,25 @@
       proc.then(() => finish(null)); proc.catch(finish);
     });
   }
+  // A sampled DAC warning is not a GPU access-control guarantee. The
+  // fixed paths apply only to the current single-GPU u20 installation.
+  function u20GpuPermissionSample() {
+    const paths=['/dev/nvidia0','/dev/nvidiactl','/dev/nvidia-uvm','/dev/nvidia-uvm-tools'];
+    return new Promise(resolve=>{
+      let done=false;
+      let proc;
+      try {proc=cockpit.spawn(['/usr/bin/stat','-c','%a',...paths],{err:'message'});}
+      catch (_) {resolve({status:'unavailable'});return;}
+      const finish=value=>{if(done)return;done=true;clearTimeout(timer);resolve(value);};
+      const timer=setTimeout(()=>{if(typeof proc.close==='function')proc.close('timeout');finish({status:'unavailable'});},3000);
+      proc.then(output=>{
+        const modes=String(output).trim().split(/\s+/);
+        if(modes.length!==paths.length||modes.some(m=>! /^[0-7]{3,4}$/.test(m)))return finish({status:'unavailable'});
+        const exposed=paths.filter((_,i)=>(parseInt(modes[i],8)&7)!==0);
+        finish({status:exposed.length?'exposed':'sampled',exposed});
+      },()=>finish({status:'unavailable'}));
+    });
+  }
   function notify(message, bad=false) {
     const n=document.createElement('div'); n.className='toast'+(bad?' toast-error':'');n.textContent=message;
     document.body.appendChild(n); setTimeout(()=>n.remove(),6500);
@@ -77,6 +96,9 @@
   function banner() {
     if(disconnected)return `<div class="banner warn"><b>连接已中断，以下为上次读取的数据。</b> ${esc(lastError)} 最后更新：${fmt(state.observed_at)}。${button('重新连接','refresh')}</div>`;
     if(!state.scheduler_available)return `<div class="banner warn">调度服务尚未就绪，暂不能提交训练。当前显示已读取的系统信息。${button('刷新状态','refresh')}</div>`;
+    const check=state.u20_permission_sample;
+    if(check&&check.status==='exposed')return `<div class="banner warn"><b>GPU 设备权限异常：</b>${esc(check.exposed.join('、'))} 对其他用户开放。请管理员检查设备 ACL 和会话隔离；此提示不代表已阻止绕过。</div>`;
+    if(check&&check.status==='unavailable')return '<div class="banner warn">GPU 设备权限采样不可用，无法判断设备节点权限；请管理员检查。</div>';
     return `<div class="banner">任务按资源和调度优先级排队。并发限制、月度 GPU 小时和单次运行时限分别管理；批准申请后仍需等待可用资源。<span class="last-observed">更新于 ${fmt(state.observed_at)}</span></div>`;
   }
   function render() {
@@ -90,6 +112,7 @@
     if(refreshBusy)return; refreshBusy=true;
     try {
       const incoming=await api('GET','/api/v1/state');
+      if(incoming.identity && incoming.identity.is_admin && incoming.hostname==='u20-Z790-S-DDR4') incoming.u20_permission_sample=await u20GpuPermissionSample();
       incoming.jobs=incoming.jobs||[];incoming.applications=incoming.applications||[];incoming.notifications=incoming.notifications||[];
       disconnected=false;lastError='';
       if((modalState||ruleDirty)&&!force){queuedState=incoming; updateChrome();}
