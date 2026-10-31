@@ -127,3 +127,23 @@ def project(data):
         else:
             raise ValueError('unexpected event or state')
     return usage, active, seq
+
+
+def project_verified_fixture(data, checkpoint):
+    """Check a caller-supplied offline WAL/checkpoint pair before projecting.
+
+    The matching sequence does not authenticate the pair or prove it is fresh;
+    callers must provide a consistent, trusted, controller-version-matched pair.
+    """
+    prefix = b'U20MQ1|CHECKPOINT|'
+    if (not isinstance(checkpoint, bytes) or len(checkpoint) >= 96 or
+            not checkpoint.startswith(prefix) or not checkpoint.endswith(b'\n')):
+        raise ValueError('invalid checkpoint fixture')
+    try:
+        recorded = _number(checkpoint[len(prefix):-1].decode('ascii'))
+    except UnicodeDecodeError as exc:
+        raise ValueError('invalid checkpoint encoding') from exc
+    usage, active, seq = project(data)
+    if recorded != seq:
+        raise ValueError('checkpoint does not match WAL sequence')
+    return usage, active, seq
