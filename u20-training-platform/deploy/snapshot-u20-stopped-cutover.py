@@ -158,6 +158,7 @@ def snapshot_locked():
     try: os.fsync(fd)
     finally: os.close(fd)
     print('SNAPSHOT_COMPLETE ' + str(folder))
+    return folder
 
 
 if __name__ == '__main__':

@@ -18,7 +18,7 @@ INPUTS = {
     'rehearsal.py': '07e540bc17548df86f4a72050c131814c637c78bcffad9e40cd8f28939b17932',
     'preflight.py': 'd6f21c23e2b0dd86e4ec792f246ec96b8185c58e17884a1d3e9f2af8ea3ec141',
     'base.py': '7611b73148879a4ef831d38a4ceb5384c8cf11239900d0ef751acdde92597978',
-    'snapshot.py': '45f8eed772cb562cd873d2827dcb2a058f56409ad9224f9337a0ed37883b9f31',
+    'snapshot.py': 'fab8f321303cf1ffe85b50e39aa3bcd84ad6d0ee9507115a1f2d10aff8985a75',
 }
 
 
