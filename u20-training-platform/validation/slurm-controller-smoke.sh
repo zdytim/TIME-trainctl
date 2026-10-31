@@ -279,8 +279,17 @@ for _ in $(seq 1 50); do
                     scontrol show job "$job" | grep -q 'JobState=RUNNING'
                 fi
                 if test "$phase" = unavailable; then
-                    scontrol shutdown
+                    if test "$TIME_EXHAUSTED_TEST" = 24; then
+                        # scontrol shutdown also stops slurmd in this fixture;
+                        # preserve the running job by stopping only slurmctld.
+                        child=$(ps -o pid= --ppid "$controller_pid" | tr -d ' ')
+                        test -n "$child" && test "$(ps -o comm= -p "$child")" = slurmctld
+                        kill -TERM "$child"
+                    else
+                        scontrol shutdown
+                    fi
                     wait "$controller_pid" 2>/dev/null || true
+                    if test "$TIME_EXHAUSTED_TEST" = 24; then kill -0 "$node_pid"; fi
                     /opt/py310/bin/python3 "$fixture" repair
                 fi
             done
