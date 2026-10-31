@@ -229,9 +229,10 @@ for _ in $(seq 1 50); do
             grep -q 'JobState=PENDING' "$base/log/approved.out"
             scancel "$job"
             echo 'PASS: root broker identity can submit marked ordinary-user job'
-        elif test "${TIME_EXHAUSTED_TEST:-0}" = 22; then
+        elif test "${TIME_EXHAUSTED_TEST:-0}" = 22 || test "${TIME_EXHAUSTED_TEST:-0}" = 23; then
             test "$service_user" = slurm && test "${TIME_WITNESS:-0}" = 1
             fixture=/validation/isolated-grant-marker-fixture.py
+            if test "$TIME_EXHAUSTED_TEST" = 23; then fixture=/validation/isolated-grant-db-recovery-fixture.py; fi
             /opt/py310/bin/python3 "$fixture" grant
             scontrol shutdown
             wait "$controller_pid" 2>/dev/null || true
