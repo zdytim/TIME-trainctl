@@ -45,6 +45,7 @@ EOF
 chmod 755 "$base"
 test ! -e "$base/state/monthly-quota.wal"
 runuser -u slurm -- /opt/py310/bin/python3 /fixture/ledger-init.py --state-dir "$base/state" --new-empty-ledger
+chmod 700 /var/lib/time-quota-anchor
 /opt/py310/bin/python3 - "$base/state" <<'PY'
 import importlib.util, pathlib, sys
 spec=importlib.util.spec_from_file_location('anchor_init','/validation/time-quota-anchor-init.py')
