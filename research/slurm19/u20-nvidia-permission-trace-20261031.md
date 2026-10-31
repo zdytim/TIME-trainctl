@@ -107,3 +107,20 @@ seconds recorded before the boot, October 2026, tier debug, and mode enforcing.
 This is evidence of a completed-job ledger surviving this boot; it is not a
 test of recovery with an active training job, a forced power failure, or
 device access before ACL restoration.
+
+The boot journal places `pro6000d-gpu-acl.service` completion at 16:42:47,
+Docker startup at 16:42:53, and a Sunshine container restart with NVIDIA
+container-toolkit activity selecting the NVIDIA nodes at 16:43:09. This
+establishes that the one-shot ACL service ran before that later NVIDIA
+userspace activity; it does not prove that the toolkit changed node modes.
+The service being `active (exited)` proves its earlier invocation completed,
+not that subsequent device permissions are still restricted. Three main GPU
+nodes remained `other::---` on the later check; Slurm and broker were active
+and the queue was empty.
+
+An attempted isolated test of a synthetic restricted `/proc/driver/nvidia/params`
+was stopped by the container runtime, which forbade mounting a fixture inside
+`/proc`. The test process did not start; the fixture was removed. No module
+parameter or host device node was changed by the attempt. This leaves the
+candidate default-mode behavior and boot ordering unverified, rather than
+establishing a durable fix.
