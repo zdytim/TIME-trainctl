@@ -6,7 +6,8 @@ test "$(hostname)" = u20-Z790-S-DDR4
 test -f /snapshot/manifest.json && test -f /snapshot/slurm-state/job_state
 base=/tmp/time-restore-fixture
 mkdir -p "$base" /run/munge
-chmod 700 "$base" /run/munge
+chmod 700 "$base"
+chmod 755 /run/munge
 cp -a /snapshot/slurm-state "$base/state"
 chown -R slurm:slurm "$base/state"
 mkdir "$base/spool" "$base/log"
