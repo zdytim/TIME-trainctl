@@ -5,3 +5,5 @@
 - 受保护快照：`/var/backups/pro6000d-training/cutover-stopped-652i98f9`，含数据库逻辑快照、Slurm 状态、jobcomp 和配置，未纳入 Git。独立重新计算清单的 38 个文件哈希并检查 SQLite `quick_check`，数据库有 7 条历史任务。该快照来自本次维护窗口，后续正式切换前仍须重新取得并验证新快照。
 - 恢复检查：slurmctld、slurmd、训练后端均 active，队列为空，维护标记已移除；`SlurmctldParameters=(null)`，GPU 三个设备节点的 other ACL 均为 `---`。没有启用或测试生产月度门控，没有删除历史。
 - 演练成功后恢复的是原有版本，而不是从备份执行恢复；尚未证明从快照恢复服务的实际流程。隔离 fixture `fe42561` 模拟了快照失败、控制器停启失败、后端启动失败及发现新任务等情况；这些并不等同于真实 systemd 故障或断电演练。
+
+后续以 `1edabf3` fixture、原版 `/usr/sbin/slurmctld-wlm`（SHA-256 `94f1063140f245ff779b1efe0009ca0b5192efadf793775acfc75d2c71ca843d`）及快照只读挂载，在无网络、无 GPU、没有 slurmd 的容器中加载快照副本。原版控制器成功读取 5 条已结束任务；提交的容器内合成作业保持排队，编号大于历史最大编号 8。首次尝试因容器 MUNGE 套接字目录权限不对而认证失败，修复 fixture 后通过。容器镜像 SHA-256 `1c8281fe107f8e49a7a879cb7adad3181fe592dfb93d48ec5005eb1161d3a889`。这证明快照的 Slurm 状态可被该原版二进制读取，不证明完整文件权限恢复、生产 systemd 回滚、数据库与调度器一致性或断电恢复。复查 u20 三个服务 active、队列空、GPU ACL 未变，月度门控依然关闭。
