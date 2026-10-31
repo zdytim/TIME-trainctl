@@ -64,7 +64,7 @@ def main():
             else:raise RuntimeError('temporary sshd did not listen')
             code=("import errno,os; p="+repr(str(node))+"; "
                   "c=open('/proc/self/cgroup').read().splitlines(); "
-                  "assert any(':devices:' in x and '/user-1001.slice/' in x for x in c),c; "
+                  "assert any(':devices:' in x and (x.split(':',2)[-1].endswith('/user-1001.slice') or '/user-1001.slice/' in x) for x in c),c; "
                   "exec(\"try:\\n os.open(p,os.O_RDWR)\\nexcept OSError as e:\\n assert e.errno==errno.EPERM,e\\n print('SSH_GPU_DEVICE_DENIED_BY_CGROUP')\\nelse:\\n raise AssertionError('device opened')\")")
             command='/usr/bin/python3 -c '+shlex.quote(code)
             try:
