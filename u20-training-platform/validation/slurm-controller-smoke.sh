@@ -229,6 +229,31 @@ for _ in $(seq 1 50); do
             grep -q 'JobState=PENDING' "$base/log/approved.out"
             scancel "$job"
             echo 'PASS: root broker identity can submit marked ordinary-user job'
+        elif test "${TIME_EXHAUSTED_TEST:-0}" = 22; then
+            test "$service_user" = slurm && test "${TIME_WITNESS:-0}" = 1
+            fixture=/validation/isolated-grant-marker-fixture.py
+            /opt/py310/bin/python3 "$fixture" grant
+            scontrol shutdown
+            wait "$controller_pid" 2>/dev/null || true
+            /opt/py310/bin/python3 "$fixture" damage
+            for phase in unavailable verify; do
+                timeout 45 "${controller[@]}" -D -v -f "$SLURM_CONF" > "$base/log/controller-$phase.out" 2>&1 &
+                controller_pid=$!
+                ready=0
+                for _ in $(seq 1 100); do
+                    if scontrol ping > "$base/log/ping-$phase.out" 2>&1 &&
+                       grep -Eq '^Slurmctld\(primary\) at .* is UP' "$base/log/ping-$phase.out" &&
+                       test -S "$base/state/time-quota.sock"; then ready=1; break; fi
+                    sleep .1
+                done
+                if test "$ready" != 1; then cat "$base/log/controller-$phase.out"; exit 1; fi
+                /opt/py310/bin/python3 "$fixture" "$phase"
+                if test "$phase" = unavailable; then
+                    scontrol shutdown
+                    wait "$controller_pid" 2>/dev/null || true
+                    /opt/py310/bin/python3 "$fixture" repair
+                fi
+            done
         elif test "${TIME_EXHAUSTED_TEST:-0}" = 21; then
             test "$service_user" = slurm
             TIME_VALIDATION_BROKER_DIR=/broker /opt/py310/bin/python3 /validation/test_broker_console_view.py
