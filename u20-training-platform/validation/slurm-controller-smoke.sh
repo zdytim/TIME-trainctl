@@ -60,6 +60,16 @@ if test "${TIME_STOCK_NODE_CONFIG:-0}" = 1; then
     node_conf="$base/node.conf"
     sed "s|^PluginDir=.*|PluginDir=/stock-u20/plugins|" "$SLURM_CONF" > "$node_conf"
 fi
+verify_node_plugins() {
+    if test "${TIME_STOCK_NODE_CONFIG:-0}" = 1; then
+        grep -F '/stock-u20/plugins/' "/proc/$node_pid/maps" > "$base/log/node-plugin-maps.out"
+        if grep -F "$prefix/lib/slurm/" "/proc/$node_pid/maps"; then
+            echo 'FAIL: stock node loaded a candidate controller plugin' >&2
+            exit 1
+        fi
+        echo 'PASS: stock node loaded plugins from its separate directory'
+    fi
+}
 if test "${TIME_EXHAUSTED_TEST:-0}" = 20; then
     echo 'JobSubmitPlugins=lua' >> "$SLURM_CONF"
     # The release-layout plugin embeds this config directory. Require a
@@ -254,6 +264,7 @@ for _ in $(seq 1 50); do
                     sleep .1
                 done
                 grep -q 'State=IDLE' "$base/log/node.out"
+                verify_node_plugins
                 job=$(sbatch --parsable --uid=1001 --gid=1001 --time=00:01:00 --mem=64M --gres=gpu:1 --chdir="$base/out" --output="$base/out/slurm-%j.out" --wrap='echo FIXTURE_STARTED; sleep 25; echo FIXTURE_FINISHED')
                 for _ in $(seq 1 100); do
                     if scontrol show job "$job" > "$base/log/running.out" && grep -q 'JobState=RUNNING' "$base/log/running.out" && grep -q FIXTURE_STARTED "$base/out/slurm-$job.out" 2>/dev/null; then break; fi
@@ -401,6 +412,7 @@ for _ in $(seq 1 50); do
             if ! grep -q 'State=IDLE' "$base/log/node.out"; then
                 cat "$base/log/slurmd.out" "$base/log/node.out"; exit 1
             fi
+            verify_node_plugins
             if test "$TIME_EXHAUSTED_TEST" = 17; then
                 if test "${TIME_REAL_GPU_VALIDATION:-0}" = 1; then
                     command='set -e; id -u; /opt/py310/bin/python3 /validation/cuda-driver-probe.py; sleep 3'
