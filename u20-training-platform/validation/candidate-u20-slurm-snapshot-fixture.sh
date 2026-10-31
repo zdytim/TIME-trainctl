@@ -77,8 +77,11 @@ test -S "$base/state/time-quota.sock" || { echo 'FAIL: candidate quota socket un
 PYTHONPATH=/broker /opt/py310/bin/python3 - "$base/state/time-quota.sock" <<'PY'
 import sys
 from controller_bridge import ControllerBridge
+from controller_view import snapshot_view
 s=ControllerBridge(sys.argv[1], 64030).snapshot(1001)
-assert s['tier']=='debug' and s['used']['gpu_seconds']==0 and s['capacity']['gpu_seconds']==18000, s
+assert s['tier']=='debug' and s['used']['gpu_seconds']==0 and s['capacity']['gpu_seconds']==605*3600, s
+view=snapshot_view(s)
+assert [t['limit_gpu_seconds'] for t in view['tiers']]==[5*3600,100*3600,500*3600]
 print('PASS: candidate reports fresh 5 GPU-hour debug quota')
 PY
 for id in 4 5 6 7 8; do
