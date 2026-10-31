@@ -90,3 +90,20 @@ a verified fix: current training and display access depend on named ACLs and
 the udev helper; cold boot, UVM/capability nodes, privileged software and
 in-flight training require separate review. No module option, initramfs,
 driver, or service was changed during this investigation.
+
+Further read-only journal and boot inspection identified an intervening host
+boot at 2026-10-31 16:42:39 CST. The kernel loaded the NVIDIA modules at
+16:42:47 and the current device nodes have a 16:42 creation timestamp. This
+boot predates the 17:05 ACL restoration and postdates the earlier 16:28
+inspection, so a boot/device-recreation path is a relevant possibility; it
+does not establish which component widened permissions or when. NVIDIA
+container-toolkit activity was also logged at 16:43. No reboot was initiated
+as part of this investigation. Subsequent checks showed all three nodes with
+`other::---`, Slurm and the broker active, and an empty queue.
+
+After this intervening boot, the configured `7a06` controller was running and
+the shared CLI, as `timzhang`, reported the same 1.950998992 settled GPU
+seconds recorded before the boot, October 2026, tier debug, and mode enforcing.
+This is evidence of a completed-job ledger surviving this boot; it is not a
+test of recovery with an active training job, a forced power failure, or
+device access before ACL restoration.
