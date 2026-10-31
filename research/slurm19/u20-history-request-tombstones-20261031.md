@@ -21,12 +21,11 @@ The candidate broker reconstructed from committed source had SHA-256
 
 This primitive does not stop services, fence submissions, back up the database,
 inspect the scheduler, clear jobcomp or coordinate crash recovery; it is not a
-standalone production purge. Critically, the currently installed/older broker
-does not consult tombstones: after a purge, rolling back to that broker while
-allowing submissions could recreate old requests. A release/rollback procedure
-must preserve a tombstone-aware admission path or keep submission closed until
-reconciled; do not run the purge until that and the remaining cutover safeguards
-are in place. Requests originally submitted without an ID have no identity to
+standalone production purge. The currently installed/older broker does not
+consult tombstones directly. The initial candidate therefore could not safely
+roll back while accepting submissions; the database-level mitigation and its
+scope are described below. Do not run the purge until the remaining cutover
+safeguards are in place. Requests originally submitted without an ID have no identity to
 preserve. Existing application links, unknown schema changes or active jobs are
 reasons for the primitive to refuse. No quota controller or cleanup is enabled.
 
@@ -42,3 +41,25 @@ with no tombstone table; Slurm and the backend were active, the queue was
 empty, and the monthly parameter was unset. This is a point-in-time shadow
 check, not a coordinated maintenance backup, live deployment, jobcomp cleanup,
 or proof that the old broker safely handles tombstones.
+
+The later `36b09a9` purge core adds SQLite INSERT and UPDATE triggers in the
+same transaction as the tombstones and job deletion. In a private SQLite
+fixture, the candidate and the old broker both failed to recreate a purged
+request; the old broker received a SQLite integrity error, not the candidate's
+user-friendly 409 response. An injected constraint failure rolled back both
+the triggers and the job deletion. The insert uses conflict-targeted handling
+and verifies all request IDs survived; it does not silently ignore unrelated
+constraint errors.
+
+On u20 at approximately 12:24, the updated shadow tool repeated the check on a
+fresh protected SQLite backup at
+`/var/backups/pro6000d-training/shadow-history-tcy4xvlq`. All seven IDs were
+rejected by both the candidate and a copy of the currently installed broker
+(SHA-256 `4224e6aa116532585c6c9e837ee102e9d508ef00b04e6e685bd5e6f092e88821`);
+the other table contents and schemas were unchanged and SQLite integrity was
+OK. Scheduler calls were stubbed. These triggers protect only while that same
+database retains both triggers and tombstones. Restoring an older database,
+dropping or modifying either, or writing through a different database can
+remove this protection; rollback still needs explicit data reconciliation and
+must not overwrite later approvals or quota accounting. The production database
+was not modified and the controller remains disabled.
