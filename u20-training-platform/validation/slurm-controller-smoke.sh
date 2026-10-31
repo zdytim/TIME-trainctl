@@ -49,6 +49,17 @@ GresTypes=gpu
 NodeName=time-test CPUs=2 RealMemory=1024 State=UNKNOWN Gres=$gpu_spec
 PartitionName=normal Nodes=time-test Default=YES State=UP
 EOF
+# Exercise a possible controller-only cutover without changing the node's
+# installed plugin directory. Only opt in inside the disposable container.
+node_conf="$SLURM_CONF"
+if test "${TIME_STOCK_NODE_CONFIG:-0}" = 1; then
+    test "${TIME_SYSTEM_SLURMD:-0}" = 1
+    test -d /stock-u20/plugins
+    # Do not suppress the normal controller/node configuration comparison.
+    sed -i '/^SlurmdParameters=config_overrides$/d' "$SLURM_CONF"
+    node_conf="$base/node.conf"
+    sed "s|^PluginDir=.*|PluginDir=/stock-u20/plugins|" "$SLURM_CONF" > "$node_conf"
+fi
 if test "${TIME_EXHAUSTED_TEST:-0}" = 20; then
     echo 'JobSubmitPlugins=lua' >> "$SLURM_CONF"
     # The release-layout plugin embeds this config directory. Require a
@@ -236,7 +247,7 @@ for _ in $(seq 1 50); do
             if test "$TIME_EXHAUSTED_TEST" = 24; then
                 export TIME_GRANT_RUNNING_JOB=1
                 chmod 755 "$base"; mkdir "$base/out"; chmod 777 "$base/out"
-                LD_LIBRARY_PATH="/stock-u20:$prefix/lib/slurm" /stock-u20/slurmd -D -f "$SLURM_CONF" > "$base/log/slurmd.out" 2>&1 &
+                SLURM_CONF="$node_conf" LD_LIBRARY_PATH="/stock-u20:$prefix/lib/slurm" /stock-u20/slurmd -D -f "$node_conf" > "$base/log/slurmd.out" 2>&1 &
                 node_pid=$!
                 for _ in $(seq 1 100); do
                     if scontrol show node time-test > "$base/log/node.out" 2>&1 && grep -q 'State=IDLE' "$base/log/node.out"; then break; fi
@@ -377,7 +388,7 @@ for _ in $(seq 1 50); do
                 # Stock u20 daemon and its stock libslurmfull, copied into this
                 # disposable image; all config/state/plugins remain synthetic.
                 test -x /stock-u20/slurmd && test -f /stock-u20/libslurmfull.so
-                LD_LIBRARY_PATH="/stock-u20:$prefix/lib/slurm" /stock-u20/slurmd -D -f "$SLURM_CONF" > "$base/log/slurmd.out" 2>&1 &
+                SLURM_CONF="$node_conf" LD_LIBRARY_PATH="/stock-u20:$prefix/lib/slurm" /stock-u20/slurmd -D -f "$node_conf" > "$base/log/slurmd.out" 2>&1 &
             else
                 slurmd -D -f "$SLURM_CONF" > "$base/log/slurmd.out" 2>&1 &
             fi
