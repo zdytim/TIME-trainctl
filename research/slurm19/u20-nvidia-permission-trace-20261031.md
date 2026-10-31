@@ -124,3 +124,21 @@ was stopped by the container runtime, which forbade mounting a fixture inside
 parameter or host device node was changed by the attempt. This leaves the
 candidate default-mode behavior and boot ordering unverified, rather than
 establishing a durable fix.
+
+Later, the existing private-parameter simulation in
+`u20-nvidia-device-mode-isolation-20261030.md` was reexamined: simulated 0660
+changed the private GPU and control nodes to 0660, but the private UVM node
+still became 0666; separately the vendor `ub-device-create` was observed in
+an isolated fixture to set its private nodes to 0666. Therefore the NVIDIA
+mode parameter by itself is not evidence of a complete fix.
+
+A further post-reboot check used the actual `timzhang` user manager and
+`systemd-run --user` to start a bounded Python process. Root created a
+temporary mode-0666 character node matching the current GPU device number in
+a root/user-group-only directory and successfully opened it as a positive
+control. The user service reported devices cgroup
+`/user.slice/user-1001.slice` and received `EPERM` when opening the duplicate.
+The temporary node and directory were removed. Slurm and broker stayed active,
+the queue was empty, and the three main real devices retained `other::---`.
+This validates that account's tested user-manager path and current device
+number, not every account, device, launch path or future boot.
