@@ -34,3 +34,22 @@ After both tests Slurm and the training backend remained active, the host queue
 was empty, the three existing NVIDIA nodes had `other::---`, and Sunshine PID
 `130919` remained. Monthly enforcement was not enabled. No durable fix to the
 device permission reset was installed.
+
+On 2026-10-31 after the monthly controller cutover, `a4a9a75` ran a bounded
+loopback-only temporary sshd using ephemeral keys and the actual production
+`sshd` PAM stack. A real `timzhang` SSH session entered the devices hierarchy
+at `/user.slice/user-1001.slice`. Root opened a separate temporary mode-0666
+character node with the real GPU device number as a positive control; the SSH
+session received `EPERM` opening that same node. Its parent directory was
+accessible only to root and the test user's private group. No production SSH
+configuration, user keys or existing GPU nodes were modified; temporary device
+and key directories were removed. SSH, Slurm and platform services remained
+active, queue empty, and GPU other ACLs `---`.
+
+Two earlier probe runs authenticated but failed a test assertion that required
+a slash after the devices slice. The actual devices hierarchy ended exactly at
+`user-1001.slice`; those runs are not counted. The corrected probe accepts the
+exact slice or a child. This establishes the real SSH/PAM path for the current
+account and GPU major/minor even when DAC on the temporary node is permissive;
+it does not establish Cockpit, all execution paths, device major changes, reboot
+or privileged-user behavior. Device mode recreation remains unresolved.
