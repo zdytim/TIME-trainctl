@@ -29,3 +29,16 @@ reconciled; do not run the purge until that and the remaining cutover safeguards
 are in place. Requests originally submitted without an ID have no identity to
 preserve. Existing application links, unknown schema changes or active jobs are
 reasons for the primitive to refuse. No quota controller or cleanup is enabled.
+
+On 2026-10-31 approximately 12:20 Asia/Shanghai, `b1f2597` copied the live
+SQLite database through SQLite's backup API into root-owned mode-0600 files in
+`/var/backups/pro6000d-training/shadow-history-k04ky4ku` (directory mode 0700).
+The hash-verified candidate broker initialized a separate copy; the purge core
+deleted seven shadow jobs, preserved all seven request identities, rejected
+each old request on the candidate broker, and left other existing table schemas
+and row digests unchanged. The shadow database passed `integrity_check`.
+Afterwards the live database still contained seven jobs and seven request IDs,
+with no tombstone table; Slurm and the backend were active, the queue was
+empty, and the monthly parameter was unset. This is a point-in-time shadow
+check, not a coordinated maintenance backup, live deployment, jobcomp cleanup,
+or proof that the old broker safely handles tombstones.
