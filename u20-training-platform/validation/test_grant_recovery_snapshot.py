@@ -36,13 +36,14 @@ class GrantSnapshot(unittest.TestCase):
         self.db.chmod(0o600)
 
     def tearDown(self): self.tmp.cleanup()
-    def collect(self, check=lambda:None):
-        return module.collect(self.state,self.anchor,self.db,self.backups,os.getuid(),os.getuid(),check)
+    def collect(self, check=lambda:None, replay=lambda _path:None):
+        return module.collect(self.state,self.anchor,self.db,self.backups,os.getuid(),os.getuid(),check,replay)
 
     def test_backup_contains_verified_sources_and_candidate(self):
         out=self.collect(); directory=Path(out['backup'])
         self.assertEqual((directory/'monthly-quota.wal').read_bytes(),self.wal)
         self.assertTrue(out['intent_matches']); self.assertFalse(out['repair_authorized'])
+        self.assertEqual(out['semantic_replay'],'passed')
         self.assertEqual(out['observation'],'wal_one_event_ahead')
         self.assertTrue((directory/'state.sqlite3').is_file())
         self.assertEqual(os.stat(directory).st_mode & 0o777,0o700)
@@ -75,6 +76,11 @@ class GrantSnapshot(unittest.TestCase):
             calls[0]+=1
             if calls[0]==3: (self.state/'monthly-quota.wal').write_bytes(self.wal+b'changed')
         with self.assertRaises(ValueError): self.collect(mutate)
+        for backup in self.backups.iterdir(): self.assertFalse((backup/'preview.json').exists())
+
+    def test_semantic_replay_failure_does_not_complete_preview(self):
+        def reject(_path): raise ValueError('controller replay refused WAL')
+        with self.assertRaises(ValueError): self.collect(replay=reject)
         for backup in self.backups.iterdir(): self.assertFalse((backup/'preview.json').exists())
 
 

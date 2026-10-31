@@ -25,6 +25,7 @@ def load(name, filename):
     obj=importlib.util.module_from_spec(spec); spec.loader.exec_module(obj); return obj
 inspector=load('time_snapshot_inspector','time-quota-recovery-inspect.py')
 repair=load('time_snapshot_candidate','time-grant-repair-candidate.py')
+REPLAY_SHA='3970903d61231dcbd64e88341ec2157fcdedb4e38916d41dc4a3ee4726545dec'
 
 
 def trusted_directory(path, final_owner, permitted_ancestors):
@@ -65,7 +66,32 @@ def save(directory, name, data):
         out.write(data); out.flush(); os.fsync(out.fileno())
 
 
-def collect(state_dir, witness_dir, db_path, backup_dir, service_uid, root_uid, check_services):
+def semantic_replay(helper, wal):
+    """Run the pinned root-owned helper against the private backup, read-only."""
+    helper=Path(os.path.abspath(helper))
+    parent=trusted_directory(helper.parent,0,(0,))
+    try:
+        fd=os.open(helper.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=parent)
+        try:
+            st=os.fstat(fd)
+            if (not stat.S_ISREG(st.st_mode) or st.st_uid!=0 or st.st_nlink!=1 or
+                    st.st_mode & 0o022 or st.st_size>4*1024*1024):
+                raise ValueError('untrusted replay helper')
+            digest=hashlib.sha256()
+            while True:
+                block=os.read(fd,65536)
+                if not block: break
+                digest.update(block)
+            if digest.hexdigest()!=REPLAY_SHA: raise ValueError('replay helper digest mismatch')
+        finally: os.close(fd)
+    finally: os.close(parent)
+    p=subprocess.run([str(helper),str(wal)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                     text=True,timeout=8,env={'PATH':'/usr/bin:/bin','LANG':'C'})
+    if p.returncode!=0 or not p.stdout.startswith('WAL_REPLAY_OK '):
+        raise ValueError('controller-source WAL replay failed')
+
+
+def collect(state_dir, witness_dir, db_path, backup_dir, service_uid, root_uid, check_services, replay_check):
     check_services()
     state_dir,witness_dir,db_path,backup_dir=map(lambda p:Path(os.path.abspath(p)),
                                                   (state_dir,witness_dir,db_path,backup_dir))
@@ -116,6 +142,7 @@ def collect(state_dir, witness_dir, db_path, backup_dir, service_uid, root_uid, 
             snapshotfd=os.open('state.sqlite3',os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=outfd)
             try: os.fsync(snapshotfd)
             finally: os.close(snapshotfd)
+            replay_check(out/'monthly-quota.wal')
             after=os.stat(db_path,follow_symlinks=False)
             if (after.st_dev,after.st_ino)!=(dbinfo.st_dev,dbinfo.st_ino): raise ValueError('database path changed')
             check_services()
@@ -125,9 +152,9 @@ def collect(state_dir, witness_dir, db_path, backup_dir, service_uid, root_uid, 
             save(outfd,'checkpoint.proposed',plan['checkpoint'])
             save(outfd,'witness.proposed',plan['witness'])
             observed=inspector.inspect(wal,checkpoint,witness)
-            result={'backup':str(out),'observation':observed['observation'],'intent_matches':True,
+            result={'backup':str(out),'observation':observed['observation'],'intent_matches':True,'semantic_replay':'passed',
                     'repair_authorized':False,'wal_sha256':hashlib.sha256(wal).hexdigest(),
-                    'note':'preview only: full WAL semantics and scheduler state remain unverified'}
+                    'note':'preview only: scheduler state and production recovery remain unverified'}
             save(outfd,'preview.json',(json.dumps(result,indent=2)+'\n').encode()); os.fsync(outfd)
             os.fsync(dirs[3])
             return result
@@ -145,6 +172,7 @@ if __name__=='__main__':
     try:
         print(json.dumps(collect('/var/lib/slurm/ctld','/var/lib/time-quota-anchor',
             '/var/lib/pro6000d-training/state.sqlite3','/var/backups/pro6000d-training',
-            pwd.getpwnam('slurm').pw_uid,0,service_inactive),indent=2))
+            pwd.getpwnam('slurm').pw_uid,0,service_inactive,
+            lambda path:semantic_replay('/usr/local/libexec/time-quota-replay-7a06',path)),indent=2))
     except (OSError,ValueError,KeyError,sqlite3.Error,subprocess.SubprocessError) as exc:
         print('Preview refused; original files unchanged: '+str(exc),file=sys.stderr); sys.exit(1)

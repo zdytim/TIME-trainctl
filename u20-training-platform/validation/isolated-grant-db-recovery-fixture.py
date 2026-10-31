@@ -118,8 +118,9 @@ elif action == 'repair':
                 status=(item/'stat').read_text(); state_code=status[status.rfind(')')+2:].split()[0]
             except (OSError,IndexError): continue
             if name=='slurmctld' and state_code!='Z': raise RuntimeError('fixture controller still running')
-    preview=snapshot.collect(state,anchor,db_path,backups,64030,0,stopped)
-    assert not preview['repair_authorized'] and preview['intent_matches']
+    preview=snapshot.collect(state,anchor,db_path,backups,64030,0,stopped,
+                             lambda p:snapshot.semantic_replay(tools/'quota-replay',p))
+    assert not preview['repair_authorized'] and preview['intent_matches'] and preview['semantic_replay']=='passed'
     backup=Path(preview['backup'])
     assert (backup/'checkpoint.proposed').read_bytes()==result['checkpoint']
     assert (backup/'witness.proposed').read_bytes()==result['witness']
