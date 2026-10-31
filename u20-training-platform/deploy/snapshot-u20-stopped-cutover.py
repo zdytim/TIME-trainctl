@@ -113,40 +113,51 @@ def main():
         if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_nlink != 1 or st.st_mode & 0o077:
             raise ValueError('untrusted maintenance lock')
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        requirements()
-        folder = Path(tempfile.mkdtemp(prefix='cutover-stopped-', dir=str(ROOT)))
-        print('Snapshot location (retain on failure): ' + str(folder), flush=True)
-        metadata = {'created_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    'note': 'offline snapshot; active-job exclusion and restore require independent checks',
-                    'state': {}, 'files': {}}
-        snapshot_tree(STATE, folder / 'slurm-state', metadata['state'])
-        metadata['files']['jobcomp.log'] = snapshot_file(JOBCOMP, folder / 'jobcomp.log')
-        for n, path in enumerate(CONFIGS):
-            metadata['files']['config-%d' % n] = {'source': str(path),
-                                                    **snapshot_file(path, folder / ('config-%d' % n))}
-        dbstat = os.lstat(DB)
-        if not stat.S_ISREG(dbstat.st_mode) or dbstat.st_uid != 0 or dbstat.st_mode & 0o077:
-            raise ValueError('untrusted live database')
-        with sqlite3.connect('file:' + str(DB) + '?mode=ro', uri=True, timeout=5) as src, \
-                sqlite3.connect(str(folder / 'state.sqlite3')) as dst:
-            src.backup(dst)
-            if dst.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
-                raise ValueError('database snapshot integrity check failed')
-        if identity(dbstat) != identity(os.lstat(DB)):
-            raise ValueError('database changed while backing up')
-        dbfd = os.open(folder / 'state.sqlite3', os.O_RDONLY | os.O_NOFOLLOW)
-        try: os.fsync(dbfd)
-        finally: os.close(dbfd)
-        metadata['database'] = {'sha256': hashlib.sha256((folder / 'state.sqlite3').read_bytes()).hexdigest(),
-                                'uid': dbstat.st_uid, 'gid': dbstat.st_gid,
-                                'mode': stat.S_IMODE(dbstat.st_mode)}
-        requirements()
-        with (folder / 'manifest.json').open('x') as out:
-            json.dump(metadata, out, sort_keys=True, indent=2); out.write('\n'); out.flush(); os.fsync(out.fileno())
-        fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try: os.fsync(fd)
-        finally: os.close(fd)
-        print('SNAPSHOT_COMPLETE ' + str(folder))
+        snapshot_locked()
+
+
+def snapshot_locked():
+    """Caller must hold the validated exclusive maintenance lock."""
+    if os.geteuid() != 0 or os.uname().nodename != 'u20-Z790-S-DDR4':
+        raise ValueError('root on u20 is required')
+    for parent in reversed((ROOT,) + tuple(ROOT.parents)):
+        info = parent.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError('untrusted backup path: ' + str(parent))
+    requirements()
+    folder = Path(tempfile.mkdtemp(prefix='cutover-stopped-', dir=str(ROOT)))
+    print('Snapshot location (retain on failure): ' + str(folder), flush=True)
+    metadata = {'created_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                'note': 'offline snapshot; active-job exclusion and restore require independent checks',
+                'state': {}, 'files': {}}
+    snapshot_tree(STATE, folder / 'slurm-state', metadata['state'])
+    metadata['files']['jobcomp.log'] = snapshot_file(JOBCOMP, folder / 'jobcomp.log')
+    for n, path in enumerate(CONFIGS):
+        metadata['files']['config-%d' % n] = {'source': str(path),
+                                                **snapshot_file(path, folder / ('config-%d' % n))}
+    dbstat = os.lstat(DB)
+    if not stat.S_ISREG(dbstat.st_mode) or dbstat.st_uid != 0 or dbstat.st_mode & 0o077:
+        raise ValueError('untrusted live database')
+    with sqlite3.connect('file:' + str(DB) + '?mode=ro', uri=True, timeout=5) as src, \
+            sqlite3.connect(str(folder / 'state.sqlite3')) as dst:
+        src.backup(dst)
+        if dst.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+            raise ValueError('database snapshot integrity check failed')
+    if identity(dbstat) != identity(os.lstat(DB)):
+        raise ValueError('database changed while backing up')
+    dbfd = os.open(folder / 'state.sqlite3', os.O_RDONLY | os.O_NOFOLLOW)
+    try: os.fsync(dbfd)
+    finally: os.close(dbfd)
+    metadata['database'] = {'sha256': hashlib.sha256((folder / 'state.sqlite3').read_bytes()).hexdigest(),
+                            'uid': dbstat.st_uid, 'gid': dbstat.st_gid,
+                            'mode': stat.S_IMODE(dbstat.st_mode)}
+    requirements()
+    with (folder / 'manifest.json').open('x') as out:
+        json.dump(metadata, out, sort_keys=True, indent=2); out.write('\n'); out.flush(); os.fsync(out.fileno())
+    fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+    print('SNAPSHOT_COMPLETE ' + str(folder))
 
 
 if __name__ == '__main__':
