@@ -168,3 +168,17 @@ privileged processes or future accounts. The enrollment tool requires a
 logged-out ordinary user, rejects several privileged groups and adds a
 per-user closed slice; it must actually be run for each new training user.
 Slurm and the platform backend remained active and the queue was empty.
+
+At approximately 17:5x CST, inspection found `/dev/nvidia-modeset` mode 0666;
+the current ACL helper intentionally excludes the display/modeset node, so the
+previous three-node ACL checks do not cover it. A bounded transient systemd
+service ran as UID 1001 in the existing `user-1001.slice`; its devices cgroup
+was `/user.slice/user-1001.slice` and an `O_RDONLY` open of the actual
+mode-0666 modeset node returned `EPERM`. A separate root read-only open
+succeeded. This verifies denial for this UID, this device and this transient
+slice path despite permissive DAC; it does not prove that modeset can or
+cannot be used to bypass compute, cover other accounts or paths, or make the
+NVIDIA device-node permissions durable. The live modeset node was not modified;
+no training service was restarted. When inspected before the probe the slice
+was inactive and had no live cgroup, so its configured `DevicePolicy=closed`
+alone was not treated as proof of an active cgroup.
