@@ -45,6 +45,28 @@ class RecoveryHistory(unittest.TestCase):
         with self.assertRaises(ValueError):
             module.inspect(self.wal + b'U20MQ1|2|PARTIAL', self.cp, self.witness)
 
+    def test_wal_ahead_of_both_markers_is_identified_without_repair(self):
+        old_cp = b'U20MQ1|CHECKPOINT|0|' + sha(self.header) + b'\n'
+        old_witness = b'U20MQA1|0|' + sha(self.header) + b'\n'
+        result = module.inspect(self.wal, old_cp, old_witness)
+        self.assertFalse(result['matching'])
+        self.assertTrue(result['checkpoint_matches_wal_prefix'])
+        self.assertEqual(result['observation'], 'wal_one_event_ahead')
+        self.assertEqual(result['recovery_readiness'], 'not assessed')
+
+    def test_checkpoint_ahead_of_witness_is_identified_without_repair(self):
+        old_witness = b'U20MQA1|0|' + sha(self.header) + b'\n'
+        result = module.inspect(self.wal, self.cp, old_witness)
+        self.assertFalse(result['matching'])
+        self.assertEqual(result['observation'], 'witness_one_event_behind')
+
+    def test_bad_old_checkpoint_is_not_treated_as_orderly_interruption(self):
+        bad_cp = b'U20MQ1|CHECKPOINT|0|' + b'0'*64 + b'\n'
+        old_witness = b'U20MQA1|0|' + sha(self.header) + b'\n'
+        result = module.inspect(self.wal, bad_cp, old_witness)
+        self.assertFalse(result['checkpoint_matches_wal_prefix'])
+        self.assertEqual(result['observation'], 'inconsistent_or_unclassified')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -90,22 +90,35 @@ def inspect(wal, checkpoint, witness):
         if len(fields) < 4 or fields[0] != b'U20MQ1' or fields[1] != str(seq).encode():
             raise ValueError('invalid WAL sequence')
     wal_seq = len(wal_lines) - 1
+    checkpoint_seq, checkpoint_digest = int(cp.group(1)), cp.group(2).decode()
     # Each witness record contains the digest of the WAL through that event.
     # Check every available prefix, not merely the final witness record.
     prefix = hashlib.sha256()
     history_matches = len(witness_digests) <= len(wal_lines)
+    checkpoint_prefix_matches = False
     for index, line in enumerate(wal_lines):
         prefix.update(line)
         if index < len(witness_digests) and prefix.hexdigest() != witness_digests[index]:
             history_matches = False
-    checkpoint_seq, checkpoint_digest = int(cp.group(1)), cp.group(2).decode()
+        if index == checkpoint_seq and prefix.hexdigest() == checkpoint_digest:
+            checkpoint_prefix_matches = True
     witness_seq, witness_digest = int(last.group(1)), last.group(2).decode()
     match = (history_matches and wal_seq == checkpoint_seq == witness_seq and
              digest == checkpoint_digest == witness_digest)
+    observation = 'inconsistent_or_unclassified'
+    if match:
+        observation = 'markers_match'
+    elif history_matches and checkpoint_prefix_matches and wal_seq == witness_seq + 1:
+        if checkpoint_seq == witness_seq:
+            observation = 'wal_one_event_ahead'
+        elif checkpoint_seq == wal_seq:
+            observation = 'witness_one_event_behind'
     return {'matching': match, 'wal_sequence': wal_seq, 'checkpoint_sequence': checkpoint_seq,
             'witness_sequence': witness_seq, 'wal_sha256': digest,
             'checkpoint_sha256': checkpoint_digest, 'witness_sha256': witness_digest,
             'witness_history_matches_wal': history_matches,
+            'checkpoint_matches_wal_prefix': checkpoint_prefix_matches,
+            'observation': observation,
             'recovery_readiness': 'not assessed',
             'note': 'No replay or repair was performed; preserve originals and reconcile Slurm job state.'}
 
