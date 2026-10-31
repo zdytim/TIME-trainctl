@@ -41,8 +41,9 @@ def save(path, data):
 
 
 def rows():
-    fields = wal.read_bytes().splitlines()[-1].split(b'|')
-    assert fields[2] == b'GRANT'
+    grants = [line.split(b'|') for line in wal.read_bytes().splitlines() if len(line.split(b'|')) > 2 and line.split(b'|')[2] == b'GRANT']
+    assert len(grants) == 1
+    fields = grants[0]
     grant_id=fields[7].decode('ascii')
     with sqlite3.connect('file:'+str(db_path)+'?mode=ro', uri=True) as conn:
         conn.row_factory=sqlite3.Row
