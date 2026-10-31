@@ -8,6 +8,7 @@ from pathlib import Path
 import socket
 import sqlite3
 import sys
+import time
 
 assert os.geteuid() == 0 and os.environ.get('TIME_ISOLATED_VALIDATION') == '1'
 assert Path('/.dockerenv').is_file()
@@ -23,9 +24,15 @@ broker = load('broker', '/broker/pro6000d-training-api.py')
 
 
 def exchange(text):
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
-        conn.settimeout(4); conn.connect(str(state/'time-quota.sock'))
-        conn.sendall(text.encode('ascii')+b'\n'); return conn.recv(2048).decode('ascii').strip()
+    deadline=time.monotonic()+8
+    while True:
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+                conn.settimeout(4); conn.connect(str(state/'time-quota.sock'))
+                conn.sendall(text.encode('ascii')+b'\n'); return conn.recv(2048).decode('ascii').strip()
+        except (ConnectionRefusedError, FileNotFoundError):
+            if time.monotonic() >= deadline: raise
+            time.sleep(.1)
 
 
 def save(path, data):
