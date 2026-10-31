@@ -1,4 +1,13 @@
-# Monthly allocation gate contract — design, not implemented
+# Monthly allocation gate contract — historical design
+
+> This document records the original design and its status at the time it was
+> written. Statements below that the gate is unimplemented or disabled are
+> historical, not current deployment status. The u20 Slurm 19 controller was
+> subsequently deployed and its monthly gate activated; see
+> [u20 cutover](../../deployment-records/2026-10-31-u20-monthly-staged-cutover.md)
+> and [u20 activation](../../deployment-records/2026-10-31-u20-monthly-ui-activation.md).
+> Those records describe the tested scope and remaining limitations. They do
+> not establish deployment or enforcement on pro6000d or any other host.
 
 Required outcome: an exhausted user's unstarted jobs remain PENDING and receive no GPU allocation. Already allocated jobs continue and accrue overage. Node-side SPANK rejection is not an implementation of this requirement. Neither the current Python API nor sacct polling is authoritative at the allocation decision instant.
 
