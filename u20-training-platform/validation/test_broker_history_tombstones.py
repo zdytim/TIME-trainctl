@@ -46,6 +46,18 @@ with tempfile.TemporaryDirectory(prefix='time-history-fixture-') as tmp:
         except broker.ApiError as exc:
             assert exc.code == 'historical_request_expired', exc
     assert service.store.db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0] == 0
+    # Simulate a tombstone appearing after submit's first read but before its
+    # insert transaction; the second check must still prevent a new job.
+    race = {**payload, 'client_request_id': 'fixture-request-race'}
+    service.tick = lambda: service.store.db.execute(
+        'INSERT INTO job_request_tombstones VALUES(?,?)', (user['uid'], race['client_request_id']))
+    try:
+        service.submit(user, race)
+        raise AssertionError('a concurrent purge must be rechecked in the transaction')
+    except broker.ApiError as exc:
+        assert exc.code == 'historical_request_expired', exc
+    service.tick = lambda: None
+    assert service.store.db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0] == 0
     other = {'uid': 1002, 'username': 'other'}
     assert service.submit(other, payload)['id'] != job['id']
     service.store.db.close()
