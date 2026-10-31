@@ -14,12 +14,13 @@ cleanup() {
 }
 trap cleanup EXIT
 touch "$d/maintenance"
-# A skipped service may make systemd-run return failure; inspect the actual
-# condition result and the effect instead of treating its exit as proof.
+# Skipped transient units may be garbage-collected immediately on this host.
+# Check that systemd accepted the unit and that its command did not run; the
+# positive control below verifies the same command can run without the marker.
 systemd-run --wait --unit="$blocked" --property=RemainAfterExit=yes \
-    --property="ConditionPathExists=!$d/maintenance" /usr/bin/touch "$d/blocked-ran" >"$d/blocked.log" 2>&1 || true
-test "$(systemctl show "$blocked" -p LoadState --value)" = loaded
-test "$(systemctl show "$blocked" -p ConditionResult --value)" = no
+    --property="ConditionPathExists=!$d/maintenance" /usr/bin/touch "$d/blocked-ran" >"$d/blocked.log" 2>&1
+grep -q 'Running as unit:' "$d/blocked.log"
+grep -q 'Finished with result: success' "$d/blocked.log"
 test ! -e "$d/blocked-ran"
 rm "$d/maintenance"
 systemd-run --wait --unit="$allowed" --property=RemainAfterExit=yes \
