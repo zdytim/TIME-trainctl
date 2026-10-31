@@ -11,7 +11,7 @@ import tempfile
 TARGET = Path('/usr/share/cockpit/pro6000d-training/app.js')
 BACKUPS = Path('/var/backups/pro6000d-training')
 OLD = '7e0253f7bedf269151db86e94c609cb7287ceb2e884899bce00561f8d89240db'
-NEW = '49ea825569063d09ed53be85f7363ef3bc15f342951a137f1cdb5c2b34840e09'
+NEW = '3a5f9a14bb92fc8d82a5c40e4e90bfb4d659e4b026ebc3d46ffa7651e959c262'
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
