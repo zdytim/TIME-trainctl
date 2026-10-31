@@ -9,6 +9,7 @@ test -f "$probe" && test ! -L "$probe"
 test "$(stat -c '%u:%g:%a:%h' "$probe")" = 0:0:700:1
 printf '%s  %s\n' 309d75e1db997e42ed8b00d39d5f82dbfdb066f8f5156f5610abb511f94b1416 "$probe" | sha256sum -c --status
 printf '%s  %s\n' 9d2ecaddb980ce080d549290d56cbc38c1b6f26fb02c65aef852a870105afcfb /etc/pam.d/cron | sha256sum -c --status
+printf '%s  %s\n' 23f86b056f5eb78e38977755c04abc8be8c3e0c9fef32b646371cf51bd10c262 /usr/local/libexec/pro6000d-cron-guard | sha256sum -c --status
 printf '%s  %s\n' 48657378ba743ca0bb465d856c122f9ac255fe99ad1b9a37c96a552b9524c816 /var/backups/time-cron-guard.GYV2SZsa/cron.before | sha256sum -c --status
 for service in cron slurmctld slurmd pro6000d-training; do systemctl is-active --quiet "$service"; done
 test -z "$(squeue -h -o %i)"
@@ -48,12 +49,21 @@ chmod 1777 "$testdir"
 created_pam=1; chmod 644 "$oldpam"
 /usr/bin/python3 -I "$probe" "${oldpam##*/}" "$user" allow
 /usr/bin/python3 -I "$probe" cron "$user" deny
-started=$(date '+%Y-%m-%d %H:%M:%S')
+# First wait until the direct PAM probe's audit event is visible; then capture
+# a cursor after it, so only a later cron invocation can satisfy the check.
+audit_seen=0
+for _ in $(seq 1 20); do
+    if journalctl -t time-cron-guard -n 50 --no-pager -o cat 2>/dev/null | grep -Fq "user='$user'"; then audit_seen=1; break; fi
+    sleep .2
+done
+test "$audit_seen" = 1 || { echo 'INCONCLUSIVE: probe audit event unavailable' >&2; exit 1; }
+cursor=$(journalctl -t time-cron-guard -n 0 --show-cursor --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p' | tail -1)
+test -n "$cursor"
 (set -o noclobber; printf '* * * * * u20 /usr/bin/touch %s/admin.ok\n* * * * * %s /usr/bin/touch %s/unmanaged.bad\n' "$testdir" "$user" "$testdir" > "$cronfile")
 created_cron=1; chmod 644 "$cronfile"
 for _ in $(seq 1 110); do
     test ! -e "$testdir/unmanaged.bad" || { echo 'FAIL: unmanaged cron command executed' >&2; exit 1; }
-    if test -f "$testdir/admin.ok" && journalctl -u cron.service --since "$started" --no-pager -o cat 2>/dev/null | grep -Fq "$user"; then
+    if test -f "$testdir/admin.ok" && journalctl -t time-cron-guard --after-cursor "$cursor" --no-pager -o cat 2>/dev/null | grep -Fq "user='$user'"; then
         rm -f -- "$cronfile"; created_cron=0
         sleep 2
         test ! -e "$testdir/unmanaged.bad" || { echo 'FAIL: unmanaged cron command executed' >&2; exit 1; }

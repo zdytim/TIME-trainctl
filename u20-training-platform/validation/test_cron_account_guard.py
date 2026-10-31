@@ -39,5 +39,9 @@ class CronGuardTest(unittest.TestCase):
              patch.object(guard.pwd, 'getpwnam', side_effect=KeyError('missing')):
             self.assertEqual(guard.main(), 1)
 
+    def test_logging_failure_never_allows_denied_user(self):
+        with patch.object(guard.syslog, 'openlog', side_effect=OSError('logging unavailable')):
+            self.assertEqual(self.policy(), 1)
+
 
 if __name__ == '__main__': unittest.main()

@@ -4,6 +4,18 @@ import grp
 import os
 from pathlib import Path
 import pwd
+import syslog
+
+
+def deny_human(name, uid):
+    # Log only account identity, never command or environment. Logging failure
+    # must not turn a denied account into an allowed one.
+    try:
+        syslog.openlog('time-cron-guard', syslog.LOG_PID, syslog.LOG_AUTHPRIV)
+        syslog.syslog(syslog.LOG_WARNING, 'denied uid=%d user=%r' % (uid, name[:128]))
+    except (OSError, ValueError):
+        pass
+    return 1
 
 
 def main():
@@ -19,9 +31,9 @@ def main():
         return 0
     try:
         admin = grp.getgrnam('pro6000d-admin').gr_gid
-        return 0 if admin in os.getgrouplist(name, user.pw_gid) else 1
+        return 0 if admin in os.getgrouplist(name, user.pw_gid) else deny_human(name, user.pw_uid)
     except (KeyError, OSError):
-        return 1
+        return deny_human(name, user.pw_uid)
 
 
 if __name__ == '__main__':
