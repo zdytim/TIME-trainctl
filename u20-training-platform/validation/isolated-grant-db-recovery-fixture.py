@@ -20,6 +20,7 @@ def load(name, path):
     spec=importlib.util.spec_from_file_location(name, path)
     obj=importlib.util.module_from_spec(spec); spec.loader.exec_module(obj); return obj
 candidate = load('candidate', tools/'time-grant-repair-candidate.py')
+writer = load('marker_writer', tools/'time-quota-marker-write.py')
 broker = load('broker', '/broker/pro6000d-training-api.py')
 
 
@@ -102,10 +103,16 @@ elif action == 'repair':
     if os.environ.get('TIME_GRANT_RUNNING_JOB') != '1':
         assert not (state/'time-quota.sock').exists()
     outbox,app=rows()
-    result=candidate.candidate(wal.read_bytes(),checkpoint.read_bytes(),witness.read_bytes(),outbox,app)
+    original=(wal.read_bytes(),checkpoint.read_bytes(),witness.read_bytes())
+    result=candidate.candidate(*original,outbox,app)
     assert not result['repair_authorized']
-    save(checkpoint,result['checkpoint']); save(witness,result['witness'])
-    print('PASS: candidate uses real private SQLite rows; wrote container-only files')
+    fds=[os.open(wal,os.O_RDONLY|os.O_NOFOLLOW),os.open(checkpoint,os.O_RDWR|os.O_NOFOLLOW),
+         os.open(witness,os.O_RDWR|os.O_APPEND|os.O_NOFOLLOW)]
+    try:
+        writer.write_markers(*fds,original,result,64030,0)
+    finally:
+        for fd in fds: os.close(fd)
+    print('PASS: locked writer applied candidate using private SQLite and marker files')
 elif action == 'verify':
     outbox,app=rows(); assert outbox['state']=='PENDING' and app['status']=='GRANT_PENDING'
     service=broker.Service(str(config)); admin=service.identity(0)
