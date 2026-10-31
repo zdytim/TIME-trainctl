@@ -38,7 +38,17 @@ with tempfile.TemporaryDirectory(prefix='time-history-fixture-') as tmp:
     assert service.submit(user, payload)['id'] == job['id']
     service.store.db.execute("UPDATE jobs SET state='COMPLETED',finished_at='now' WHERE id=?", (job['id'],))
     audit_count = service.store.db.execute('SELECT COUNT(*) FROM audit_log').fetchone()[0]
-    assert purge.purge(service.store.db) == 1
+    def reject_stale(conn):
+        assert conn.in_transaction
+        raise ValueError('snapshot changed')
+    try:
+        purge.purge(service.store.db, precheck=reject_stale)
+        raise AssertionError('failed precheck did not stop purge')
+    except ValueError as exc:
+        assert str(exc) == 'snapshot changed'
+    assert service.store.db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0] == 1
+    def verify_locked(conn): assert conn.in_transaction
+    assert purge.purge(service.store.db, precheck=verify_locked) == 1
     assert service.store.db.execute('SELECT COUNT(*) FROM audit_log').fetchone()[0] == audit_count
     for request in (payload, {**payload, 'command': 'python different.py'}):
         try:

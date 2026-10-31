@@ -14,11 +14,15 @@ TERMINAL = frozenset(('COMPLETED', 'FAILED', 'CANCELLED', 'TIMEOUT', 'OUT_OF_MEM
                       'NODE_FAIL', 'BOOT_FAIL', 'DEADLINE', 'PREEMPTED', 'EXPIRED'))
 
 
-def purge(conn):
+def purge(conn, precheck=None):
     if conn.in_transaction or conn.execute('PRAGMA foreign_keys').fetchone()[0] != 1:
         raise ValueError('requires foreign keys and an idle connection')
     conn.execute('BEGIN IMMEDIATE')
     try:
+        # The caller may compare the locked live database with a verified
+        # cutover backup before any trigger or deletion is written.
+        if precheck is not None:
+            precheck(conn)
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
         if tables != TABLES:
             raise ValueError('unexpected database schema')

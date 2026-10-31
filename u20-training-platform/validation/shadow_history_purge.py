@@ -22,7 +22,7 @@ expected = {
     'pro6000d-training-api.py': '24afd69cff5eac856f2ccaaf8a97b95c1823c911c83f40338745cd4ab813e821',
     'controller_bridge.py': '30ac4668f6ea6f0a413f4a4a834b27d42c5db069900600058d18da58e2b04a70',
     'controller_view.py': '10be510b5bee9afaec955293dbff499140e099ff612eed1186e7e96e299a637d',
-    'u20-history-purge-core.py': '21b7cd7c990b020c021dc9161ebaa15e007c9f79e39296f201558a7538f9ade5',
+    'u20-history-purge-core.py': '2cca11c8834204bba72dfaaf4fd4350812fe1051a60f3ea3478c81789f2333e9',
     'old.py': '4224e6aa116532585c6c9e837ee102e9d508ef00b04e6e685bd5e6f092e88821',
 }
 
