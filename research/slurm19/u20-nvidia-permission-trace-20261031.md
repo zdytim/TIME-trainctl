@@ -142,3 +142,15 @@ The temporary node and directory were removed. Slurm and broker stayed active,
 the queue was empty, and the three main real devices retained `other::---`.
 This validates that account's tested user-manager path and current device
 number, not every account, device, launch path or future boot.
+
+Read-only `udevadm test --action=add` on the live `/sys/module/nvidia_uvm`
+and `/sys/bus/pci/drivers/nvidia` paths listed `/sbin/ub-device-create`
+followed by `/usr/local/libexec/pro6000d-gpu-acl` in both RUN lists. The
+existing `KERNEL=="nvidia*"` rule therefore also matches these two tested
+parent events, not only the character-device paths. For those events
+`DEVNAME` was absent in the simulated result, so the helper would receive no
+device argument and its existing code would enumerate eligible nodes. The
+test does not execute RUN commands, establish cross-event ordering, or cover a
+later userspace chmod that generates no matching udev event. It corrects the
+earlier incomplete inference that the rule only covered device-node events;
+it is not a durable-fix or actual boot verification.
