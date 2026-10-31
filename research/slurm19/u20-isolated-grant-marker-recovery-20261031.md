@@ -1,0 +1,9 @@
+# Isolated grant marker replay on u20
+
+On 2026-10-31, image `time-grant-recovery:c1815e8` (SHA-256 `b1dc4b50eccf375172f5f2cac94e0d5dbd6a389f6c69e28abba827f2ccc65942`) ran the committed fixture `c1815e8` in two separate disposable, networkless containers with private Slurm state and a private tmpfs witness. No host GPU devices, Slurm directories, database, or user data were mounted. The controller binary inside the image was the staged `7a06cff` candidate, SHA-256 `147017cb8d9f16e92eb8c9d1058f5d13f5abbd8f0da06888c4347be0263f3632`.
+
+For each case, the actual controller accepted a fixture grant for 3,600 GPU seconds and shut down cleanly. The fixture then deliberately changed private markers to emulate either (a) WAL one event ahead of checkpoint and witness or (b) witness one event behind WAL and checkpoint. In both cases, a restart returned quota unavailable. After another clean shutdown, the fixture created candidate marker bytes using synthetic matching approval/outbox dictionaries and wrote them only inside its disposable container. The real controller restarted and its snapshot reported the original 3,600 GPU seconds.
+
+This validates replay of these two manufactured, well-formed single-GRANT states with no running or queued jobs. It does not simulate a power loss or torn writes, read a real SQLite approval, validate arbitrary prior WAL semantics, prove a safe durable multi-file repair, test running job reconciliation, or authorize writing production ledger files. One setup attempt lacked `munged` on PATH; another lacked a resolvable container hostname. Both exited unsuccessfully and are not passing results. The successful runs supplied the fixture's bundled tools on PATH and a loopback hostname entry.
+
+After the runs, the host queue was empty, the existing Slurm and training services were active, `/dev/nvidia0` had `other::---`, and `SlurmctldParameters` was unset. The monthly quota gate remains disabled.
