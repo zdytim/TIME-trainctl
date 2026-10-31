@@ -116,7 +116,11 @@ elif action == 'verify':
     assert len(response)==18 and response[0]=='OK' and int(response[5])==3600,response
     if os.environ.get('TIME_GRANT_RUNNING_JOB') == '1':
         assert int(response[13])==1 and int(response[14])==1, response
-        assert int(response[3]) > 0, response
+        before=int(response[3])*1000000000+int(response[4])
+        time.sleep(2)
+        later=exchange('SNAP 1001').split()
+        assert len(later)==18 and later[0]=='OK' and int(later[13])==1, later
+        assert int(later[3])*1000000000+int(later[4]) > before, (response,later)
         print('PASS: recovered running allocation continues to accrue GPU usage')
     print('PASS: broker reconciled pending approval without double grant')
 else: raise SystemExit('unknown fixture action')
