@@ -622,7 +622,7 @@ def feature_capabilities(discovery=None):
     observed_monthly = observed.get("monthly_quota") if isinstance(observed, dict) else None
     monthly = {
         "server_state": "unknown", "enforcement_ready": "unknown",
-        "client_support": "unsupported", "accounting": "unknown",
+        "client_support": "read", "accounting": "unknown",
         "reason": "no authoritative runtime capability observed",
     }
     if isinstance(observed_monthly, dict) and observed_monthly.get("enforcement_ready") is False:
