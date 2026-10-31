@@ -14,13 +14,14 @@ assert os.geteuid() == 0 and os.environ.get('TIME_ISOLATED_VALIDATION') == '1'
 assert Path('/.dockerenv').is_file()
 state = Path('/tmp/time-isolated/state'); anchor = Path('/var/lib/time-quota-anchor')
 wal, checkpoint, witness = state/'monthly-quota.wal', state/'monthly-quota.checkpoint', anchor/'witness.log'
-config, db_path = Path('/tmp/time-isolated/broker-config.json'), Path('/tmp/time-isolated/broker.sqlite3')
+config, db_path = Path('/tmp/time-isolated/broker-config.json'), Path('/tmp/time-isolated/private/broker.sqlite3')
 tools = Path('/validation/recovery'); sys.path.insert(0, '/broker')
 def load(name, path):
     spec=importlib.util.spec_from_file_location(name, path)
     obj=importlib.util.module_from_spec(spec); spec.loader.exec_module(obj); return obj
 candidate = load('candidate', tools/'time-grant-repair-candidate.py')
 writer = load('marker_writer', tools/'time-quota-marker-write.py')
+snapshot = load('grant_snapshot', tools/'time-grant-recovery-snapshot.py')
 broker = load('broker', '/broker/pro6000d-training-api.py')
 
 
@@ -56,6 +57,8 @@ def rows():
 
 action=sys.argv[1]
 if action == 'grant':
+    os.umask(0o077)
+    db_path.parent.mkdir(mode=0o700)
     config.write_text(json.dumps({'state_db':str(db_path),'training_group':'timefixture','admin_group':'root',
         'monthly_controller':{'read_enabled':True,'grant_enabled':True,'activation_verified':True,
                               'controller_user':'slurm','socket_path':str(state/'time-quota.sock')}}))
@@ -106,6 +109,22 @@ elif action == 'repair':
     original=(wal.read_bytes(),checkpoint.read_bytes(),witness.read_bytes())
     result=candidate.candidate(*original,outbox,app)
     assert not result['repair_authorized']
+    backups=Path('/tmp/time-isolated/backups'); backups.mkdir(mode=0o700)
+    def stopped():
+        for item in Path('/proc').iterdir():
+            if not item.name.isdigit(): continue
+            try:
+                name=(item/'comm').read_text().strip()
+                status=(item/'stat').read_text(); state_code=status[status.rfind(')')+2:].split()[0]
+            except (OSError,IndexError): continue
+            if name=='slurmctld' and state_code!='Z': raise RuntimeError('fixture controller still running')
+    preview=snapshot.collect(state,anchor,db_path,backups,64030,0,stopped)
+    assert not preview['repair_authorized'] and preview['intent_matches']
+    backup=Path(preview['backup'])
+    assert (backup/'checkpoint.proposed').read_bytes()==result['checkpoint']
+    assert (backup/'witness.proposed').read_bytes()==result['witness']
+    assert (backup/'state.sqlite3').is_file()
+    print('PASS: protected marker and SQLite preview created without modifying originals')
     fds=[os.open(wal,os.O_RDONLY|os.O_NOFOLLOW),os.open(checkpoint,os.O_RDWR|os.O_NOFOLLOW),
          os.open(witness,os.O_RDWR|os.O_APPEND|os.O_NOFOLLOW)]
     try:
