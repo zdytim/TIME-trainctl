@@ -13,6 +13,22 @@ private copy of u20's actual snapshot was prepared but did not run: its upload
 was absent when u20 connectivity became intermittent. Repeat it only after
 checking the transfer and the previous command's terminal status.
 
+Connectivity later recovered through `shensi-tail`; after confirming the earlier
+command exited before the fixture ran and verifying the uploaded hash, fixture
+`fe0d693` used a read-only mount of the real stopped snapshot and a private copy
+of its SQLite database. It purged all seven terminal jobs, retained non-job
+table counts and preserved foreign-key integrity; the production database was
+not touched. Image SHA-256: `e2022dcfcae7eb681ef30bd32a127efd658e52eba85065676f17e51b47715b5c`.
+
+Separately, `72032e4` added a guarded jobcomp cleanup primitive. It requires a
+verified snapshot, stopped services and every backed-up log job ID to match a
+platform job; it refuses a changed live log or unrelated record and preserves
+the old log in the snapshot. The private snapshot-copy fixture passed these
+cases and preserved file mode; image SHA-256
+`09aca1662a5ca384cbc99b937169ea9a282ebf700e4b4b124c0d9e9ecb575931`.
+The two mutations are not a cross-file transaction and remain unexecuted on
+the live host; an integrated cutover and recovery procedure is still needed.
+
 On 2026-10-31 a read-only query of u20's platform database found seven
 completed/failed jobs with client request IDs, including two rows with request
 fingerprints. `job_request_fingerprints.job_id` references `jobs.id` with
