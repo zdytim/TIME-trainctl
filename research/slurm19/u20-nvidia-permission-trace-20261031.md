@@ -74,3 +74,19 @@ temporary node and directory were removed, the real node remained root:root
 mode 0660, both Slurm services were active, and the queue was empty. This does
 not establish protection for other users or execution paths, changed device
 numbers, privileged processes, reboot, or all device recreation paths.
+
+At 17:06 CST the live NVIDIA module reported version `570.133.07`,
+`ModifyDeviceFiles: 1`, `DeviceFileUID: 0`, `DeviceFileGID: 0`, and
+`DeviceFileMode: 438` (decimal 0666). The same-version [NVIDIA FAQ](https://download.nvidia.com/XFree86/Linux-x86_64/570.133.07/README/faq.html)
+states that NVIDIA userspace can modify existing device nodes to its configured
+mode and that `NVreg_DeviceFileMode` controls that default. This corroborates
+the previously observed private-node chmod mechanism, but does not identify
+the process or time of the latest host permission change. `auditd` was inactive
+at inspection, so no matching audit event was established. The live device
+nodes had mode 0660 with platform ACL entries after restoration.
+
+A restrictive module default is a candidate for a later controlled change, not
+a verified fix: current training and display access depend on named ACLs and
+the udev helper; cold boot, UVM/capability nodes, privileged software and
+in-flight training require separate review. No module option, initramfs,
+driver, or service was changed during this investigation.
