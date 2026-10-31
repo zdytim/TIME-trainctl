@@ -29,9 +29,8 @@ class Fence:
         assert identity==1 and Fence.MARKER.read_bytes()==content;Fence.MARKER.unlink()
     @staticmethod
     def run(args):
-        if args[1]=='show':return '123'
-        if args[1]=='show-config':return 'SlurmctldParameters     = MonthlyGpuQuota'
         if args[0]=='/usr/bin/scontrol':return 'SlurmctldParameters     = MonthlyGpuQuota'
+        if args[1]=='show':return '123'
         if args[1]=='stop':state.backend=False
         elif args[1]=='start':
             if state.failure=='backend-start':raise RuntimeError('injected backend failure')
@@ -77,7 +76,9 @@ for failure in ('','jobs','atomic-after-write','backend-start','backend-health')
     Fence.MARKER.unlink(missing_ok=True);c.CONFIG.write_text('{}\n');c.CONFIG.chmod(0o640)
     state.failure=failure;state.backend=True;state.atomic_calls=0
     try:c.main(root);raised=False
-    except (ValueError,RuntimeError,OSError):raised=True
+    except (ValueError,RuntimeError,OSError) as exc:
+        if not failure: print('Unexpected activation failure:',repr(exc),flush=True)
+        raised=True
     assert raised==bool(failure),failure
     if failure in ('backend-start','backend-health'):
         assert Fence.MARKER.exists() and not state.backend
