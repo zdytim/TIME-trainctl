@@ -7,6 +7,8 @@ relationship and compatibility with their controller version. Open allocations
 are reported as incomplete; no running interval is guessed.
 """
 import calendar
+import hashlib
+import hmac
 from datetime import datetime, timedelta, timezone
 
 NSEC = 1_000_000_000
@@ -136,13 +138,18 @@ def project_verified_fixture(data, checkpoint):
     callers must provide a consistent, trusted, controller-version-matched pair.
     """
     prefix = b'U20MQ1|CHECKPOINT|'
-    if (not isinstance(checkpoint, bytes) or len(checkpoint) >= 96 or
+    if (not isinstance(checkpoint, bytes) or len(checkpoint) >= 160 or
             not checkpoint.startswith(prefix) or not checkpoint.endswith(b'\n')):
         raise ValueError('invalid checkpoint fixture')
     try:
-        recorded = _number(checkpoint[len(prefix):-1].decode('ascii'))
+        fields = checkpoint[len(prefix):-1].decode('ascii').split('|')
+        if len(fields) != 2 or len(fields[1]) != 64 or any(c not in '0123456789abcdef' for c in fields[1]):
+            raise ValueError('checkpoint must include a lowercase SHA-256')
+        recorded = _number(fields[0])
     except UnicodeDecodeError as exc:
         raise ValueError('invalid checkpoint encoding') from exc
+    if not hmac.compare_digest(fields[1], hashlib.sha256(data).hexdigest()):
+        raise ValueError('checkpoint does not match WAL digest')
     usage, active, seq = project(data)
     if recorded != seq:
         raise ValueError('checkpoint does not match WAL sequence')
