@@ -154,3 +154,17 @@ test does not execute RUN commands, establish cross-event ordering, or cover a
 later userspace chmod that generates no matching udev event. It corrects the
 earlier incomplete inference that the rule only covered device-node events;
 it is not a durable-fix or actual boot verification.
+
+At 17:4x CST a read-only follow-up found that the current `timzhang` account
+is UID 1001, belongs to its own group and `pro6000d-training`, and does not
+belong to the administrator group. Its systemd user slice reports
+`DevicePolicy=closed`. Both SSH and Cockpit include `common-session`, whose
+session guard runs after `pam_systemd`; cron is active and its account policy
+rejects non-admin human accounts through the installed cron guard. The
+interactive account inventory still contains only administrator `u20` and
+training user `timzhang`. These are configuration observations, not a new
+negative-path execution test, and do not prove protection for all services,
+privileged processes or future accounts. The enrollment tool requires a
+logged-out ordinary user, rejects several privileged groups and adds a
+per-user closed slice; it must actually be run for each new training user.
+Slurm and the platform backend remained active and the queue was empty.
