@@ -24,3 +24,12 @@ was only a point-in-time, read-only check. It does not fence submissions, take a
 coordinated cutover backup, create a ledger, clear history, start the candidate,
 or establish production readiness. A later cutover must recheck all state under
 its own maintenance fence and account for interruption and rollback.
+
+After the inactive backend maintenance condition was installed and recorded in
+`2026-10-31-u20-maintenance-condition.md`, preflight `e401347` was updated to
+require its exact file hash, the expected pair of backend drop-ins and an
+absent maintenance marker. It passed on u20 at approximately 13:00, still
+reporting seven terminal jobs, `fenced=false` and `activated=false`. The
+backend and both Slurm services remained active and the queue was empty. This
+does not prove marker creation, controlled backend shutdown, reboot recovery,
+or the eventual cutover sequence.
