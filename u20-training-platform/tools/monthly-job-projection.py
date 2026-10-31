@@ -73,18 +73,19 @@ def project(data):
                 raise ValueError('invalid grant')
             uid, month = _number(fields[3], 2**32-1), _number(fields[4], 2**32-1)
             amount = _instant(fields[5], fields[6])
-            if any(not x or len(x) >= 128 or any(c in x for c in '|\r\n \t') for x in fields[7:]):
+            if (not amount or amount % NSEC or month // 100 < 1970 or
+                    month // 100 > 9999 or not 1 <= month % 100 <= 12):
+                raise ValueError('invalid grant amount or month')
+            if any(not x or len(x) >= 128 or any(c in x for c in '|\r\n \t\x00') for x in fields[7:]):
                 raise ValueError('invalid grant field')
-            grant_key = (uid, month, fields[7])
-            value = (amount, fields[8])
-            if grant_key in grants and grants[grant_key] != value:
-                raise ValueError('conflicting duplicate grant')
-            if grant_key not in grants:
-                total_key = (uid, month)
-                grant_totals[total_key] = grant_totals.get(total_key, 0) + amount
-                if grant_totals[total_key] > LIMIT * NSEC + (NSEC - 1):
-                    raise ValueError('grant total overflow')
-            grants[grant_key] = value
+            grant_id = fields[7]
+            if grant_id in grants:
+                raise ValueError('duplicate grant identifier')
+            total_key = (uid, month)
+            grant_totals[total_key] = grant_totals.get(total_key, 0) + amount
+            if grant_totals[total_key] > LIMIT * NSEC + (NSEC - 1):
+                raise ValueError('grant total overflow')
+            grants[grant_id] = (uid, month, amount, fields[8])
             continue
         if event == 'PREPARE' and len(fields) == 9:
             job, uid = _number(fields[3], 2**32-1), _number(fields[4], 2**32-1)
