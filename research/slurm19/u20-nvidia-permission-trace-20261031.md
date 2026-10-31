@@ -200,3 +200,25 @@ FD transfer before describing the isolation as resistant to intentional
 bypass. Temporary nodes and the transient service were removed; afterwards the
 queue was empty, all three services were active and the three core device ACLs
 still had `other::---`.
+
+At 18:18 CST the descriptor handoff was repeated using a **real platform
+Slurm job**, not the earlier unrestricted sender surrogate. After checking
+that the scheduler queue and platform active-job list were empty, a bounded
+one-GPU task was submitted as `timzhang` (platform ID
+`5d3c8ad6949d4935a07018faa19531e8`, Slurm job 13). Its own log recorded
+the devices cgroup `/slurm_u20-Z790-S-DDR4/uid_1001/job_13/step_batch`
+and `TIME_FD_JOB_SENT`; it opened the real `/dev/nvidia0` and transferred the
+descriptor through a Unix socket to a same-UID process in the restricted
+`/user.slice/user-1001.slice`. The receiver was denied direct open with
+`EPERM` against a temporary mode-0666 duplicate node of the same device number,
+but received a descriptor whose `fstat` identified the real GPU device. The
+probe program SHA-256 was
+`2a268696a1659741f74813ac723b5dc5bbf3caf264d5f464934d4abffdf15776`;
+its test files and output remain in `/home/timzhang/.time-fd-job-rru4jfzg`.
+The socket, duplicate node and receiver service were removed. No CUDA ioctl or
+computation was attempted outside the job: this proves transfer from a real
+job, not that a complete CUDA workload works on the received descriptor.
+Afterwards the scheduler queue was empty, Slurm and the backend were active,
+and core GPU ACLs had `other::---`. This is a demonstrated isolation gap at
+the file-descriptor boundary; an enforcement design must address it before
+claiming resistance to intentional bypass.
