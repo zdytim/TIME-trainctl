@@ -6,3 +6,5 @@
 - 独立复查：slurmctld、slurmd、训练后端 active；控制器可执行文件为 `/opt/time/slurm19-7a06cfff70a7/sbin/slurmctld`，`SlurmctldParameters=MonthlyGpuQuota`；平台任务数 0、tombstone 7、jobcomp 大小 0、调度队列空，维护标记不存在，GPU 设备 other ACL 为 `---`。
 - 本次没有回滚。维护前快照及迁移日志保留于上述 root 私有目录；一旦重新开放提交，不能盲目恢复旧数据库或账本，必须先核实当前作业及新增数据并采用已审阅的恢复流程。
 - **状态限制：** 控制器进程已加载月度参数并返回初始账本，但本次尚未在生产窗口验证真实 PyTorch 训练计量、额度耗尽时保持排队及已运行任务超额继续。UI 和额度申请功能仍未启用；在这些核验及前端切换前不得宣称功能已完成上线。
+
+后续执行已提交 GPU 探针 `4a26479`（当前脚本 SHA-256 `935f7c2deea809fb4e010ebffdee975033fe8d2ecee6436b0c1747c11a6cbaac`），以 timzhang 通过平台提交真实 Slurm 任务 9，PyTorch 在 RTX 4090 上计算成功并输出 `TIME_GPU_TORCH_OK`。任务结束后控制器对该账户报告 debug、已用 0.981343221 GPU·秒、零活动分配、WAL sequence 3；队列空、三个服务 active、GPU other ACL 仍为 `---`。这是一次短作业的实际计量，不覆盖生产额度耗尽或跨档、持续超额运行、多人并发和断电恢复；月度 UI 和申请功能仍为 staged，故整套功能尚未完成上线。
