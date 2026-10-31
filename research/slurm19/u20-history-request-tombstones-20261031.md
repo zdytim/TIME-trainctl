@@ -40,6 +40,17 @@ the log and made a second attempt refuse; image SHA-256
 This proves the fixture's interruption detection, not automated recovery or
 power-loss durability on the production filesystem. No live history was erased.
 
+`6f0c321` adds a rollback primitive for the offline migration. It predicts the
+purged database from the verified backup, then holds a SQLite write lock while
+accepting only the original or exactly predicted state. It restores only the
+tables and triggers changed by the purge; unknown database or jobcomp changes
+are refused. Fixture `e75a0cd` ran against private copies of the real stopped
+snapshot and verified full restoration, rejection of new log and database data,
+and recovery when the database committed before its completion journal entry.
+Image SHA-256: `d0aba0202938a08e2508d17c8d2223962aaa0880fad1a5dca45340f914558c63`.
+This is isolated evidence, not a production recovery or physical power-loss
+test; the caller must maintain the fence and independently prove no live jobs.
+
 On 2026-10-31 a read-only query of u20's platform database found seven
 completed/failed jobs with client request IDs, including two rows with request
 fingerprints. `job_request_fingerprints.job_id` references `jobs.id` with
