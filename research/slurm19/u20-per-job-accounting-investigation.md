@@ -11,3 +11,5 @@
 此记录是设计调查，不是实现或线上核验。没有读取或修改生产 WAL，没有重启控制器，也没有改变用户账本。
 
 随后新增离线原型 `u20-training-platform/tools/monthly-job-projection.py`，仅接收调用方提供的完整 WAL 字节，按 UID、作业号、分配 generation 和月份投影已结算用量；开放分配作为未完成信息返回，不估算其未结算时间。合成数据检查跨北京时间月界、RELEASE、截断、序号倒退和未知事件拒绝。该原型没有自行校验生产账本来源、checkpoint 完整性、当前控制器补丁兼容性，也没有处理用户身份绑定或实时快照；不得直接接到线上或将其结果作为正式账本，仍需完整审查及覆盖上述场景。
+
+补充对照 `ledger-recovery-fix.patch`、`replay-identity-fix.patch` 和 `grant-idempotency-fix.patch` 后，原型收紧为连续 WAL 序号、递增且非零的分配 generation、非零 GPU 数，并拒绝同一追加 ID 的冲突记录和月累计溢出。合成检查覆盖跨月及六种损坏或身份异常。它仍不能证明与线上运行的二进制完全一致，也不能代替控制器自己的恢复和快照校验。

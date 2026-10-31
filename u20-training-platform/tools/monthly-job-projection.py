@@ -55,31 +55,42 @@ def project(data):
     lines = data.decode('ascii').splitlines()
     if not lines or lines[0] != 'U20MQ1|HEADER|1':
         raise ValueError('invalid WAL header')
-    active, usage = {}, {}
-    seq = 0
+    active, usage, totals, grants, grant_totals = {}, {}, {}, {}, {}
+    seq, next_generation = 0, 1
     for line in lines[1:]:
         fields = line.split('|')
         if len(line) > 1023 or len(fields) < 3 or fields[0] != 'U20MQ1':
             raise ValueError('invalid WAL event')
         current = _number(fields[1])
-        if current <= seq:
-            raise ValueError('non-increasing WAL sequence')
+        if current != seq + 1:
+            raise ValueError('non-contiguous WAL sequence')
         seq = current
         event = fields[2]
         if event == 'GRANT':
             if len(fields) != 9:
                 raise ValueError('invalid grant')
-            _number(fields[3], 2**32-1); _number(fields[4], 2**32-1)
-            _instant(fields[5], fields[6])
+            uid, month = _number(fields[3], 2**32-1), _number(fields[4], 2**32-1)
+            amount = _instant(fields[5], fields[6])
             if any(not x or len(x) >= 128 or any(c in x for c in '|\r\n \t') for x in fields[7:]):
                 raise ValueError('invalid grant field')
+            grant_key = (uid, month, fields[7])
+            value = (amount, fields[8])
+            if grant_key in grants and grants[grant_key] != value:
+                raise ValueError('conflicting duplicate grant')
+            if grant_key not in grants:
+                total_key = (uid, month)
+                grant_totals[total_key] = grant_totals.get(total_key, 0) + amount
+                if grant_totals[total_key] > LIMIT * NSEC + (NSEC - 1):
+                    raise ValueError('grant total overflow')
+            grants[grant_key] = value
             continue
         if event == 'PREPARE' and len(fields) == 9:
             job, uid = _number(fields[3], 2**32-1), _number(fields[4], 2**32-1)
             generation, gpu = _number(fields[5]), _number(fields[6])
             key = (job, generation)
-            if key in active or any(k[0] == job for k in active):
-                raise ValueError('duplicate active allocation')
+            if not gpu or generation >= LIMIT or generation < next_generation or any(k[0] == job for k in active):
+                raise ValueError('invalid or reused allocation identity')
+            next_generation = generation + 1
             active[key] = {'uid': uid, 'gpu': gpu, 'anchor': _instant(fields[7], fields[8]), 'committed': False}
             continue
         if len(fields) < 5:
@@ -106,6 +117,10 @@ def project(data):
                 usage[identity] = usage.get(identity, 0) + amount
                 if usage[identity] > LIMIT * NSEC + (NSEC - 1):
                     raise ValueError('usage overflow')
+                total_key = (a['uid'], month)
+                totals[total_key] = totals.get(total_key, 0) + amount
+                if totals[total_key] > LIMIT * NSEC + (NSEC - 1):
+                    raise ValueError('monthly total overflow')
             a['anchor'] = end
             if event == 'RELEASE':
                 del active[key]
