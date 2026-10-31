@@ -142,7 +142,7 @@ if test "${TIME_EXHAUSTED_TEST:-0}" = 12; then
     test -S "$base/state/time-quota.sock"
     original_socket=$(stat -c '%d:%i' "$base/state/time-quota.sock")
 fi
-if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8 || test "${TIME_EXHAUSTED_TEST:-0}" = 9 || test "${TIME_EXHAUSTED_TEST:-0}" = 10 || test "${TIME_EXHAUSTED_TEST:-0}" = 13 || test "${TIME_EXHAUSTED_TEST:-0}" = 14 || test "${TIME_EXHAUSTED_TEST:-0}" = 16 || test "${TIME_EXHAUSTED_TEST:-0}" = 17; then
+if test "${TIME_EXHAUSTED_TEST:-0}" = 1 || test "${TIME_EXHAUSTED_TEST:-0}" = 2 || test "${TIME_EXHAUSTED_TEST:-0}" = 4 || test "${TIME_EXHAUSTED_TEST:-0}" = 7 || test "${TIME_EXHAUSTED_TEST:-0}" = 8 || test "${TIME_EXHAUSTED_TEST:-0}" = 9 || test "${TIME_EXHAUSTED_TEST:-0}" = 10 || test "${TIME_EXHAUSTED_TEST:-0}" = 13 || test "${TIME_EXHAUSTED_TEST:-0}" = 14 || test "${TIME_EXHAUSTED_TEST:-0}" = 16 || test "${TIME_EXHAUSTED_TEST:-0}" = 17 || test "${TIME_EXHAUSTED_TEST:-0}" = 24; then
     if test "${TIME_REAL_GPU_VALIDATION:-0}" = 1; then
         test "$TIME_EXHAUSTED_TEST" = 17 && test "$gpu_count" = 1 && test "$request_gpus" = 1
         test -c /dev/nvidia0 && test -c /dev/nvidiactl && test -c /dev/nvidia-uvm
@@ -229,13 +229,39 @@ for _ in $(seq 1 50); do
             grep -q 'JobState=PENDING' "$base/log/approved.out"
             scancel "$job"
             echo 'PASS: root broker identity can submit marked ordinary-user job'
-        elif test "${TIME_EXHAUSTED_TEST:-0}" = 22 || test "${TIME_EXHAUSTED_TEST:-0}" = 23; then
+        elif test "${TIME_EXHAUSTED_TEST:-0}" = 22 || test "${TIME_EXHAUSTED_TEST:-0}" = 23 || test "${TIME_EXHAUSTED_TEST:-0}" = 24; then
             test "$service_user" = slurm && test "${TIME_WITNESS:-0}" = 1
             fixture=/validation/isolated-grant-marker-fixture.py
-            if test "$TIME_EXHAUSTED_TEST" = 23; then fixture=/validation/isolated-grant-db-recovery-fixture.py; fi
+            if test "$TIME_EXHAUSTED_TEST" = 23 || test "$TIME_EXHAUSTED_TEST" = 24; then fixture=/validation/isolated-grant-db-recovery-fixture.py; fi
+            if test "$TIME_EXHAUSTED_TEST" = 24; then
+                export TIME_GRANT_RUNNING_JOB=1
+                chmod 755 "$base"; mkdir "$base/out"; chmod 777 "$base/out"
+                LD_LIBRARY_PATH="/stock-u20:$prefix/lib/slurm" /stock-u20/slurmd -D -f "$SLURM_CONF" > "$base/log/slurmd.out" 2>&1 &
+                node_pid=$!
+                for _ in $(seq 1 100); do
+                    if scontrol show node time-test > "$base/log/node.out" 2>&1 && grep -q 'State=IDLE' "$base/log/node.out"; then break; fi
+                    sleep .1
+                done
+                grep -q 'State=IDLE' "$base/log/node.out"
+                job=$(sbatch --parsable --uid=1001 --gid=1001 --time=00:01:00 --mem=64M --gres=gpu:1 --chdir="$base/out" --output="$base/out/slurm-%j.out" --wrap='echo FIXTURE_STARTED; sleep 25; echo FIXTURE_FINISHED')
+                for _ in $(seq 1 100); do
+                    if scontrol show job "$job" > "$base/log/running.out" && grep -q 'JobState=RUNNING' "$base/log/running.out" && grep -q FIXTURE_STARTED "$base/out/slurm-$job.out" 2>/dev/null; then break; fi
+                    sleep .1
+                done
+                grep -q 'JobState=RUNNING' "$base/log/running.out"
+                grep -q FIXTURE_STARTED "$base/out/slurm-$job.out"
+                sleep 2
+            fi
             /opt/py310/bin/python3 "$fixture" grant
-            scontrol shutdown
-            wait "$controller_pid" 2>/dev/null || true
+            if test "$TIME_EXHAUSTED_TEST" = 24; then
+                child=$(ps -o pid= --ppid "$controller_pid" | tr -d ' ')
+                test -n "$child" && test "$(ps -o comm= -p "$child")" = slurmctld
+                kill -KILL "$child"
+                wait "$controller_pid" 2>/dev/null || true
+            else
+                scontrol shutdown
+                wait "$controller_pid" 2>/dev/null || true
+            fi
             /opt/py310/bin/python3 "$fixture" damage
             for phase in unavailable verify; do
                 timeout 45 "${controller[@]}" -D -v -f "$SLURM_CONF" > "$base/log/controller-$phase.out" 2>&1 &
@@ -249,12 +275,25 @@ for _ in $(seq 1 50); do
                 done
                 if test "$ready" != 1; then cat "$base/log/controller-$phase.out"; exit 1; fi
                 /opt/py310/bin/python3 "$fixture" "$phase"
+                if test "$TIME_EXHAUSTED_TEST" = 24; then
+                    scontrol show job "$job" | grep -q 'JobState=RUNNING'
+                fi
                 if test "$phase" = unavailable; then
                     scontrol shutdown
                     wait "$controller_pid" 2>/dev/null || true
                     /opt/py310/bin/python3 "$fixture" repair
                 fi
             done
+            if test "$TIME_EXHAUSTED_TEST" = 24; then
+                finished=0
+                for _ in $(seq 1 35); do
+                    if scontrol show job "$job" > "$base/log/finished.out" && grep -q 'JobState=COMPLETED' "$base/log/finished.out" && grep -q 'FIXTURE_FINISHED' "$base/out/slurm-$job.out"; then finished=1; break; fi
+                    sleep 1
+                done
+                test "$finished" = 1
+                echo 'PASS: running fixture job completed after controller restart'
+                kill "$node_pid" 2>/dev/null || true
+            fi
         elif test "${TIME_EXHAUSTED_TEST:-0}" = 21; then
             test "$service_user" = slurm
             TIME_VALIDATION_BROKER_DIR=/broker /opt/py310/bin/python3 /validation/test_broker_console_view.py

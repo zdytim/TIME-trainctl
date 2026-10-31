@@ -70,13 +70,15 @@ if action == 'grant':
     assert row['state']=='PENDING' and app['status']=='GRANT_PENDING'
     print('PASS: real broker SQLite has durable pending approval after lost response')
 elif action == 'damage':
-    assert not (state/'time-quota.sock').exists()
+    if os.environ.get('TIME_GRANT_RUNNING_JOB') != '1':
+        assert not (state/'time-quota.sock').exists()
     lines=wal.read_bytes().splitlines(keepends=True); records=witness.read_bytes().splitlines(keepends=True)
-    assert len(lines)==2 and len(records)==2
-    save(witness,records[0])
+    assert len(lines)>=2 and len(records)==len(lines) and lines[-1].split(b'|')[2]==b'GRANT'
+    save(witness,b''.join(records[:-1]))
     if os.environ['TIME_GRANT_MARKER_CASE']=='wal_ahead':
         import hashlib
-        save(checkpoint,b'U20MQ1|CHECKPOINT|0|'+hashlib.sha256(lines[0]).hexdigest().encode()+b'\n')
+        prior=b''.join(lines[:-1]); seq=str(len(lines)-2).encode()
+        save(checkpoint,b'U20MQ1|CHECKPOINT|'+seq+b'|'+hashlib.sha256(prior).hexdigest().encode()+b'\n')
     else: assert os.environ['TIME_GRANT_MARKER_CASE']=='witness_behind'
     print('PASS: created simulated marker lag in container-private files')
 elif action == 'unavailable':
@@ -97,5 +99,9 @@ elif action == 'verify':
     assert outbox['state']=='APPLIED' and app['status']=='APPROVED'
     response=exchange('SNAP 1001').split()
     assert len(response)==18 and response[0]=='OK' and int(response[5])==3600,response
+    if os.environ.get('TIME_GRANT_RUNNING_JOB') == '1':
+        assert int(response[13])==1 and int(response[14])==1, response
+        assert int(response[3]) > 0, response
+        print('PASS: recovered running allocation continues to accrue GPU usage')
     print('PASS: broker reconciled pending approval without double grant')
 else: raise SystemExit('unknown fixture action')
