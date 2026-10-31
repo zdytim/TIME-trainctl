@@ -29,6 +29,17 @@ cases and preserved file mode; image SHA-256
 The two mutations are not a cross-file transaction and remain unexecuted on
 the live host; an integrated cutover and recovery procedure is still needed.
 
+`f24cfcf` adds a private snapshot-directory journal around the two offline
+mutations. It fsyncs a phase before and after each mutation, refuses to retry
+if a journal already exists, and leaves interrupted evidence for explicit
+reconciliation. With a read-only mount of the u20 stopped snapshot and private
+database/log copies, the full seven-job and seven-log cleanup succeeded. A
+changed log after the database commit stopped at `jobcomp_start`, preserved
+the log and made a second attempt refuse; image SHA-256
+`51d8fe2e63696dcc0f7bc77bcc4c719db4ccd3c37a0bf38a8d9708296f9916ca`.
+This proves the fixture's interruption detection, not automated recovery or
+power-loss durability on the production filesystem. No live history was erased.
+
 On 2026-10-31 a read-only query of u20's platform database found seven
 completed/failed jobs with client request IDs, including two rows with request
 fingerprints. `job_request_fingerprints.job_id` references `jobs.id` with
