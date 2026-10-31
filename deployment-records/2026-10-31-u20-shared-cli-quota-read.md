@@ -7,3 +7,5 @@
 - 未回滚。如需回滚，先核对目标仍为新哈希，再将上述备份以 root 原子恢复并校验原哈希；保留账本和正在运行任务。
 
 后续于 16:41 CST 以 `timzhang` 身份对共享 `/usr/local/bin/time-mcp` 执行实际 JSON-RPC `initialize`、`tools/list` 和 `time_quota`：返回 10 个工具、月额 `client_support=read`、`server_state=enforcing`、`enforcement_ready=true`；提交、取消、申请及审批等写工具均未列出。本次不涉及调用写接口。检查时三个服务 active、队列空，核心模块哈希仍为上述新哈希。
+
+进一步以 `timzhang` 身份直接向共享 MCP 发送七种未列出的写工具调用：`time_submit_job`、`time_cancel_job`、`time_create_request`、`time_decide_request`、`time_reconcile_grant`、`time_apply_quota`、`time_apply_rules`，均返回 `feature_not_enabled`。探针通过 JSON-RPC 进入工具守卫，未提交实际作业、取消、额度调整或审批；这不覆盖其他账户、其他入口或未来版本。
