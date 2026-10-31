@@ -9,11 +9,17 @@ PLUGIN_DIR = '/opt/time/slurm19-7a06cfff70a7/lib/slurm'
 EXPECTED = {
     'clustername': 'u20-training',
     'slurmuser': 'slurm',
+    'slurmduser': 'root',
+    'authtype': 'auth/munge',
+    'credtype': 'cred/munge',
     'statesavelocation': '/var/lib/slurm/ctld',
     'accountingstoragetype': 'accounting_storage/none',
     'selecttype': 'select/cons_tres',
     'schedulertype': 'sched/backfill',
     'jobsubmitplugins': 'lua',
+    'taskplugin': 'task/cgroup',
+    'proctracktype': 'proctrack/cgroup',
+    'grestypes': 'gpu',
 }
 
 

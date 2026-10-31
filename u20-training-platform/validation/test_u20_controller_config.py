@@ -33,6 +33,15 @@ class ControllerConfigTests(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 config.candidate_config(raw)
 
+    def test_refuses_missing_device_isolation_or_authentication(self):
+        for key, value in (('taskplugin', 'task/none'),
+                           ('proctracktype', 'proctrack/linuxproc'),
+                           ('authtype', 'auth/none'), ('grestypes', 'mps')):
+            before = (key + '=' + config.EXPECTED[key]).encode()
+            after = (key + '=' + value).encode()
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                config.candidate_config(self.base.replace(before, after))
+
     def test_rejects_multiline_and_invalid_input(self):
         for raw in (b'', self.base + b'Other=foo\\\nbar\n', self.base + b'\x00', b'\xff'):
             with self.subTest(raw=raw), self.assertRaises((ValueError, UnicodeError)):
