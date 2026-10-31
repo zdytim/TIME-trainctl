@@ -18,6 +18,7 @@ PINNED = {
     '/etc/slurm-llnl/time-controller-7a06.conf': '8ce457b2deec7c42438a06db2360d01163e681dea351d05a68bdacc8ab658411',
     '/usr/local/libexec/time-quota-anchor-7a06': 'b705fcb6c16739bd6b283f137399c66cbc0ea642d1e0155110efd4ef8c854ba8',
     '/usr/local/lib/pro6000d-training/pro6000d-training-api.py': '24afd69cff5eac856f2ccaaf8a97b95c1823c911c83f40338745cd4ab813e821',
+    '/etc/systemd/system/pro6000d-training.service.d/time-maintenance.conf': 'f2d32e2a11e6a15b069fbd7faf5ee41737e520bff245d0c762fb82ebe8b51233',
 }
 STAGE_SHA = '716acf3321837d6c4057062d2b873b864698ce9146163733ac79f5732869d29d'
 UNIT_SHA = 'a1425b14dd252dc8491f6332da2027287992f687f2f7d2d9adc7babb1ff30689'
@@ -56,12 +57,18 @@ def preflight(input_dir):
     exec(compile(stage, str(input_dir / 'stage.py'), 'exec'), module.__dict__)
     module.verify_release()
     for path in ('/var/lib/slurm/ctld/monthly-quota.wal', '/var/lib/slurm/ctld/monthly-quota.checkpoint',
-                 '/var/lib/time-quota-anchor', '/etc/systemd/system/slurmctld.service.d/time-monthly.conf'):
+                 '/var/lib/time-quota-anchor', '/etc/systemd/system/slurmctld.service.d/time-monthly.conf',
+                 '/var/lib/pro6000d-training/time-monthly-maintenance'):
         p = Path(path)
         if p.exists() or p.is_symlink(): raise ValueError('prior quota state or override exists: ' + path)
     for service in ('slurmctld', 'slurmd', 'pro6000d-training'):
         if run(['/usr/bin/systemctl', 'is-active', service]) != 'active':
             raise ValueError('service is not active: ' + service)
+    backend_dropins = run(['/usr/bin/systemctl', 'show', 'pro6000d-training', '-p', 'DropInPaths', '--value'])
+    if set(backend_dropins.split()) != {
+            '/etc/systemd/system/pro6000d-training.service.d/slurm.conf',
+            '/etc/systemd/system/pro6000d-training.service.d/time-maintenance.conf'}:
+        raise ValueError('unexpected training backend drop-in set')
     unit = run(['/usr/bin/systemctl', 'show', 'slurmctld', '-p', 'MainPID', '-p', 'FragmentPath', '-p', 'DropInPaths'])
     fields = dict(line.split('=', 1) for line in unit.splitlines() if '=' in line)
     if (fields.get('FragmentPath') != '/lib/systemd/system/slurmctld.service' or
