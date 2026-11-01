@@ -46,7 +46,16 @@
  	struct mq_month_record *next;
  } mq_month_record_t;
  
-@@ -97,6 +99,8 @@
+@@ -83,6 +85,8 @@
+ 	uint64_t planned_gpu;
+ 	uint64_t base_gpu;
+ 	uint64_t gpu_count; /* GPU resources remain charged while held by Slurm */
++	enum time_tier selected_tier; /* V2 only; legacy jobs do not carry this */
++	enum time_tier current_tier;  /* V2 running allocation cursor */
+ 	mq_time_t anchor;
+ 	bool committed;
+ 	struct mq_active_record *next;
+@@ -97,6 +101,8 @@
  static bool mq_healthy;
  /* WAL opening alone is not proof it matches restored Slurm jobs. */
  static bool mq_reconciled;
@@ -55,7 +64,19 @@
  static uint64_t mq_seq;
  static SHA256_CTX mq_wal_digest;
  static uint64_t mq_next_generation;
-@@ -581,6 +585,7 @@
+@@ -448,6 +454,11 @@
+ 	record = xcalloc(1, sizeof(*record));
+ 	record->uid = uid;
+ 	record->month = month;
++	if (mq_selectable_replay &&
++	    time_tier_import_legacy(&record->selectable, 0, 0)) {
++		xfree(record);
++		return NULL;
++	}
+ 	record->next = mq_months;
+ 	mq_months = record;
+ 	return record;
+@@ -581,6 +592,7 @@
  	mq_months = NULL;
  	mq_grants = NULL;
  	mq_active = NULL;
@@ -63,7 +84,7 @@
  }
  
  static void _mark_unhealthy(const char *why)
-@@ -857,6 +862,43 @@
+@@ -857,6 +869,43 @@
  	return 0;
  }
  
@@ -107,19 +128,50 @@
  static int _replay_event(char **fields, int field_count)
  {
  	const char *event;
-@@ -868,6 +910,11 @@
+@@ -868,6 +917,42 @@
  	if (field_count < 3)
  		return -1;
  	event = fields[2];
 +	if (!strcmp(event, "CUTOVER2"))
 +		return field_count == 3 ? _replay_selectable_cutover() : -1;
-+	/* No V2 events are implemented yet: never replay them as old rules. */
-+	if (mq_selectable_replay)
++	if (mq_selectable_replay && !strcmp(event, "PREPARE2")) {
++		mq_active_record_t *new_active;
++		mq_month_record_t *record;
++		uint32_t selected;
++		/* Multiple active jobs need ADVANCE2 and shared timeline replay.
++		 * Refuse them until that implementation is complete. */
++		if (mq_active || field_count != 10 ||
++		    _parse_u32(fields[3], &job_id) || _parse_u32(fields[4], &uid) ||
++		    _parse_u64(fields[5], &generation) || _parse_u64(fields[6], &gpu_count) ||
++		    _parse_u64(fields[7], &sec) || _parse_u32(fields[8], &nsec) ||
++		    _parse_u32(fields[9], &selected) || nsec >= MQ_NSEC_PER_SEC ||
++		    !job_id || !generation || generation == UINT64_MAX ||
++		    generation < mq_next_generation || !gpu_count || selected >= TIME_TIER_COUNT)
++			return -1;
++		from.sec = sec; from.nsec = nsec;
++		if (_month_key(&from, &month)) return -1;
++		record = _find_month(uid, month, true);
++		if (!record || time_tier_eligible(&record->selectable, (enum time_tier)selected) != 1)
++			return -1;
++		new_active = xcalloc(1, sizeof(*new_active));
++		new_active->job_id = job_id; new_active->uid = uid;
++		new_active->generation = generation;
++		new_active->planned_gpu = gpu_count; new_active->base_gpu = gpu_count;
++		new_active->gpu_count = gpu_count; new_active->anchor = from;
++		new_active->selected_tier = (enum time_tier)selected;
++		new_active->current_tier = (enum time_tier)selected;
++		new_active->next = mq_active; mq_active = new_active;
++		mq_next_generation = generation + 1;
++		return 0;
++	}
++	/* Only V2 PREPARE2 and its existing commit/abort are understood here.
++	 * Never interpret remaining V2 records under legacy rules. */
++	if (mq_selectable_replay && strcmp(event, "COMMIT") && strcmp(event, "ABORT"))
 +		return -1;
  	if (!strcmp(event, "PREPARE")) {
  		mq_active_record_t *new_active;
  
-@@ -1041,7 +1088,9 @@
+@@ -1041,7 +1126,9 @@
  			goto out;
  		mq_seq = seq;
  	}
