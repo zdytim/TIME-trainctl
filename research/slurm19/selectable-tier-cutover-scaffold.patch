@@ -84,7 +84,7 @@
  }
  
  static void _mark_unhealthy(const char *why)
-@@ -857,6 +869,43 @@
+@@ -857,6 +869,109 @@
  	return 0;
  }
  
@@ -125,10 +125,76 @@
 +    return 0;
 +}
 +
++/* V2 replay-only advancement. The controller still rejects V2 WALs at
++ * completion until writer, scheduling and recovery are all integrated. */
++static int _compare_tier_jobs(const void *left, const void *right)
++{
++    const struct time_active_job *a = left, *b = right;
++    if (a->job_id != b->job_id) return a->job_id < b->job_id ? -1 : 1;
++    if (a->generation != b->generation) return a->generation < b->generation ? -1 : 1;
++    return 0;
++}
++
++static int _replay_selectable_advance(const mq_time_t *end)
++{
++    mq_active_record_t *a, *b;
++    mq_time_t cursor, boundary, next;
++    mq_amount_t duration;
++    uint64_t nanos;
++    uint32_t month;
++    unsigned count, i;
++    struct time_active_job *jobs;
++    mq_month_record_t *record;
++
++    if (!mq_active) return -1;
++    cursor = mq_active->anchor;
++    for (a = mq_active; a; a = a->next)
++        if (!a->committed || _time_cmp(&a->anchor, &cursor) ||
++            _time_cmp(&cursor, end) > 0) return -1;
++    while (_time_cmp(&cursor, end) < 0) {
++        if (_month_key(&cursor, &month) || _next_month_boundary(&cursor, &boundary))
++            return -1;
++        next = _time_cmp(&boundary, end) < 0 ? boundary : *end;
++        if (_duration(&cursor, &next, &duration) ||
++            _legacy_to_selectable(duration, &nanos)) return -1;
++        for (a = mq_active; a; a = a->next) {
++            /* Process each user exactly once per interval. */
++            for (b = mq_active; b != a; b = b->next)
++                if (b->uid == a->uid) break;
++            if (b != a) continue;
++            count = 0;
++            for (b = mq_active; b; b = b->next)
++                if (b->uid == a->uid && ++count > 4096) return -1;
++            jobs = xcalloc(count, sizeof(*jobs));
++            i = 0;
++            for (b = mq_active; b; b = b->next) {
++                if (b->uid != a->uid) continue;
++                jobs[i].job_id = b->job_id; jobs[i].generation = b->generation;
++                jobs[i].current = b->current_tier; jobs[i].gpu_count = b->gpu_count;
++                i++;
++            }
++            qsort(jobs, count, sizeof(*jobs), _compare_tier_jobs);
++            record = _find_month(a->uid, month, true);
++            if (!record || time_tier_advance(&record->selectable, jobs, count, nanos)) {
++                xfree(jobs); return -1;
++            }
++            for (i = 0; i < count; i++) {
++                b = _find_active(jobs[i].job_id, jobs[i].generation);
++                if (!b) { xfree(jobs); return -1; }
++                b->current_tier = jobs[i].current;
++            }
++            xfree(jobs);
++        }
++        cursor = next;
++    }
++    for (a = mq_active; a; a = a->next) a->anchor = *end;
++    return 0;
++}
++
  static int _replay_event(char **fields, int field_count)
  {
  	const char *event;
-@@ -868,6 +917,42 @@
+@@ -868,6 +983,59 @@
  	if (field_count < 3)
  		return -1;
  	event = fields[2];
@@ -138,9 +204,7 @@
 +		mq_active_record_t *new_active;
 +		mq_month_record_t *record;
 +		uint32_t selected;
-+		/* Multiple active jobs need ADVANCE2 and shared timeline replay.
-+		 * Refuse them until that implementation is complete. */
-+		if (mq_active || field_count != 10 ||
++		if (field_count != 10 ||
 +		    _parse_u32(fields[3], &job_id) || _parse_u32(fields[4], &uid) ||
 +		    _parse_u64(fields[5], &generation) || _parse_u64(fields[6], &gpu_count) ||
 +		    _parse_u64(fields[7], &sec) || _parse_u32(fields[8], &nsec) ||
@@ -149,6 +213,9 @@
 +		    generation < mq_next_generation || !gpu_count || selected >= TIME_TIER_COUNT)
 +			return -1;
 +		from.sec = sec; from.nsec = nsec;
++		if (_find_active_job(job_id)) return -1;
++		for (active = mq_active; active; active = active->next)
++			if (!active->committed || _time_cmp(&active->anchor, &from)) return -1;
 +		if (_month_key(&from, &month)) return -1;
 +		record = _find_month(uid, month, true);
 +		if (!record || time_tier_eligible(&record->selectable, (enum time_tier)selected) != 1)
@@ -164,14 +231,30 @@
 +		mq_next_generation = generation + 1;
 +		return 0;
 +	}
-+	/* Only V2 PREPARE2 and its existing commit/abort are understood here.
++	if (mq_selectable_replay && !strcmp(event, "ADVANCE2")) {
++		if (field_count != 5 || _parse_u64(fields[3], &to.sec) ||
++		    _parse_u32(fields[4], &to.nsec) || to.nsec >= MQ_NSEC_PER_SEC)
++			return -1;
++		return _replay_selectable_advance(&to);
++	}
++	if (mq_selectable_replay && !strcmp(event, "RELEASE2")) {
++		if (field_count != 7 || _parse_u32(fields[3], &job_id) ||
++		    _parse_u64(fields[4], &generation) || _parse_u64(fields[5], &to.sec) ||
++		    _parse_u32(fields[6], &to.nsec) || to.nsec >= MQ_NSEC_PER_SEC)
++			return -1;
++		active = _find_active(job_id, generation);
++		if (!active || !active->committed || _time_cmp(&active->anchor, &to)) return -1;
++		_remove_active(active);
++		return 0;
++	}
++	/* Reject any V2 records not explicitly implemented above.
 +	 * Never interpret remaining V2 records under legacy rules. */
 +	if (mq_selectable_replay && strcmp(event, "COMMIT") && strcmp(event, "ABORT"))
 +		return -1;
  	if (!strcmp(event, "PREPARE")) {
  		mq_active_record_t *new_active;
  
-@@ -1041,7 +1126,9 @@
+@@ -1041,7 +1209,9 @@
  			goto out;
  		mq_seq = seq;
  	}
