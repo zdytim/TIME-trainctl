@@ -6,7 +6,17 @@ function slurm_job_submit(job_desc, part_list, submit_uid)
         slurm.log_user("Please submit through the Cockpit training platform")
         return slurm.ERROR
     end
-    local id = (job_desc.comment or ""):match("^pro6000d%-job:([0-9a-f]+)$")
+    -- The optional tier is authored by the root broker, never by the user.
+    -- Deploy this parser together with a controller that enforces the tier;
+    -- accepting the marker alone does not implement quota accounting.
+    local comment = job_desc.comment or ""
+    local id, tier = comment:match("^pro6000d%-job:([0-9a-f]+):tier=([a-z]+)$")
+    if not id then
+        id = comment:match("^pro6000d%-job:([0-9a-f]+)$")
+    elseif tier ~= "debug" and tier ~= "important" and tier ~= "normal" then
+        slurm.log_user("Invalid platform quota tier")
+        return slurm.ERROR
+    end
     if not id or #id ~= 32 then
         slurm.log_user("Missing platform submission identity")
         return slurm.ERROR
