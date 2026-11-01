@@ -1,0 +1,7 @@
+# Selectable-tier cutover scaffold status
+
+2026-11-02. The candidate in `selectable-tier-cutover-scaffold.patch` retains the original WAL and its checkpoint/witness. A `CUTOVER2` replay record is accepted only when no allocation is active and all existing monthly amounts can be converted exactly; any duplicate cutover, post-cutover event or incomplete V2 recovery causes replay failure. At present replay also deliberately refuses readiness even if CUTOVER2 is the final record: no runtime command emits it and it must not be deployed as the completed selectable controller.
+
+On the Mac, all 41 patch layers were reconstructed from pinned Slurm 19.05.5 source. A complete `make -C src` stopped at `No rule to make target full_version.map`; the full controller build did not succeed. A separate sandbox-local configure and `cc -fsyntax-only` invocation for `monthly_quota.c` and `selectable-tier-accounting.c` completed with five OpenSSL 3 deprecation warnings; this is source-level evidence only, not a linked binary or runtime verification. The old-to-new arithmetic candidate passed isolated checks for 6-hour legacy usage, normal-grant overage, and overflow refusal.
+
+The authoritative V2 event writer, concurrent advance/replay, per-job admission and scheduler priority, controller SNAP2 response, safe cutover/rollback and UI activation remain incomplete. Do not enable the selector or write a CUTOVER2 record until these components are complete and verified together. No live controller, ledger, service or job was modified.
