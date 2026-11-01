@@ -1,6 +1,9 @@
 -- PRO6000D_ROOT_BROKER_V1
 -- Gate every partition including an omitted/default partition.
 -- Real submit_uid is authenticated by Slurm/Munge, never browser JSON.
+-- Keep selected-tier markers disabled until the matching controller has been
+-- installed, verified and its durable per-tier accounting activated.
+local selectable_tier_enforcement = false
 function slurm_job_submit(job_desc, part_list, submit_uid)
     if submit_uid ~= 0 then
         slurm.log_user("Please submit through the Cockpit training platform")
@@ -15,6 +18,9 @@ function slurm_job_submit(job_desc, part_list, submit_uid)
         id = comment:match("^pro6000d%-job:([0-9a-f]+)$")
     elseif tier ~= "debug" and tier ~= "important" and tier ~= "normal" then
         slurm.log_user("Invalid platform quota tier")
+        return slurm.ERROR
+    elseif not selectable_tier_enforcement then
+        slurm.log_user("Selected quota tiers are not yet enforced")
         return slurm.ERROR
     end
     if not id or #id ~= 32 then
