@@ -42,6 +42,21 @@ int time_tier_next_boundary(const struct time_tier_balance *balance,
                             unsigned count, uint64_t horizon_ns,
                             uint64_t *boundary_ns, int *depletes);
 
+/* Advance a single account over a common interval. Entries must be sorted by
+ * strictly increasing (job_id, generation); this order breaks ties within the
+ * same wall nanosecond. The caller must split at job start/end and month
+ * boundaries. On error the account and all cursors remain unchanged. This is
+ * an arithmetic candidate, not a durable WAL or allocation gate. */
+struct time_active_job {
+    uint32_t job_id;
+    uint64_t generation;
+    enum time_tier current;
+    uint64_t gpu_count;
+};
+int time_tier_advance(struct time_tier_balance *balance,
+                      struct time_active_job *jobs, unsigned count,
+                      uint64_t wall_nanoseconds);
+
 /* Import a verified, settled legacy monthly total and grants using the old
  * debug -> important -> normal ordering. Caller must prove a consistent
  * controller snapshot, preserve the original ledger, and prevent live writes.

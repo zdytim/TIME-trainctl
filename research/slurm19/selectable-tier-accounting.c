@@ -1,6 +1,8 @@
 /* Candidate arithmetic only: this is not a scheduler or an online ledger. */
 #include "selectable-tier-accounting.h"
 #include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
 #include <stdint.h>
 
 static int valid(const struct time_tier_balance *balance)
@@ -111,4 +113,62 @@ int time_tier_next_boundary(const struct time_tier_balance *balance,
     *boundary_ns = earliest;
     *depletes = found;
     return 0;
+}
+
+int time_tier_advance(struct time_tier_balance *balance,
+                      struct time_active_job *jobs, unsigned count,
+                      uint64_t wall_nanoseconds)
+{
+    struct time_tier_balance next;
+    struct time_active_job *copy = NULL;
+    struct time_running_allocation *rates = NULL;
+    uint64_t remaining = wall_nanoseconds;
+    unsigned i;
+    int rc = -1;
+    /* Keep controller work and temporary memory bounded. */
+    if (!valid(balance) || (count && !jobs) || count > 4096) return -1;
+    for (i = 0; i < count; i++) {
+        if (!jobs[i].job_id || !jobs[i].generation || !jobs[i].gpu_count ||
+            (unsigned)jobs[i].current >= TIME_TIER_COUNT ||
+            (i && (jobs[i-1].job_id > jobs[i].job_id ||
+             (jobs[i-1].job_id == jobs[i].job_id &&
+              jobs[i-1].generation >= jobs[i].generation)))) return -1;
+    }
+    if (!count || !remaining) return 0;
+    copy = malloc(count * sizeof(*copy));
+    rates = malloc(count * sizeof(*rates));
+    if (!copy || !rates) goto out;
+    memcpy(copy, jobs, count * sizeof(*copy));
+    next = *balance;
+    while (remaining) {
+        uint64_t delta, bulk;
+        int depletes;
+        for (i = 0; i < count; i++) {
+            rates[i].current = copy[i].current;
+            rates[i].gpu_count = copy[i].gpu_count;
+        }
+        if (time_tier_next_boundary(&next, rates, count, remaining, &delta, &depletes) ||
+            !delta || delta > remaining) goto out;
+        /* Before the boundary no tier can be exhausted. At the last wall
+         * nanosecond, stable job order assigns indivisible GPU-nanoseconds. */
+        bulk = depletes ? delta - 1 : delta;
+        for (i = 0; i < count; i++) {
+            if (bulk && copy[i].gpu_count > UINT64_MAX / bulk) goto out;
+            if (time_tier_charge(&next, &copy[i].current, bulk * copy[i].gpu_count))
+                goto out;
+        }
+        if (depletes) {
+            for (i = 0; i < count; i++)
+                if (time_tier_charge(&next, &copy[i].current, copy[i].gpu_count))
+                    goto out;
+        }
+        remaining -= delta;
+    }
+    *balance = next;
+    memcpy(jobs, copy, count * sizeof(*copy));
+    rc = 0;
+out:
+    free(rates);
+    free(copy);
+    return rc;
 }
