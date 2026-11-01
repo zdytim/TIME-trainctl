@@ -19,8 +19,9 @@ struct time_tier_balance {
 int time_tier_eligible(const struct time_tier_balance *balance, enum time_tier selected);
 
 /* Charge a running allocation, overflowing toward lower priorities only.
- * Returns -1 on malformed state/overflow, with *balance unchanged. */
-int time_tier_charge(struct time_tier_balance *balance, enum time_tier selected,
+ * Updates the task cursor to the next nonempty tier. Returns -1 on malformed
+ * state/overflow, with *balance and *current unchanged. */
+int time_tier_charge(struct time_tier_balance *balance, enum time_tier *current,
                      uint64_t gpu_nanoseconds);
 
 /* A normal-tier grant first offsets overage. Returns -1 without mutation on

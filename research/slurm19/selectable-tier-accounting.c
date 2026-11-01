@@ -19,22 +19,26 @@ int time_tier_eligible(const struct time_tier_balance *balance, enum time_tier s
     return balance->used[selected] < balance->limit[selected];
 }
 
-int time_tier_charge(struct time_tier_balance *balance, enum time_tier selected,
+int time_tier_charge(struct time_tier_balance *balance, enum time_tier *current,
                      uint64_t gpu_nanoseconds)
 {
     struct time_tier_balance next;
     unsigned i;
-    if (!valid(balance) || (unsigned)selected >= TIME_TIER_COUNT) return -1;
+    if (!valid(balance) || !current || (unsigned)*current >= TIME_TIER_COUNT) return -1;
     next = *balance;
-    for (i = (unsigned)selected; i < TIME_TIER_COUNT && gpu_nanoseconds; i++) {
+    i = (unsigned)*current;
+    while (i < TIME_TIER_COUNT) {
         uint64_t available = next.limit[i] - next.used[i];
         uint64_t charge = gpu_nanoseconds < available ? gpu_nanoseconds : available;
         next.used[i] += charge;
         gpu_nanoseconds -= charge;
+        if (next.used[i] < next.limit[i] || i == TIME_NORMAL) break;
+        i++;
     }
     if (UINT64_MAX - next.overage < gpu_nanoseconds) return -1;
     next.overage += gpu_nanoseconds;
     *balance = next;
+    *current = (enum time_tier)i;
     return 0;
 }
 
