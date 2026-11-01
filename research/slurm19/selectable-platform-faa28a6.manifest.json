@@ -1,0 +1,663 @@
+{
+  "archive_sha256": "185bb0b7f08f867b933f82df62f983bba7a28e5268b91a25a9ee6ddc0075dc4a",
+  "files": [
+    {
+      "path": "backend/controller_bridge.py",
+      "sha256": "d5172cdec46ae921bbdaa24f83723917e3271b08479c6789072a05155f27597b",
+      "size": 8424
+    },
+    {
+      "path": "backend/controller_view.py",
+      "sha256": "fca3a4d34067bf043ccd25a63d6f2f92c35eab96e2cc2991a1e34574e7a21e0b",
+      "size": 6505
+    },
+    {
+      "path": "backend/pro6000d-training-api.py",
+      "sha256": "4b2a638b404acdf0c7c64cfcc23fa1f618d6bb7cee7798e5127ea44e028ae176",
+      "size": 91216
+    },
+    {
+      "path": "scheduler/job_submit-disabled.lua",
+      "sha256": "25b8ea4cbd9580ab3cc8e6ea1a1bffdebfd3800644c96fdba96631d91faea421",
+      "size": 2072
+    },
+    {
+      "path": "scheduler/job_submit-enabled.lua",
+      "sha256": "a52659f8dd4e0fa8b4236d3812fa6e7d5a67cd54cd4c56c03e18bab2e60c03c1",
+      "size": 2071
+    },
+    {
+      "path": "ui/app.js",
+      "sha256": "1beb8759bc2980a54f048ee69e696ce6ef548228e6251993d274178e9b0e7c7a",
+      "size": 69540
+    },
+    {
+      "path": "ui/index.html",
+      "sha256": "c94c0ad64450bb20e014a19e65b6a849983590d5ec571be22b33f2353af0d8e6",
+      "size": 1606
+    },
+    {
+      "path": "ui/manifest.json",
+      "sha256": "cf11bdb16315e9049ae9e5e86c2ecc60a33ae9a60caf12dc518fb1c2a1caf7f9",
+      "size": 316
+    },
+    {
+      "path": "ui/styles.css",
+      "sha256": "f9ef0f3c17b98b8185f6b3456c27a9b4514417021f449ac1bddbe1114440ac26",
+      "size": 18857
+    },
+    {
+      "path": "ui/vendor/LICENSE.txt",
+      "sha256": "afc12cbdb54b4ee09bc1b9b19feadb4f424e46a47f64860e9941606e18e12703",
+      "size": 1070
+    },
+    {
+      "path": "ui/vendor/SOURCE.txt",
+      "sha256": "9752620cf3c23d4993e10d0b10e3ea40eeb96f553f94de2c3bc5a54f457adcc5",
+      "size": 174
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatDisplay/RedHatDisplay-Black.woff",
+      "sha256": "7b6e15782bc2d9d3eaad2e65fc7f3f11f3a5f35d71c1ddc5638a8559ccaa8993",
+      "size": 36396
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatDisplay/RedHatDisplay-Black.woff2",
+      "sha256": "9d4cdf29505b800aebcbaddbd1e20291a578b453a145088939ced77cf3469079",
+      "size": 28457
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatDisplay/RedHatDisplay-BlackItalic.woff",
+      "sha256": "075c00685a051b600f4b1af8545c3b7ade61ca39f8ed079682dbdbaa8b775705",
+      "size": 37464
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatDisplay/RedHatDisplay-BlackItalic.woff2",
+      "sha256": "9a504ff42d94ab33c861dbf5a5e17501e77662d4c125cdc92cbb8aecb27c8d1b",
+      "size": 29245
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatDisplay/RedHatDisplay-Bold.woff",
+      "sha256": "44214a551857e20ca2873c118283c54c627696c4bc04b345f1dc789938666670",
+      "size": 36920
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatDisplay/RedHatDisplay-Bold.woff2",
+      "sha256": "ca18645c5c904eaf7f5870535740fa9da442094ca11ae8389993ca294928b7c8",
+      "size": 29045
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatDisplay/RedHatDisplay-BoldItalic.woff",
+      "sha256": "3c4ecb6192a81d83e008c291d7984008a101f96dfc5d772f188546280545ccf3",
+      "size": 37944
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatDisplay/RedHatDisplay-BoldItalic.woff2",
+      "sha256": "532af7ce79713e532f44b8111514938e19c3e5c2c819c9008f606b8e710f9df4",
+      "size": 29761
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatDisplay/RedHatDisplay-Italic.woff",
+      "sha256": "be9cde8e99386eef60d3dca10116fc4acc5b3022e9cccc6812cf576d69e55bec",
+      "size": 37172
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatDisplay/RedHatDisplay-Italic.woff2",
+      "sha256": "dadb25ff3e81ff6e027daabb8df17587ff040f74532d31a953f7ad164473b461",
+      "size": 29201
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatDisplay/RedHatDisplay-Medium.woff",
+      "sha256": "6ccf21587b875a84a2567146f41f12d46f803950edb507ac81b83b19e44c9f7c",
+      "size": 36532
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatDisplay/RedHatDisplay-Medium.woff2",
+      "sha256": "6d3ccc0f1407d9ff46ec4f88534a49f866b738fe8c944e704cc1eb42facd9932",
+      "size": 28661
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatDisplay/RedHatDisplay-MediumItalic.woff",
+      "sha256": "fb0677212a385249165bb4ab5e1943c963a778d25fb2d0ef53c391ca216b9370",
+      "size": 37568
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatDisplay/RedHatDisplay-MediumItalic.woff2",
+      "sha256": "3d177f5e1e892759bd366cddf4ed9a9d927cbd8f04d490d375f7f262b89e7227",
+      "size": 29497
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatDisplay/RedHatDisplay-Regular.woff",
+      "sha256": "1b99a560426daefadd2f11f36c6c7d6b80e8e326f9634820e7fedeb72d18ec7a",
+      "size": 36432
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatDisplay/RedHatDisplay-Regular.woff2",
+      "sha256": "e6fb83d978a35a0b5412444bafafe9307e211dca7c43d82a6dfd5eb1e675799b",
+      "size": 28745
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatDisplay/RedHatDisplay-updated-Black.woff2",
+      "sha256": "4000a79e914d56e57256e2677548474000955c92abafb89f8f0fc5966712b919",
+      "size": 25280
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatDisplay/RedHatDisplay-updated-BlackItalic.woff2",
+      "sha256": "c33697dc6fb225b089639bec860c011c97dee94dd2d0c756a4a45a1d23df2797",
+      "size": 26900
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatDisplay/RedHatDisplay-updated-Bold.woff2",
+      "sha256": "66d1fc26f732ced315ab8f9575d505a97c99282feb915b8ceff3c593eb57d8d8",
+      "size": 26372
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatDisplay/RedHatDisplay-updated-BoldItalic.woff2",
+      "sha256": "5b72f3a1b1e954398b58c84c4bd301f19a1149bb32554bc671a319bd6222bc7b",
+      "size": 27868
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatDisplay/RedHatDisplay-updated-Italic.woff2",
+      "sha256": "fd88570e119df1bff9d6f4298df934c45d9f0c6216ac28e8a9ba8e105a76d768",
+      "size": 27124
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatDisplay/RedHatDisplay-updated-Light.woff2",
+      "sha256": "b3752b12d729f33275ddc25c91c7ec7777bd3b0e2c0a3b2dc283756db7ea254a",
+      "size": 25456
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatDisplay/RedHatDisplay-updated-LightItalic.woff2",
+      "sha256": "15098f0811e63ace9d5089c79827b9ff7000504ccc5a47c87f2b43e08f8ac5e5",
+      "size": 25924
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatDisplay/RedHatDisplay-updated-Medium.woff2",
+      "sha256": "da0621a98ced647ba159a7a22d150b317bf693630c5fdb013cd30197f441b58c",
+      "size": 26532
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatDisplay/RedHatDisplay-updated-MediumItalic.woff2",
+      "sha256": "5980f6a3bc11f0e22cf9f877c679dde30e1f87fb6ea5a9da4e47f56e9bf57ed2",
+      "size": 28064
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatDisplay/RedHatDisplay-updated-Regular.woff2",
+      "sha256": "d0b90ff36f46c779540a7b0338f7d50a420b310a6909c5902f120a0da49b61c4",
+      "size": 25736
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatDisplay/RedHatDisplayVF-updated-Italic.woff2",
+      "sha256": "d926e5e6aba2f7a7793b35d057540fda30b48f4f88ca68962813eba39dcd18a4",
+      "size": 41660
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatDisplay/RedHatDisplayVF-updated.woff2",
+      "sha256": "36b4e3b4b91e335e27f0350d0354a16e66f2a89438af9b4bd187b0275b3fd088",
+      "size": 39636
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatMono/RedHatMono-updated-Bold.woff2",
+      "sha256": "f0204c9a5dbeb297e22b8613e8b972dc6d9c4a279f10ec9fdbc472e4813a8594",
+      "size": 20876
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatMono/RedHatMono-updated-BoldItalic.woff2",
+      "sha256": "e607db75b7c8bf60a4aef9c9e9ac4d4b186c826da07bf4bc063796c3e0bac469",
+      "size": 22240
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatMono/RedHatMono-updated-Italic.woff2",
+      "sha256": "582e2efe7c25d52f0271ee373e81a6f6674498662335bc45e120f69f0c92a0c9",
+      "size": 22232
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatMono/RedHatMono-updated-Light.woff2",
+      "sha256": "2ab0f76e93107e35707a566c69685e88fef8769547b4f4a8f6e23ba749a27a57",
+      "size": 20644
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatMono/RedHatMono-updated-LightItalic.woff2",
+      "sha256": "783ff476bb0cc428c1c3aaac6f3e4243e411138e87f5c53c43b5bf582943a021",
+      "size": 22200
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatMono/RedHatMono-updated-Medium.woff2",
+      "sha256": "643af612c48cec4c6f05fbb89b2fb785c3e2d3937b7d09470f2dd1189e88029c",
+      "size": 21340
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatMono/RedHatMono-updated-MediumItalic.woff2",
+      "sha256": "311cffb80b5434e64cd944f06d028307d3838df4a81f204b32fa1bc3f34fe4a2",
+      "size": 22960
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatMono/RedHatMono-updated-Regular.woff2",
+      "sha256": "1686cd5cc3d3388fb9c9d43f31864ec27346e5f7fc69a20dbbb5017fd257cf64",
+      "size": 20932
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatMono/RedHatMonoVF-updated-Italic.woff2",
+      "sha256": "ca135ebd9d9b22645329b235f6bbc12c46be1f5bace6365951bd27c3555f0161",
+      "size": 32496
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatMono/RedHatMonoVF-updated.woff2",
+      "sha256": "4cca9c27f616ce95112784770e7b1c29ce49c48a8c98023055279cc8269315c5",
+      "size": 29148
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatText/RedHatText-updated-Bold.woff2",
+      "sha256": "1af1d66c2d6fe0460a50b6e083237ac46c89731bcb7d76990e51bd9ce6f9ebec",
+      "size": 25692
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatText/RedHatText-updated-BoldItalic.woff2",
+      "sha256": "7f24c72031fed63c0d41b61ac8f16fee72b4feccfc0ea8e6f49928717a7e3613",
+      "size": 26900
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatText/RedHatText-updated-Italic.woff2",
+      "sha256": "0e3521a4ca2380a5e19b8544e52ff687aea36ec326ab3b6a14540770da290b79",
+      "size": 27012
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatText/RedHatText-updated-Light.woff2",
+      "sha256": "96cb54c3bfb7a71d123a829bd32085094d64d9b08ac77087845faf5719ec6e02",
+      "size": 25660
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatText/RedHatText-updated-LightItalic.woff2",
+      "sha256": "ad38d0884ebb8c2632a0d596610c15a06c4126d1afb55489a859a52e3eeaec81",
+      "size": 26528
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatText/RedHatText-updated-Medium.woff2",
+      "sha256": "721ddd64707029c2932127483c780df6b6c466a6234bd5f6001b462bae9ca47d",
+      "size": 26632
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatText/RedHatText-updated-MediumItalic.woff2",
+      "sha256": "77623479a2386bc26ecc091857d00bcf4ce8ab08d1d677a6f676bf53633fbad4",
+      "size": 28244
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatText/RedHatText-updated-Regular.woff2",
+      "sha256": "2e08dbe883f8913121aecc8b73614cd3e39793257acd23ca1534650c257be17d",
+      "size": 25768
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatText/RedHatTextVF-updated-Italic.woff2",
+      "sha256": "7c1c67fe2d87c86757818e153940b5c24d1aa8aa345000aca8d17ebb299f9065",
+      "size": 41512
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/RedHatText/RedHatTextVF-updated.woff2",
+      "sha256": "7799f62a74a07d1ff2bb06edbe35f59f3085e1261e2a5f668b1fa880d6e8d9ed",
+      "size": 38492
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/modified/RedHatDisplayVF-updated-ItalicModified.woff2",
+      "sha256": "8483eece3493a9d1bdbc27a799f108a7a9302b4663960700adb7c2c574131ce0",
+      "size": 32012
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/modified/RedHatDisplayVFModified-updated.woff2",
+      "sha256": "3a6592a3f4be056dde9be9a766de7d334729cc766045b16e03620ddab990d44c",
+      "size": 30784
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/modified/RedHatTextVF-updated-ItalicModified.woff2",
+      "sha256": "9e1c1004be670f5a86db3144423be1167d9e70c450f241c1f7e2c5629f12445e",
+      "size": 31952
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatFont-updated/modified/RedHatTextVFModified-updated.woff2",
+      "sha256": "942d38f7b67393731d29ad3d7eab79e4b26de8dd33d3ea84ff1d8a5d89d364b9",
+      "size": 30092
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatText/RedHatText-Bold.woff",
+      "sha256": "3064de68322d0032107c77bf19def1379e1b3fe2447321e6297a5616f1dbc361",
+      "size": 36396
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatText/RedHatText-Bold.woff2",
+      "sha256": "c6ff17e9e37c0a21c0da7a230a44239e5dc7091e9ee6594df90c80017a341951",
+      "size": 28541
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatText/RedHatText-BoldItalic.woff",
+      "sha256": "988864fb81d423fb0b94f0534616968097d8a974e43460deb19413098debaeb5",
+      "size": 37384
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatText/RedHatText-BoldItalic.woff2",
+      "sha256": "9dfd94e91e8eb6ddd8d8d3688fafeaad1573770099fbd4b0bae816b27a4cc7c7",
+      "size": 29217
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatText/RedHatText-Italic.woff",
+      "sha256": "e3dc82991454d793c19763f186759b3419c75d946872d50d6012581a41936b0e",
+      "size": 37348
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatText/RedHatText-Italic.woff2",
+      "sha256": "1dc72b8a524c4811e7f2704c80fd85322bd333a29d6db0ba301848e40960d6ec",
+      "size": 29381
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatText/RedHatText-Medium.woff",
+      "sha256": "702e86ff5716146680c57542863ecd7f3c896306199c2b1d3d6ae00ac62ac96d",
+      "size": 37096
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatText/RedHatText-Medium.woff2",
+      "sha256": "eb14b0467b18c0fd07810db7ab630a8eeb382353cdde440c7fc4bed3f901ceb0",
+      "size": 29049
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatText/RedHatText-MediumItalic.woff",
+      "sha256": "23f3edf5e57199ef7e5cd226d0b42e6017c6a16d1e76b573c1a80467adf2a0d2",
+      "size": 37888
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatText/RedHatText-MediumItalic.woff2",
+      "sha256": "cab808dba56a6f7153326af523dfd4457738a487266429ba35e5d09b7b68a32b",
+      "size": 29621
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatText/RedHatText-Regular.woff",
+      "sha256": "df36d7d048d973a8990a2218f3c425ffbb077c8676fd8260178a3769fb34e76e",
+      "size": 35980
+    },
+    {
+      "path": "ui/vendor/assets/fonts/RedHatText/RedHatText-Regular.woff2",
+      "sha256": "542423d086114efc78287af567bfc3124c2d87022cbbc16fde1241e01f97757f",
+      "size": 28169
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-mono-webfont/example.html",
+      "sha256": "83c76addc194787a207549fd9c5693a486f34a3e21a138b4718d4eebf50ce505",
+      "size": 464
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-mono-webfont/overpass-mono-bold.woff",
+      "sha256": "9b29c79ab17ff95a6984074f585fa286d223e99156915a4859838471fa1e88b9",
+      "size": 65060
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-mono-webfont/overpass-mono-bold.woff2",
+      "sha256": "2bf715ff6232de416cbf26454f5eeaef24bc6b07ba99b5595fdf1a2a2a71b593",
+      "size": 51572
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-mono-webfont/overpass-mono-light.woff",
+      "sha256": "7fbe3706fd739c0da1fa9ee5728a9f1067f3ad3174dbf4f2a1c5a21c3f82f2e6",
+      "size": 63324
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-mono-webfont/overpass-mono-light.woff2",
+      "sha256": "5bae063ce6f1fa5f5bdb0d245bbe5e628e8a8cfc3a8657dd261d077b0f21550b",
+      "size": 50112
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-mono-webfont/overpass-mono-regular.woff",
+      "sha256": "95881615981c1e7b707109b7e3508d20db23dac944f45788ea7bc94589aba601",
+      "size": 65036
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-mono-webfont/overpass-mono-regular.woff2",
+      "sha256": "a13dec50fc5b8ef5ba68baabc2ddeea1d1bc4f9b35216df220994ee2641ce97a",
+      "size": 51524
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-mono-webfont/overpass-mono-semibold.woff",
+      "sha256": "085fb4a8046d9979089636a33557b165f0955bcb8d09da9180b31556ff527f23",
+      "size": 64944
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-mono-webfont/overpass-mono-semibold.woff2",
+      "sha256": "b39c51742d8786115fb0313dad6e359ae8a50e00cf67117e811e9fba599301ee",
+      "size": 51308
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-mono-webfont/overpass-mono.css",
+      "sha256": "08723cb34cf37585585254f2a4eaed741b61d05a04a21ce48dab19861499e494",
+      "size": 863
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/example.html",
+      "sha256": "669208a3e895fa965f8eab5bc272121d42017e7616e8f1b86e659b5b54fc711a",
+      "size": 730
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-bold-italic.woff",
+      "sha256": "4926428ed9921c1b1c794cd41a39c1d9124525af2faab823a5ffa1dfaed232fa",
+      "size": 45068
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-bold-italic.woff2",
+      "sha256": "16cda7ef5468b0554108b166fb3eacf9d0b06d6134900b522cab9a03c1b05cd6",
+      "size": 37252
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-bold.woff",
+      "sha256": "452a631fd0fed64dc2ffe5c40538a4c9ff7de5c1bdd8f1bae9a3cc48bf27c1e6",
+      "size": 42104
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-bold.woff2",
+      "sha256": "5c4ed5bb0368a4533febb774de5f03261a34e0eaf8ab8d89ec2da39b3acff128",
+      "size": 34752
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-extrabold-italic.woff",
+      "sha256": "33533562bd592a75d3c1e9f6a6b6948d4a0914c9d64e9c7b3c0489de4dba064b",
+      "size": 44392
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-extrabold-italic.woff2",
+      "sha256": "a258578a28590dd51c102a27b217dd6e0e315c7f046adc581c24ba7a10b292d6",
+      "size": 36660
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-extrabold.woff",
+      "sha256": "613313c8f359eaaf3baa4332cc82067c717b41a8db465d1ae13ff7fa60ed991d",
+      "size": 41368
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-extrabold.woff2",
+      "sha256": "648ba0e7446760f7e1d4ed25bec33e86c7026246b59e0c488bb1bfa5a5f0e55b",
+      "size": 33808
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-extralight-italic.woff",
+      "sha256": "6cbe5597ce365b5e2e1fc0905f33b8cce5370788dd40094538cf8cd3e6d2e97a",
+      "size": 44668
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-extralight-italic.woff2",
+      "sha256": "d23afde2baf63757a97ec937888a25952576da33c188ff3df5678fb7db3c33c8",
+      "size": 36800
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-extralight.woff",
+      "sha256": "64fbbd3df4849e359358cb6765298480e49a0bec9d01afacb07202ab7cc14092",
+      "size": 42532
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-extralight.woff2",
+      "sha256": "f053be7c559ed011b143187252d791ad190dc2cdbcd580b9fb5fc460ff3e9e2a",
+      "size": 35056
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-heavy-italic.woff",
+      "sha256": "c702fef15df72c4e148d193eed060d0cb34b91dd96118ffdb992433fd825c613",
+      "size": 45720
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-heavy-italic.woff2",
+      "sha256": "8f5fbf20ee08a8a792eb68a077b36d1a514fb100b0f830ae579ae50cf658b73e",
+      "size": 37972
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-heavy.woff",
+      "sha256": "c7e67c68f38e7360b799eeef1bc1e9218d7694eeeea886b2cd8524c6845522b0",
+      "size": 43316
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-heavy.woff2",
+      "sha256": "5e0869ee3845fa3ec959333e360d8095dcf34bfc89edb9006b042c56bbc85472",
+      "size": 35640
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-italic.woff",
+      "sha256": "b81a6146926a088a53a62822169b0bab96d7196dfcd7e9bc1a2afa87a9ece682",
+      "size": 45240
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-italic.woff2",
+      "sha256": "34df3d8137eefb27f65bf5f951df9d234f2dcbc20e321de98623c0f601e9c93e",
+      "size": 37368
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-light-italic.woff",
+      "sha256": "a1454ca5acb36c1a52397b7ee6686502d46803d48e1f97857f2d3f64d6cc9d94",
+      "size": 44372
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-light-italic.woff2",
+      "sha256": "ec333948248c9d67784354620c16b1bbaa6b389178984c8c8b0f1471ec33b9d5",
+      "size": 36580
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-light.woff",
+      "sha256": "3f8151f4e10020e94ee077073e6427c8619493d3202d400e791ebfb63ea3ca34",
+      "size": 41936
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-light.woff2",
+      "sha256": "9db6ab0a62fe2721fed1a064bec1a3b79ba9ca69ea8b19e3de7c8d2e3846e8b3",
+      "size": 34472
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-regular.woff",
+      "sha256": "16b635477bcc5313ace15d0f155028f6052615afd380ae6883d5594ad7d8ddc4",
+      "size": 42584
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-regular.woff2",
+      "sha256": "8e2261df95a73f1edd04eb161af39cfdb1a22e742a7e3978dc96f10e2f25a87b",
+      "size": 35128
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-semibold-italic.woff",
+      "sha256": "1935eb14b28de467bf5a7fede3ace15e8e91a4922238bd419644e278a5376590",
+      "size": 44728
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-semibold-italic.woff2",
+      "sha256": "ae706d8c8ef2bdd8c6dc8c15daead6daf1912b8788d135de7decc5e8454ef077",
+      "size": 36904
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-semibold.woff",
+      "sha256": "ec5809e81c08b5736c48507534c28c39f0f17ccbe64c3840284ab37df33f5e00",
+      "size": 40620
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-semibold.woff2",
+      "sha256": "3d06895e0b8637e5fb611b0f2f05b5c36c464e9d8de868f94e61995fa03da825",
+      "size": 33416
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-thin-italic.woff",
+      "sha256": "2dffa09276370960990f00ff78e34fdeac71a008eea865d950e224d8a2b0922c",
+      "size": 43504
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-thin-italic.woff2",
+      "sha256": "44db8e3d6c544fe452b9b13220de58fce782e7e58a76c8b1dae0aa82dbccb0e3",
+      "size": 35900
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-thin.woff",
+      "sha256": "6feca5dc01dce7531d513de8a1c0fc5ff7fee4a4a29177855797d4ea6a00e763",
+      "size": 40860
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass-thin.woff2",
+      "sha256": "e85966f1f9985248e1888869d701f4feb3ea61edfa7274b6df413c68945c2b65",
+      "size": 33696
+    },
+    {
+      "path": "ui/vendor/assets/fonts/overpass-webfont/overpass.css",
+      "sha256": "f684b3a043955bc0963c00b5180cd6c2687dea8a5f7806dab29233af15cfd003",
+      "size": 3309
+    },
+    {
+      "path": "ui/vendor/assets/fonts/webfonts/fa-solid-900.woff",
+      "sha256": "e14bf8513c6848f983ed24852e9700dec95589b748e26bacd6b2ca7dc9bb2aee",
+      "size": 102224
+    },
+    {
+      "path": "ui/vendor/assets/fonts/webfonts/fa-solid-900.woff2",
+      "sha256": "f419ad7a4477f36ce73c74a23dce784150ca38fa5075a8e06109709cbb716903",
+      "size": 79100
+    },
+    {
+      "path": "ui/vendor/assets/images/pfbg_2000.jpg",
+      "sha256": "1f17de558c0615d47bfbacd8ec9464be4a258d0a61d0f4bf6b3b80173281a672",
+      "size": 276435
+    },
+    {
+      "path": "ui/vendor/assets/images/pfbg_576.jpg",
+      "sha256": "1d76d6cc6d4fa4fd8259214a463cf8b07c72ce4b1b5a93b35a29035486392173",
+      "size": 67491
+    },
+    {
+      "path": "ui/vendor/assets/images/pfbg_576@2x.jpg",
+      "sha256": "4942ea78ae73712f2368bc9f6caeee224df3c05c4e5ae8f57e57a5c6acf93c48",
+      "size": 195594
+    },
+    {
+      "path": "ui/vendor/assets/images/pfbg_768.jpg",
+      "sha256": "8bc3cc8a4c2b6c7f915fa07eeb8e3c0a1c9c495f3cc6d228b17ddd8c8675b555",
+      "size": 116699
+    },
+    {
+      "path": "ui/vendor/assets/images/pfbg_768@2x.jpg",
+      "sha256": "037bce7615e31fa8f778ec92cddc9f06bda9e81ed0a146e804f41b457b340cec",
+      "size": 362032
+    },
+    {
+      "path": "ui/vendor/assets/images/pfbg_992@2x.jpg",
+      "sha256": "9dfd968794c876a96052b432a8fd647e10907f8b8c23c3daded9164941eb3b3b",
+      "size": 588571
+    },
+    {
+      "path": "ui/vendor/assets/images/status-icon-sprite.svg",
+      "sha256": "bc89cb14be1c430b5a7a47557d3b125da4ba5906c44b6afbfc9ba28614407591",
+      "size": 3523
+    },
+    {
+      "path": "ui/vendor/assets/pficon/pficon.woff",
+      "sha256": "0a333dacdd9f4a2512b789f90129695060ae207d20a9dc1748abf14aff75f393",
+      "size": 21068
+    },
+    {
+      "path": "ui/vendor/assets/pficon/pficon.woff2",
+      "sha256": "86c7453956fca3447970406c62fdfc27229d1ae10fe53178bc156c461c33f50b",
+      "size": 17700
+    },
+    {
+      "path": "ui/vendor/patternfly.min.css",
+      "sha256": "fe821fa52ccab3b70d9c1a024bb0cbfcf52c0fcc1ef96200035a4b749e2c3d13",
+      "size": 1421960
+    }
+  ],
+  "format": 1,
+  "note": "candidate only; enabled Lua variant must be used only after verified controller cutover",
+  "project_revision": "faa28a622fef97cc6d5b4cebd795eb16013bfc44"
+}
