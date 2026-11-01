@@ -135,6 +135,21 @@ class ControllerBridge:
                 "observed_nsec": values[12], "wal_sequence": values[13],
                 "active_allocation_count": values[14], "active_gpu_count": values[15]}
 
+    def selectable_cutover_reset_usage(self):
+        """For a fenced, reviewed deployment only; not exposed to API users.
+
+        The controller requires an experimental-enabled build and no active or
+        queued jobs. An ambiguous result must be reconciled from the trusted
+        V2 snapshot and ledger; do not blindly retry or roll back live work.
+        """
+        try:
+            line = self._exchange("CUTOVER2_RESET_USAGE 0", mutation=True)
+        except ControllerOutcomeUnknown as exc:
+            raise ControllerOutcomeUnknown("cutover outcome unknown; reconcile controller ledger before proceeding") from exc
+        if line != "OK":
+            raise ControllerOutcomeUnknown("unexpected cutover reply; reconcile controller ledger before proceeding")
+        return {"applied": True}
+
     def grant(self, uid, month, gpu_seconds, grant_id, actor):
         uid = self._uint(uid, 2**32 - 1)
         month = self._uint(month, 999912)
