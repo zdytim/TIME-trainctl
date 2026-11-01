@@ -112,14 +112,12 @@
  	for (active = mq_active; active; active = active->next) {
  		if (_settle_active(active, now, true))
  			return -1;
-@@ -857,6 +882,109 @@
+@@ -857,6 +882,107 @@
  	return 0;
  }
  
-+/* Convert without truncation. This transition is accepted only with no active
-+ * allocations and is not yet activatable: the V2 writer and replay are not
-+ * implemented. The old WAL remains intact and is still protected by its
-+ * checkpoint and witness. */
++/* Convert without truncation for V2 amounts. The old WAL remains protected
++ * by its checkpoint and witness during the staged cutover. */
 +static int _legacy_to_selectable(mq_amount_t value, uint64_t *out)
 +{
 +    if (!out || value.nsec >= MQ_NSEC_PER_SEC ||
@@ -133,20 +131,20 @@
 +{
 +    mq_month_record_t *record;
 +    struct time_tier_balance converted;
-+    uint64_t usage, grants;
++    uint64_t grants;
 +    if (mq_selectable_replay || mq_active)
 +        return -1;
-+    /* Validate every account before changing any in-memory record. */
++    /* Reset unclassified historical consumption, as requested. Preserve
++     * existing approved grants and retain the old WAL for audit/rollback.
++     * Validate all accounts before changing any in-memory record. */
 +    for (record = mq_months; record; record = record->next) {
-+        if (_legacy_to_selectable(record->usage, &usage) ||
-+            _legacy_to_selectable(record->grants, &grants) ||
-+            time_tier_import_legacy(&converted, usage, grants))
++        if (_legacy_to_selectable(record->grants, &grants) ||
++            time_tier_import_legacy(&converted, 0, grants))
 +            return -1;
 +    }
 +    for (record = mq_months; record; record = record->next) {
-+        if (_legacy_to_selectable(record->usage, &usage) ||
-+            _legacy_to_selectable(record->grants, &grants) ||
-+            time_tier_import_legacy(&record->selectable, usage, grants))
++        if (_legacy_to_selectable(record->grants, &grants) ||
++            time_tier_import_legacy(&record->selectable, 0, grants))
 +            return -1;
 +    }
 +    mq_selectable_replay = true;
@@ -222,11 +220,11 @@
  static int _replay_event(char **fields, int field_count)
  {
  	const char *event;
-@@ -868,6 +996,86 @@
+@@ -868,6 +994,86 @@
  	if (field_count < 3)
  		return -1;
  	event = fields[2];
-+	if (!strcmp(event, "CUTOVER2"))
++	if (!strcmp(event, "CUTOVER2_RESET_USAGE"))
 +		return field_count == 3 ? _replay_selectable_cutover() : -1;
 +	if (mq_selectable_replay && !strcmp(event, "PREPARE2")) {
 +		mq_active_record_t *new_active;
@@ -309,7 +307,7 @@
  	if (!strcmp(event, "PREPARE")) {
  		mq_active_record_t *new_active;
  
-@@ -1041,7 +1249,9 @@
+@@ -1041,7 +1247,9 @@
  			goto out;
  		mq_seq = seq;
  	}
@@ -320,7 +318,7 @@
  		goto out;
  	rc = 0;
  out:
-@@ -1357,6 +1567,142 @@
+@@ -1357,6 +1565,142 @@
  	return rc;
  }
  
@@ -463,7 +461,7 @@
  /* All output belongs to one locked ledger state and one supplied timestamp.
   * Failure leaves the caller's output unchanged. It does not reserve GPUs. */
  int monthly_quota_tiers_at(const uid_t *uids, size_t count, uint64_t sec,
-@@ -1374,7 +1720,7 @@
+@@ -1374,7 +1718,7 @@
  	if (count && !snapshot)
  		return -1;
  	pthread_mutex_lock(&mq_lock);
@@ -472,7 +470,7 @@
  		goto out;
  	for (i = 0; i < count; i++) {
  		if (_tier_locked(uids[i], &now, &snapshot[i]))
-@@ -1417,7 +1763,7 @@
+@@ -1417,7 +1761,7 @@
  		return -1;
  	memset(&result, 0, sizeof(result));
  	pthread_mutex_lock(&mq_lock);
@@ -481,7 +479,7 @@
  	    _month_key(&now, &result.month) ||
  	    _project_usage((uint32_t)uid, result.month, &now, &used) ||
  	    _tier_locked(uid, &now, &result.tier))
-@@ -1497,6 +1843,18 @@
+@@ -1497,6 +1841,18 @@
  		_set_pending_reason(job_ptr, "ledger recovering or unavailable");
  		return -1;
  	}
@@ -500,7 +498,7 @@
  	available = _quota_available(job_ptr->user_id, month, &now, true);
  	if (available <= 0) {
  		_set_pending_reason(job_ptr,
-@@ -1577,6 +1935,8 @@
+@@ -1577,6 +1933,8 @@
  	mq_time_t now;
  	uint32_t month;
  	mq_active_record_t *active;
@@ -509,7 +507,7 @@
  
  	if (!job_ptr)
  		return -1;
-@@ -1604,7 +1964,16 @@
+@@ -1604,7 +1962,16 @@
  		pthread_mutex_unlock(&mq_lock);
  		return -1;
  	}
@@ -527,7 +525,7 @@
  		_set_pending_reason(job_ptr, "monthly capacity exhausted");
  		pthread_mutex_unlock(&mq_lock);
  		return -1;
-@@ -1623,10 +1992,16 @@
+@@ -1623,10 +1990,16 @@
  	active->base_gpu = gpu_count;
  	active->gpu_count = gpu_count;
  	active->anchor = now;
@@ -548,7 +546,7 @@
  		xfree(active);
  		_mark_unhealthy("PREPARE fsync failed");
  		_set_pending_reason(job_ptr, "ledger write failure");
-@@ -1730,6 +2105,18 @@
+@@ -1730,6 +2103,18 @@
  	}
  	if (!active->committed) {
  		_mark_unhealthy("release encountered uncommitted allocation");
@@ -567,7 +565,7 @@
  		pthread_mutex_unlock(&mq_lock);
  		return;
  	}
-@@ -1800,6 +2187,33 @@
+@@ -1800,6 +2185,33 @@
  		pthread_mutex_unlock(&mq_lock);
  		return same ? 0 : -1;
  	}
@@ -601,7 +599,7 @@
  	if (_append_event("GRANT|%u|%u|%" PRIu64 "|0|%s|%s", uid32,
  			  month, gpu_seconds, grant_id, actor) ||
  	    _add_grant_memory(uid32, month, grant_id, gpu_seconds, 0, actor)) {
-@@ -1842,6 +2256,15 @@
+@@ -1842,6 +2254,15 @@
  			/* Missing job state does not prove a PREPARE was aborted. */
  			bad = true;
  			continue;
