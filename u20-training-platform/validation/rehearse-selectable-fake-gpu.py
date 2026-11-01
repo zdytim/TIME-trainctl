@@ -24,8 +24,8 @@ import uuid
 INPUT = Path('/opt/time/selectable-input-f417af5')
 HELPER = INPUT/'rehearsal.py'
 EXPECTED_HELPER = 'df2f15b1fd6ffd9af08966a17831cd04120e0bb235ab74eb7d4a1704ac446a8b'
-EXPECTED = {'fake-slurmd':'271d3fe8af8d3f4875f8d15cae3250a3f971e4702f53a8fcb536d0cd84a65598',
-            'fake-slurmstepd':'3756f159a501023ecb6f6689dcd99e3a71a20d6fb6cf60322245c58b3b6f9675'}
+EXPECTED = {'fake-node/slurmd':'271d3fe8af8d3f4875f8d15cae3250a3f971e4702f53a8fcb536d0cd84a65598',
+            'fake-node/slurmstepd':'3756f159a501023ecb6f6689dcd99e3a71a20d6fb6cf60322245c58b3b6f9675'}
 CONTROLLER = Path('/opt/time/slurm19-f417af53729e/sbin/slurmctld')
 CONTROLLER_HASH = '47e8210f486f1889a1cf88613ab4a0b5ecc53a003ebb1bc9ab330809ac9db5eb'
 PLUGIN = '/opt/time/slurm19-f417af53729e/lib/slurm'
@@ -88,7 +88,7 @@ PluginDir={PLUGIN}
 AuthType=auth/munge
 CryptoType=crypto/munge
 SelectType=select/cons_tres
-SelectTypeParameters=CR_Core_Memory
+SelectTypeParameters=CR_CPU_Memory
 SchedulerType=sched/backfill
 ProctrackType=proctrack/linuxproc
 TaskPlugin=task/none
@@ -96,6 +96,7 @@ MpiDefault=none
 AccountingStorageType=accounting_storage/none
 JobCompType=jobcomp/none
 SlurmctldParameters=MonthlyGpuQuota
+SlurmdParameters=config_overrides
 SlurmctldDebug=info
 SlurmdDebug=info
 SlurmctldTimeout=30
@@ -131,7 +132,7 @@ PartitionName=isolated Nodes={node_name} Default=YES MaxTime=00:05:00 State=UP
             except (OSError,RuntimeError,ValueError): pass
             time.sleep(.2)
         else: raise RuntimeError('isolated controller snapshot not ready or fixture wrong')
-        node=start_daemon([str(INPUT/'fake-slurmd'),'-D','-N',node_name,'-f',str(config),'-d',str(INPUT/'fake-slurmstepd')],env)
+        node=start_daemon([str(INPUT/'fake-node/slurmd'),'-D','-N',node_name,'-f',str(config),'-d',str(INPUT/'fake-node/slurmstepd')],env)
         deadline=time.monotonic()+25
         while time.monotonic()<deadline:
             if node.poll() is not None: raise RuntimeError('isolated slurmd exited')
