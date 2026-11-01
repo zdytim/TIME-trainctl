@@ -102,6 +102,39 @@ class ControllerBridge:
                 "active_gpu_count": values[12], "active_allocation_count": values[13],
                 "observed_sec": values[14], "observed_nsec": values[15], "wal_sequence": values[16]}
 
+    def selectable_snapshot(self, uid):
+        """Read a versioned per-tier snapshot; the legacy controller rejects SNAP2.
+
+        Parsing does not prove enforcement has been activated. Callers must
+        independently verify the controller version and cutover before exposing
+        selectable tier capability to clients.
+        """
+        uid = self._uint(uid, 2**32 - 1)
+        fields = self._exchange("SNAP2 %d" % uid).split(" ")
+        if (len(fields) != 18 or fields[0] != "OK" or fields[1] != "2" or
+                any(not re.fullmatch(r"[0-9]+", x) for x in fields[2:])):
+            raise ControllerUnavailable("invalid selectable controller snapshot")
+        values = [int(x) for x in fields[2:]]
+        if any(x > 2**64 - 1 for x in values):
+            raise ControllerUnavailable("selectable controller snapshot overflow")
+        month = values[0]
+        if not 197001 <= month <= 999912 or not 1 <= month % 100 <= 12:
+            raise ControllerUnavailable("invalid selectable snapshot month")
+        if any(values[i] >= 10**9 for i in (2, 4, 6, 8, 10, 12)):
+            raise ControllerUnavailable("invalid selectable snapshot fraction")
+        if values[14] > 2**32 - 1:
+            raise ControllerUnavailable("selectable allocation count overflow")
+        def amount(index):
+            return {"gpu_seconds": values[index], "nanoseconds": values[index + 1]}
+        return {"schema_version": 2, "uid": uid, "month": month,
+                "granted": amount(1),
+                "tiers": {"debug": {"used": amount(3)},
+                          "important": {"used": amount(5)},
+                          "normal": {"used": amount(7)}},
+                "overage": amount(9), "observed_sec": values[11],
+                "observed_nsec": values[12], "wal_sequence": values[13],
+                "active_allocation_count": values[14], "active_gpu_count": values[15]}
+
     def grant(self, uid, month, gpu_seconds, grant_id, actor):
         uid = self._uint(uid, 2**32 - 1)
         month = self._uint(month, 999912)
