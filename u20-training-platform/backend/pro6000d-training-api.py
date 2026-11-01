@@ -320,6 +320,12 @@ class Service:
         user = self.user(ident["uid"])
         if not isinstance(payload, dict):
             raise ApiError(400, "invalid_job", "任务必须是对象")
+        # The legacy controller cannot enforce a user-selected monthly tier.
+        # Reject explicit requests rather than silently accounting them as an
+        # automatically tiered job. Remove only when capability negotiation,
+        # durable tier storage and pre-allocation enforcement are integrated.
+        if "selected_tier" in payload:
+            raise ApiError(409, "selected_tier_unavailable", "手动选择月度额度档位尚未启用")
         name = payload.get("name", "training")
         command = payload.get("command", "")
         qos = payload.get("qos", "normal")
