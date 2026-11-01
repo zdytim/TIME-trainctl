@@ -73,6 +73,7 @@ def main():
     ctl_port,node_port=helper.free_port(),helper.free_port()
     if ctl_port==node_port: raise RuntimeError('isolated ports collide')
     cluster='time-fake-'+uuid.uuid4().hex[:8]
+    node_name=os.uname().nodename
     config=base/'slurm.conf'
     text=f'''ClusterName={cluster}
 SlurmctldHost={os.uname().nodename}(127.0.0.1)
@@ -101,11 +102,11 @@ SlurmctldTimeout=30
 SlurmdTimeout=30
 MessageTimeout=2
 GresTypes=gpu
-NodeName=time-fake-node NodeAddr=127.0.0.1 NodeHostname={os.uname().nodename} CPUs=32 Sockets=1 CoresPerSocket=32 ThreadsPerCore=1 RealMemory=112186 Gres=gpu:1 State=UNKNOWN
-PartitionName=isolated Nodes=time-fake-node Default=YES MaxTime=00:05:00 State=UP
+NodeName={node_name} NodeAddr=127.0.0.1 NodeHostname={node_name} CPUs=32 Sockets=1 CoresPerSocket=32 ThreadsPerCore=1 RealMemory=112186 Gres=gpu:1 State=UNKNOWN
+PartitionName=isolated Nodes={node_name} Default=YES MaxTime=00:05:00 State=UP
 '''
     helper.write_new(config,text.encode(),0o644)
-    helper.write_new(base/'gres.conf',f'NodeName=time-fake-node Name=gpu File={fake}\n'.encode(),0o644)
+    helper.write_new(base/'gres.conf',f'NodeName={node_name} Name=gpu File={fake}\n'.encode(),0o644)
     env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LANG':'C','SLURM_CONF':str(config),
          'LD_LIBRARY_PATH':PLUGIN}
     log=(base/'daemons.log').open('ab',buffering=0)
@@ -130,13 +131,13 @@ PartitionName=isolated Nodes=time-fake-node Default=YES MaxTime=00:05:00 State=U
             except (OSError,RuntimeError,ValueError): pass
             time.sleep(.2)
         else: raise RuntimeError('isolated controller snapshot not ready or fixture wrong')
-        node=start_daemon([str(INPUT/'fake-slurmd'),'-D','-N','time-fake-node','-f',str(config),'-d',str(INPUT/'fake-slurmstepd')],env)
+        node=start_daemon([str(INPUT/'fake-slurmd'),'-D','-N',node_name,'-f',str(config),'-d',str(INPUT/'fake-slurmstepd')],env)
         deadline=time.monotonic()+25
         while time.monotonic()<deadline:
             if node.poll() is not None: raise RuntimeError('isolated slurmd exited')
             try:
-                data=command(['/usr/bin/scontrol','show','node','time-fake-node','-o'])
-                if 'State=IDLE' in data and 'Gres=gpu:1' in data: break
+                data=command(['/usr/bin/scontrol','show','node',node_name,'-o'])
+                if re.search(r'\bState=IDLE(?:\s|$)', data) and 'Gres=gpu:1' in data: break
             except (OSError,subprocess.SubprocessError): pass
             time.sleep(.3)
         else: raise RuntimeError('isolated fake node did not become idle')
@@ -158,7 +159,7 @@ PartitionName=isolated Nodes=time-fake-node Default=YES MaxTime=00:05:00 State=U
             if any('JobState='+s in good for s in ('FAILED','CANCELLED','TIMEOUT','COMPLETED')):
                 raise RuntimeError('allowed job did not reach running: '+good)
             time.sleep(.3)
-        else: raise RuntimeError('allowed job failed to start')
+        else: raise RuntimeError('allowed job failed to start: '+good+'; exhausted: '+bad)
         if 'JobState=PENDING' not in bad or not re.search(r'NodeList=\(null\)',bad):
             raise RuntimeError('exhausted job was allocated or not pending: '+bad)
         if 'AllocTRES=' in bad and not re.search(r'AllocTRES=(?:\(null\)|N/A|cpu=0(?:,|\s))',bad):
