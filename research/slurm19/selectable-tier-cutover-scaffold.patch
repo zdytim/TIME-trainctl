@@ -57,16 +57,17 @@
  	struct mq_month_record *next;
  } mq_month_record_t;
  
-@@ -83,6 +90,8 @@
+@@ -83,6 +90,9 @@
  	uint64_t planned_gpu;
  	uint64_t base_gpu;
  	uint64_t gpu_count; /* GPU resources remain charged while held by Slurm */
++	char marker_id[33]; /* immutable platform job UUID for V2 recovery */
 +	enum time_tier selected_tier; /* V2 only; legacy jobs do not carry this */
 +	enum time_tier current_tier;  /* V2 running allocation cursor */
  	mq_time_t anchor;
  	bool committed;
  	struct mq_active_record *next;
-@@ -97,6 +106,8 @@
+@@ -97,6 +107,8 @@
  static bool mq_healthy;
  /* WAL opening alone is not proof it matches restored Slurm jobs. */
  static bool mq_reconciled;
@@ -75,7 +76,7 @@
  static uint64_t mq_seq;
  static SHA256_CTX mq_wal_digest;
  static uint64_t mq_next_generation;
-@@ -448,6 +459,11 @@
+@@ -448,6 +460,11 @@
  	record = xcalloc(1, sizeof(*record));
  	record->uid = uid;
  	record->month = month;
@@ -87,7 +88,7 @@
  	record->next = mq_months;
  	mq_months = record;
  	return record;
-@@ -581,6 +597,7 @@
+@@ -581,6 +598,7 @@
  	mq_months = NULL;
  	mq_grants = NULL;
  	mq_active = NULL;
@@ -95,7 +96,7 @@
  }
  
  static void _mark_unhealthy(const char *why)
-@@ -615,10 +632,22 @@
+@@ -615,10 +633,22 @@
  	return 0;
  }
  
@@ -118,7 +119,7 @@
  	for (active = mq_active; active; active = active->next) {
  		if (_settle_active(active, now, true))
  			return -1;
-@@ -857,6 +886,108 @@
+@@ -857,6 +887,108 @@
  	return 0;
  }
  
@@ -227,7 +228,7 @@
  static int _replay_event(char **fields, int field_count)
  {
  	const char *event;
-@@ -868,6 +999,86 @@
+@@ -868,6 +1000,88 @@
  	if (field_count < 3)
  		return -1;
  	event = fields[2];
@@ -237,7 +238,8 @@
 +		mq_active_record_t *new_active;
 +		mq_month_record_t *record;
 +		uint32_t selected;
-+		if (field_count != 10 ||
++		if (field_count != 11 || strlen(fields[10]) != 32 ||
++		    strspn(fields[10], "0123456789abcdef") != 32 ||
 +		    _parse_u32(fields[3], &job_id) || _parse_u32(fields[4], &uid) ||
 +		    _parse_u64(fields[5], &generation) || _parse_u64(fields[6], &gpu_count) ||
 +		    _parse_u64(fields[7], &sec) || _parse_u32(fields[8], &nsec) ||
@@ -260,6 +262,7 @@
 +		new_active->gpu_count = gpu_count; new_active->anchor = from;
 +		new_active->selected_tier = (enum time_tier)selected;
 +		new_active->current_tier = (enum time_tier)selected;
++		memcpy(new_active->marker_id, fields[10], sizeof(new_active->marker_id));
 +		new_active->next = mq_active; mq_active = new_active;
 +		mq_next_generation = generation + 1;
 +		return 0;
@@ -314,7 +317,7 @@
  	if (!strcmp(event, "PREPARE")) {
  		mq_active_record_t *new_active;
  
-@@ -998,7 +1209,7 @@
+@@ -998,7 +1212,7 @@
  {
  	FILE *stream;
  	char line[1024];
@@ -323,7 +326,7 @@
  	int read_rc;
  	uint64_t seq;
  	bool header_seen = false;
-@@ -1041,7 +1252,10 @@
+@@ -1041,7 +1255,10 @@
  			goto out;
  		mq_seq = seq;
  	}
@@ -335,7 +338,7 @@
  		goto out;
  	rc = 0;
  out:
-@@ -1357,6 +1571,142 @@
+@@ -1357,6 +1574,142 @@
  	return rc;
  }
  
@@ -478,7 +481,7 @@
  /* All output belongs to one locked ledger state and one supplied timestamp.
   * Failure leaves the caller's output unchanged. It does not reserve GPUs. */
  int monthly_quota_tiers_at(const uid_t *uids, size_t count, uint64_t sec,
-@@ -1374,7 +1724,7 @@
+@@ -1374,7 +1727,7 @@
  	if (count && !snapshot)
  		return -1;
  	pthread_mutex_lock(&mq_lock);
@@ -487,7 +490,7 @@
  		goto out;
  	for (i = 0; i < count; i++) {
  		if (_tier_locked(uids[i], &now, &snapshot[i]))
-@@ -1417,7 +1767,7 @@
+@@ -1417,7 +1770,7 @@
  		return -1;
  	memset(&result, 0, sizeof(result));
  	pthread_mutex_lock(&mq_lock);
@@ -496,7 +499,7 @@
  	    _month_key(&now, &result.month) ||
  	    _project_usage((uint32_t)uid, result.month, &now, &used) ||
  	    _tier_locked(uid, &now, &result.tier))
-@@ -1497,6 +1847,18 @@
+@@ -1497,6 +1850,18 @@
  		_set_pending_reason(job_ptr, "ledger recovering or unavailable");
  		return -1;
  	}
@@ -515,7 +518,7 @@
  	available = _quota_available(job_ptr->user_id, month, &now, true);
  	if (available <= 0) {
  		_set_pending_reason(job_ptr,
-@@ -1577,6 +1939,8 @@
+@@ -1577,6 +1942,8 @@
  	mq_time_t now;
  	uint32_t month;
  	mq_active_record_t *active;
@@ -524,7 +527,7 @@
  
  	if (!job_ptr)
  		return -1;
-@@ -1604,7 +1968,16 @@
+@@ -1604,7 +1971,16 @@
  		pthread_mutex_unlock(&mq_lock);
  		return -1;
  	}
@@ -542,7 +545,7 @@
  		_set_pending_reason(job_ptr, "monthly capacity exhausted");
  		pthread_mutex_unlock(&mq_lock);
  		return -1;
-@@ -1623,10 +1996,16 @@
+@@ -1623,10 +1999,17 @@
  	active->base_gpu = gpu_count;
  	active->gpu_count = gpu_count;
  	active->anchor = now;
@@ -552,10 +555,11 @@
 -			  active->anchor.nsec)) {
 +	active->selected_tier = selected;
 +	active->current_tier = selected;
++	if (mq_selectable_replay) memcpy(active->marker_id, marker_id, sizeof(active->marker_id));
 +	if ((mq_selectable_replay &&
-+	     _append_event("PREPARE2|%u|%u|%" PRIu64 "|%" PRIu64 "|%" PRIu64 "|%u|%u",
++	     _append_event("PREPARE2|%u|%u|%" PRIu64 "|%" PRIu64 "|%" PRIu64 "|%u|%u|%s",
 +			   active->job_id, active->uid, active->generation, active->planned_gpu,
-+			   active->anchor.sec, active->anchor.nsec, (unsigned)selected)) ||
++			   active->anchor.sec, active->anchor.nsec, (unsigned)selected, active->marker_id)) ||
 +	    (!mq_selectable_replay &&
 +	     _append_event("PREPARE|%u|%u|%" PRIu64 "|%" PRIu64 "|%" PRIu64 "|%u",
 +			   active->job_id, active->uid, active->generation, active->planned_gpu,
@@ -563,7 +567,7 @@
  		xfree(active);
  		_mark_unhealthy("PREPARE fsync failed");
  		_set_pending_reason(job_ptr, "ledger write failure");
-@@ -1730,6 +2109,18 @@
+@@ -1730,6 +2113,18 @@
  	}
  	if (!active->committed) {
  		_mark_unhealthy("release encountered uncommitted allocation");
@@ -582,7 +586,7 @@
  		pthread_mutex_unlock(&mq_lock);
  		return;
  	}
-@@ -1800,6 +2191,33 @@
+@@ -1800,6 +2195,33 @@
  		pthread_mutex_unlock(&mq_lock);
  		return same ? 0 : -1;
  	}
@@ -616,7 +620,7 @@
  	if (_append_event("GRANT|%u|%u|%" PRIu64 "|0|%s|%s", uid32,
  			  month, gpu_seconds, grant_id, actor) ||
  	    _add_grant_memory(uid32, month, grant_id, gpu_seconds, 0, actor)) {
-@@ -1810,6 +2228,36 @@
+@@ -1810,6 +2232,36 @@
  	/* _quota_available subtracts usage before adding grants: debt is paid first. */
  	pthread_mutex_unlock(&mq_lock);
  	return 0;
@@ -653,7 +657,7 @@
  }
  
  int monthly_quota_reconcile(List jobs)
-@@ -1842,6 +2290,15 @@
+@@ -1842,6 +2294,16 @@
  			/* Missing job state does not prove a PREPARE was aborted. */
  			bad = true;
  			continue;
@@ -662,7 +666,8 @@
 +			enum time_tier selected;
 +			char marker_id[33];
 +			if (time_parse_job_marker(job_ptr->comment, marker_id, &selected) ||
-+			    selected != active->selected_tier) {
++			    selected != active->selected_tier ||
++			    strcmp(marker_id, active->marker_id)) {
 +				bad = true;
 +				continue;
 +			}
