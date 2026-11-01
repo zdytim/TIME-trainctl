@@ -16,6 +16,7 @@ import datetime as dt
 import grp
 import hashlib
 import json
+import math
 import os
 import pathlib
 import pwd
@@ -219,6 +220,8 @@ class Service:
         columns = {r[1] for r in self.store.db.execute("PRAGMA table_info(jobs)")}
         if "client_request_id" not in columns:
             self.store.db.execute("ALTER TABLE jobs ADD COLUMN client_request_id TEXT")
+        if "selected_tier" not in columns:
+            self.store.db.execute("ALTER TABLE jobs ADD COLUMN selected_tier TEXT")
         self.store.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS jobs_request ON jobs(owner_uid,client_request_id) WHERE client_request_id IS NOT NULL")
 
         self.monthly = MonthlyLedger(self)
@@ -320,12 +323,14 @@ class Service:
         user = self.user(ident["uid"])
         if not isinstance(payload, dict):
             raise ApiError(400, "invalid_job", "任务必须是对象")
-        # The legacy controller cannot enforce a user-selected monthly tier.
-        # Reject explicit requests rather than silently accounting them as an
-        # automatically tiered job. Remove only when capability negotiation,
-        # durable tier storage and pre-allocation enforcement are integrated.
+        selected_tier = payload.get("selected_tier")
         if "selected_tier" in payload:
-            raise ApiError(409, "selected_tier_unavailable", "手动选择月度额度档位尚未启用")
+            if not isinstance(selected_tier, str) or selected_tier not in ("debug", "important", "normal"):
+                raise ApiError(400, "invalid_selected_tier", "请选择有效的月度额度档位")
+            # Never infer selectable support from generic monthly enforcement.
+            # The controller-backed view must explicitly attest this capability.
+            if self.monthly.summary(ident["uid"]).get("selectable_tiers_ready") is not True:
+                raise ApiError(409, "selected_tier_unavailable", "手动选择月度额度档位尚未启用")
         name = payload.get("name", "training")
         command = payload.get("command", "")
         qos = payload.get("qos", "normal")
@@ -375,7 +380,8 @@ class Service:
             raise ApiError(400, "invalid_environment", "环境名只能包含安全路径字符")
         return {"name": str(name), "command": command.strip(), "qos": qos, "gpu": gpu, "cpu": cpu,
                 "memory_mb": mem, "time_minutes": minutes, "workdir": workdir,
-                "output_path": output, "environment": env_name}
+                "output_path": output, "environment": env_name,
+                **({"selected_tier": selected_tier} if "selected_tier" in payload else {})}
 
     def active_usage(self, uid: int) -> Dict[str, int]:
         rows = self.store.db.execute("SELECT requested_gpu,state FROM jobs WHERE owner_uid=?", (uid,)).fetchall()
@@ -674,10 +680,13 @@ class Service:
 
     # ---------- jobs ----------
     def row_job(self, row: sqlite3.Row) -> Dict[str, Any]:
-        return {"name": row["name"], "qos": row["qos"], "gpu": row["requested_gpu"],
-                "cpu": row["requested_cpu"], "memory_mb": row["requested_mem_mb"],
-                "time_minutes": row["requested_minutes"], "workdir": row["workdir"],
-                "environment": row["env_name"], "command": row["command"], "output_path": row["output_path"]}
+        job = {"name": row["name"], "qos": row["qos"], "gpu": row["requested_gpu"],
+               "cpu": row["requested_cpu"], "memory_mb": row["requested_mem_mb"],
+               "time_minutes": row["requested_minutes"], "workdir": row["workdir"],
+               "environment": row["env_name"], "command": row["command"], "output_path": row["output_path"]}
+        if row["selected_tier"] is not None:
+            job["selected_tier"] = row["selected_tier"]
+        return job
 
     def dispatch_job(self, ident: Dict[str, Any], row: sqlite3.Row, job: Dict[str, Any], temporary: bool = False) -> Dict[str, Any]:
         user = self.user(row["owner_uid"])
@@ -696,6 +705,11 @@ class Service:
             with os.fdopen(fd, "w") as fh:
                 fh.write(expected)
                 fh.flush(); os.fsync(fh.fileno())
+        selected = job.get("selected_tier")
+        if selected is not None:
+            if selected not in ("debug", "important", "normal") or self.monthly.summary(user.pw_uid).get("selectable_tiers_ready") is not True:
+                raise ApiError(409, "selected_tier_unavailable", "手动选档控制器不可用，任务保持排队")
+        marker = "pro6000d-job:" + row["id"] + ((":tier=" + selected) if selected is not None else "")
         # Commit the submission intent before the external side effect. A crash
         # or timeout leaves SUBMITTING and is reconciled by unique scheduler name.
         self.store.db.execute("UPDATE jobs SET state='SUBMITTING',reason_code='submitting',reason_text='正在提交调度器',updated_at=? WHERE id=?", (utc_now(), row["id"]))
@@ -703,7 +717,7 @@ class Service:
         # NONE implicitly asks Slurm to collect a login environment through PAM.
         argv = ["sbatch", "--parsable", "--uid", str(user.pw_uid), "--gid", str(job_gid),
                 "--job-name", "p6-" + row["id"], "--partition", self.config.get("partition", "gpu"),
-                "--comment", "pro6000d-job:" + row["id"], "--gres", "gpu:%d" % job["gpu"],
+                "--comment", marker, "--gres", "gpu:%d" % job["gpu"],
                 "--cpus-per-task", str(job["cpu"]), "--mem", "%dM" % job["memory_mb"],
                 "--time", str(job["time_minutes"]), "--chdir", job["workdir"],
                 "--export", "ALL", "--output", job["output_path"], "--error", job["output_path"], str(script)]
@@ -755,6 +769,8 @@ class Service:
                 raise ApiError(400, "invalid_request_id", "请求标识无效")
             prior = self.store.db.execute("SELECT * FROM jobs WHERE owner_uid=? AND client_request_id=?", (uid, request_id)).fetchone()
             if prior:
+                if "selected_tier" in payload and prior["selected_tier"] != payload["selected_tier"]:
+                    raise ApiError(409, "idempotency_conflict", "同一请求编号不能选择不同额度档位")
                 return self.job_json(prior)
         self.tick()
         if not self.scheduler_available() or not self.admission_available():
@@ -780,6 +796,17 @@ class Service:
             job = self.validate_job(ident, payload)
             if job["gpu"] > self.quota(uid)["gpu_limit"]:
                 raise ApiError(409, "permanent_quota_exceeded", "单任务 GPU 请求超过个人上限，请申请临时资源")
+        if "selected_tier" in job:
+            monthly = self.monthly.summary(uid)
+            tiers = monthly.get("tiers") if monthly.get("selectable_tiers_ready") is True else None
+            matches = [t for t in tiers if isinstance(t, dict) and t.get("name") == job["selected_tier"]] if isinstance(tiers, list) else []
+            if len(matches) != 1:
+                raise ApiError(503, "selected_tier_unavailable", "无法确认所选档位余额")
+            remaining = matches[0].get("remaining_gpu_seconds")
+            if isinstance(remaining, bool) or not isinstance(remaining, (int, float)) or not math.isfinite(remaining):
+                raise ApiError(503, "selected_tier_unavailable", "无法确认所选档位余额")
+            if remaining <= 0:
+                raise ApiError(409, "selected_tier_exhausted", "所选档位没有剩余额度，请选择其他档位")
         usage = self.active_usage(uid)
         if usage["active_jobs"] >= self.quota(uid)["active_job_limit"]:
             raise ApiError(409, "active_job_limit", "活动任务数量已满，包括运行和排队任务；请先取消或等待任务结束")
@@ -791,7 +818,7 @@ class Service:
                 changed = db.execute("UPDATE applications SET authorization_used=1,bound_job_id=?,updated_at=? WHERE id=? AND status='APPROVED' AND authorization_used=0 AND bound_job_id IS NULL", (jid, utc_now(), app_id)).rowcount
                 if changed != 1:
                     raise ApiError(409, "authorization_consumed", "批准已被其他请求使用")
-            db.execute("INSERT INTO jobs(id,owner_uid,owner_name,name,state,requested_gpu,requested_cpu,requested_mem_mb,requested_minutes,qos,workdir,env_name,command,output_path,reason_code,reason_text,temporary_application_id,created_at,updated_at,client_request_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (jid, uid, ident["username"], job["name"], "WAITING_QUOTA", job["gpu"], job["cpu"], job["memory_mb"], job["time_minutes"], job["qos"], job["workdir"], job["environment"], job["command"], job["output_path"], "waiting_user_quota", "已入队，等待个人额度与设备资源", app_id, utc_now(), utc_now(), request_id))
+            db.execute("INSERT INTO jobs(id,owner_uid,owner_name,name,state,requested_gpu,requested_cpu,requested_mem_mb,requested_minutes,qos,workdir,env_name,command,output_path,reason_code,reason_text,temporary_application_id,created_at,updated_at,client_request_id,selected_tier) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (jid, uid, ident["username"], job["name"], "WAITING_QUOTA", job["gpu"], job["cpu"], job["memory_mb"], job["time_minutes"], job["qos"], job["workdir"], job["environment"], job["command"], job["output_path"], "waiting_user_quota", "已入队，等待个人额度与设备资源", app_id, utc_now(), utc_now(), request_id, job.get("selected_tier")))
             self.store.audit(uid, ident["username"], "queue", "job", jid, {"temporary_application_id": app_id}, "accepted")
             db.execute("COMMIT")
         except Exception:
