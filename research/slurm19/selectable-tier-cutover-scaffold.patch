@@ -314,6 +314,15 @@
  	if (!strcmp(event, "PREPARE")) {
  		mq_active_record_t *new_active;
  
+@@ -998,7 +1209,7 @@
+ {
+ 	FILE *stream;
+ 	char line[1024];
+-	size_t line_len;
++	size_t line_len = 0;
+ 	int read_rc;
+ 	uint64_t seq;
+ 	bool header_seen = false;
 @@ -1041,7 +1252,10 @@
  			goto out;
  		mq_seq = seq;
