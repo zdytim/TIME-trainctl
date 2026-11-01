@@ -22,6 +22,7 @@ PATCHES = (
     "u20-broker-job-tombstone.patch",
     "u20-broker-selectable-tier.patch",
     "u20-broker-selectable-snapshot.patch",
+    "u20-broker-selected-tier-time-policy.patch",
 )
 
 

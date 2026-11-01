@@ -1,0 +1,24 @@
+--- a/pro6000d-training-api.py
++++ b/pro6000d-training-api.py
+@@ -371,7 +371,9 @@
+             raise ApiError(400, "invalid_resource", "资源请求超出接口允许范围")
+         if minutes < 1 or minutes > int(self.config.get("max_job_minutes", 4320)):
+             raise ApiError(400, "cluster_time_limit", "时限超出测试节点允许的最大值")
+-        if not temporary and minutes > int(self.qos[qos]["max_minutes"]):
++        # Selected monthly tiers are GPU-hour budgets, not per-job time tiers.
++        # A separate cluster-wide max_job_minutes still applies to every job.
++        if not temporary and selected_tier is None and minutes > int(self.qos[qos]["max_minutes"]):
+             raise ApiError(400, "time_limit_exceeded", "实际时限超过所选档位的单作业上限")
+         capacity = self.config.get("capacity", {})
+         if gpu > int(capacity.get("gpu", self.config.get("max_requested_gpu", 64))) or cpu > int(capacity.get("cpu", os.cpu_count() or 1)) or mem > int(capacity.get("memory_mb", 1048576)):
+@@ -772,7 +774,9 @@
+                     self.store.db.execute("UPDATE jobs SET state='EXPIRED',reason_code='approval_expired',reason_text='批准在运行前过期，需重新申请',finished_at=?,updated_at=? WHERE id=?", (utc_now(), utc_now(), row["id"]))
+                     continue
+                 cap = max(quota["gpu_limit"], job["gpu"]) if temporary else quota["gpu_limit"]
+-                if not temporary and (job["gpu"] > quota["gpu_limit"] or job["time_minutes"] > int(self.qos[job["qos"]]["max_minutes"])):
++                legacy_time_exceeded = (job.get("selected_tier") is None and
++                                        job["time_minutes"] > int(self.qos[job["qos"]]["max_minutes"]))
++                if not temporary and (job["gpu"] > quota["gpu_limit"] or legacy_time_exceeded):
+                     self.store.db.execute("UPDATE jobs SET reason_code='policy_changed',reason_text='规则已变更，任务超过当前额度或档位时限；请取消后重新申请' WHERE id=?", (row["id"],))
+                     continue
+                 if usage["gpu"] + job["gpu"] > cap or usage["concurrent_jobs"] >= quota["concurrent_job_limit"]:
