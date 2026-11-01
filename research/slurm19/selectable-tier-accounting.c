@@ -1,0 +1,54 @@
+/* Candidate arithmetic only: this is not a scheduler or an online ledger. */
+#include "selectable-tier-accounting.h"
+#include <stddef.h>
+#include <stdint.h>
+
+static int valid(const struct time_tier_balance *balance)
+{
+    unsigned i;
+    if (!balance) return 0;
+    if (balance->overage && balance->used[TIME_NORMAL] != balance->limit[TIME_NORMAL]) return 0;
+    for (i = 0; i < TIME_TIER_COUNT; i++)
+        if (balance->used[i] > balance->limit[i]) return 0;
+    return 1;
+}
+
+int time_tier_eligible(const struct time_tier_balance *balance, enum time_tier selected)
+{
+    if (!valid(balance) || (unsigned)selected >= TIME_TIER_COUNT) return -1;
+    return balance->used[selected] < balance->limit[selected];
+}
+
+int time_tier_charge(struct time_tier_balance *balance, enum time_tier selected,
+                     uint64_t gpu_nanoseconds)
+{
+    struct time_tier_balance next;
+    unsigned i;
+    if (!valid(balance) || (unsigned)selected >= TIME_TIER_COUNT) return -1;
+    next = *balance;
+    for (i = (unsigned)selected; i < TIME_TIER_COUNT && gpu_nanoseconds; i++) {
+        uint64_t available = next.limit[i] - next.used[i];
+        uint64_t charge = gpu_nanoseconds < available ? gpu_nanoseconds : available;
+        next.used[i] += charge;
+        gpu_nanoseconds -= charge;
+    }
+    if (UINT64_MAX - next.overage < gpu_nanoseconds) return -1;
+    next.overage += gpu_nanoseconds;
+    *balance = next;
+    return 0;
+}
+
+int time_tier_add_normal(struct time_tier_balance *balance, uint64_t grant)
+{
+    struct time_tier_balance next;
+    uint64_t offset;
+    if (!valid(balance) || !grant || UINT64_MAX - balance->limit[TIME_NORMAL] < grant)
+        return -1;
+    next = *balance;
+    next.limit[TIME_NORMAL] += grant;
+    offset = next.overage < grant ? next.overage : grant;
+    next.used[TIME_NORMAL] += offset;
+    next.overage -= offset;
+    *balance = next;
+    return 0;
+}
