@@ -26,6 +26,7 @@ PLATFORM_MANIFEST_SHA = '986b1f8d94691625ae4f3b6b84134af140c0bfc581f9c2ff51ef5ba
 PLATFORM_ARCHIVE_SHA = '185bb0b7f08f867b933f82df62f983bba7a28e5268b91a25a9ee6ddc0075dc4a'
 BASELINE = {
     '/etc/systemd/system/slurmctld.service.d/time-monthly.conf': 'a1425b14dd252dc8491f6332da2027287992f687f2f7d2d9adc7babb1ff30689',
+    '/etc/systemd/system/pro6000d-training.service.d/time-maintenance.conf': 'f2d32e2a11e6a15b069fbd7faf5ee41737e520bff245d0c762fb82ebe8b51233',
     '/usr/local/lib/pro6000d-training/pro6000d-training-api.py': '24afd69cff5eac856f2ccaaf8a97b95c1823c911c83f40338745cd4ab813e821',
     '/usr/local/lib/pro6000d-training/controller_bridge.py': '30ac4668f6ea6f0a413f4a4a834b27d42c5db069900600058d18da58e2b04a70',
     '/usr/local/lib/pro6000d-training/controller_view.py': '10be510b5bee9afaec955293dbff499140e099ff612eed1186e7e96e299a637d',
@@ -119,10 +120,21 @@ def main():
     controller_files=validate_release(); platform_files=validate_platform()
     for service in ('slurmctld','slurmd','pro6000d-training'):
         if command(['/usr/bin/systemctl','is-active',service])!='active': raise ValueError('inactive service: '+service)
+    unit=command(['/usr/bin/systemctl','show','pro6000d-training','-p','LoadState','-p','NeedDaemonReload','-p','DropInPaths'])
+    fields=dict(line.split('=',1) for line in unit.splitlines() if '=' in line)
+    expected_dropins={'/etc/systemd/system/pro6000d-training.service.d/slurm.conf',
+                      '/etc/systemd/system/pro6000d-training.service.d/time-maintenance.conf'}
+    if (fields.get('LoadState')!='loaded' or fields.get('NeedDaemonReload')!='no' or
+        set(fields.get('DropInPaths','').split())!=expected_dropins):
+        raise ValueError('maintenance systemd configuration not loaded as expected')
     pid=int(command(['/usr/bin/systemctl','show','slurmctld','-p','MainPID','--value']))
     if pid <= 0 or os.readlink('/proc/%d/exe'%pid)!=LIVE_CONTROLLER:
         raise ValueError('unexpected live controller')
     env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LANG':'C','SLURM_CONF':'/etc/slurm-llnl/slurm.conf'}
+    config_text=command(['/usr/bin/scontrol','show','config'],env)
+    values={k.strip():v.strip() for line in config_text.splitlines() if '=' in line for k,v in [line.split('=',1)]}
+    if values.get('JobSubmitPlugins')!='lua' or values.get('SlurmctldParameters')!='MonthlyGpuQuota':
+        raise ValueError('unexpected scheduler submit gate or quota configuration')
     if command(['/usr/bin/squeue','-h','-o','%i'],env): raise ValueError('Slurm jobs exist')
     settings=json.loads(trusted_file(CONFIG)); monthly=settings.get('monthly_controller',{})
     if not isinstance(monthly,dict) or not all(monthly.get(k) is True for k in ('read_enabled','grant_enabled','activation_verified')) or monthly.get('selectable_activation_verified') is True:
