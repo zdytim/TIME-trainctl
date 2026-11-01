@@ -1,0 +1,54 @@
+--- a/pro6000d-training-api.py
++++ b/pro6000d-training-api.py
+@@ -36,7 +36,7 @@
+ import xml.etree.ElementTree as ET
+ from collections import deque
+ from controller_bridge import ControllerBridge, ControllerUnavailable, ControllerOutcomeUnknown
+-from controller_view import snapshot_view, unavailable
++from controller_view import snapshot_view, selectable_snapshot_view, unavailable
+ from typing import Any, Dict, Iterable, List, Optional, Tuple
+ 
+ 
+@@ -346,7 +346,7 @@
+                 raise ApiError(400, "invalid_selected_tier", "请选择有效的月度额度档位")
+             # Never infer selectable support from generic monthly enforcement.
+             # The controller-backed view must explicitly attest this capability.
+-            if self.monthly.summary(ident["uid"]).get("selectable_tiers_ready") is not True:
++            if self.controller_monthly_snapshot(ident["uid"]).get("selectable_tiers_ready") is not True:
+                 raise ApiError(409, "selected_tier_unavailable", "手动选择月度额度档位尚未启用")
+         name = payload.get("name", "training")
+         command = payload.get("command", "")
+@@ -723,7 +723,7 @@
+                 fh.flush(); os.fsync(fh.fileno())
+         selected = job.get("selected_tier")
+         if selected is not None:
+-            if selected not in ("debug", "important", "normal") or self.monthly.summary(user.pw_uid).get("selectable_tiers_ready") is not True:
++            if selected not in ("debug", "important", "normal") or self.controller_monthly_snapshot(user.pw_uid).get("selectable_tiers_ready") is not True:
+                 raise ApiError(409, "selected_tier_unavailable", "手动选档控制器不可用，任务保持排队")
+         marker = "pro6000d-job:" + row["id"] + ((":tier=" + selected) if selected is not None else "")
+         # Commit the submission intent before the external side effect. A crash
+@@ -825,7 +825,7 @@
+             if job["gpu"] > self.quota(uid)["gpu_limit"]:
+                 raise ApiError(409, "permanent_quota_exceeded", "单任务 GPU 请求超过个人上限，请申请临时资源")
+         if "selected_tier" in job:
+-            monthly = self.monthly.summary(uid)
++            monthly = self.controller_monthly_snapshot(uid)
+             tiers = monthly.get("tiers") if monthly.get("selectable_tiers_ready") is True else None
+             matches = [t for t in tiers if isinstance(t, dict) and t.get("name") == job["selected_tier"]] if isinstance(tiers, list) else []
+             if len(matches) != 1:
+@@ -1260,7 +1260,14 @@
+             controller = pwd.getpwnam(config.get("controller_user", "slurm"))
+             bridge = ControllerBridge(config.get("socket_path", "/var/lib/slurm/ctld/time-quota.sock"),
+                                       controller.pw_uid)
+-            result = snapshot_view(bridge.snapshot(uid), verified)
++            if config.get("selectable_activation_verified") is True:
++                # Explicit cutover proof and a fresh V2 snapshot are both
++                # required. Never fall back to legacy accounting after cutover.
++                if not verified:
++                    return unavailable(False)
++                result = selectable_snapshot_view(bridge.selectable_snapshot(uid), True)
++            else:
++                result = snapshot_view(bridge.snapshot(uid), verified)
+             result["request_available"] = verified and config.get("grant_enabled") is True
+             return result
+         except (KeyError, ControllerUnavailable, ValueError, TypeError):

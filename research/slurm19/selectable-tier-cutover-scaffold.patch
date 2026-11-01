@@ -320,7 +320,7 @@
  		goto out;
  	rc = 0;
  out:
-@@ -1357,6 +1567,103 @@
+@@ -1357,6 +1567,142 @@
  	return rc;
  }
  
@@ -421,10 +421,49 @@
 +	return rc;
 +}
 +
++int monthly_quota_snapshot2(uid_t uid, monthly_quota_snapshot2_t *out)
++{
++	monthly_quota_snapshot2_t result;
++	struct time_tier_balance balance;
++	mq_month_record_t *record;
++	mq_active_record_t *active;
++	mq_time_t now;
++	unsigned i;
++	int rc = -1;
++	if (!out || (uid_t)(uint32_t)uid != uid) return -1;
++	memset(&result, 0, sizeof(result));
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || !mq_reconciled || !mq_selectable_replay ||
++	    _now(&now) || _month_key(&now, &result.month) ||
++	    _project_selectable_user((uint32_t)uid, &now, &balance)) goto out;
++	record = _find_month((uint32_t)uid, result.month, false);
++	if (record) { result.granted.sec = record->grants.sec; result.granted.nsec = record->grants.nsec; }
++	for (i = 0; i < TIME_TIER_COUNT; i++) {
++		result.used[i].sec = balance.used[i] / MQ_NSEC_PER_SEC;
++		result.used[i].nsec = balance.used[i] % MQ_NSEC_PER_SEC;
++	}
++	result.overage.sec = balance.overage / MQ_NSEC_PER_SEC;
++	result.overage.nsec = balance.overage % MQ_NSEC_PER_SEC;
++	for (active = mq_active; active; active = active->next) {
++		if (active->uid != (uint32_t)uid) continue;
++		if (!active->committed || result.active_allocation_count == UINT32_MAX ||
++		    UINT64_MAX - result.active_gpu_count < active->gpu_count) goto out;
++		result.active_allocation_count++;
++		result.active_gpu_count += active->gpu_count;
++	}
++	result.observed_sec = now.sec; result.observed_nsec = now.nsec;
++	result.wal_sequence = mq_seq;
++	*out = result;
++	rc = 0;
++out:
++	pthread_mutex_unlock(&mq_lock);
++	return rc;
++}
++
  /* All output belongs to one locked ledger state and one supplied timestamp.
   * Failure leaves the caller's output unchanged. It does not reserve GPUs. */
  int monthly_quota_tiers_at(const uid_t *uids, size_t count, uint64_t sec,
-@@ -1497,6 +1804,18 @@
+@@ -1497,6 +1843,18 @@
  		_set_pending_reason(job_ptr, "ledger recovering or unavailable");
  		return -1;
  	}
@@ -443,7 +482,7 @@
  	available = _quota_available(job_ptr->user_id, month, &now, true);
  	if (available <= 0) {
  		_set_pending_reason(job_ptr,
-@@ -1577,6 +1896,8 @@
+@@ -1577,6 +1935,8 @@
  	mq_time_t now;
  	uint32_t month;
  	mq_active_record_t *active;
@@ -452,7 +491,7 @@
  
  	if (!job_ptr)
  		return -1;
-@@ -1604,7 +1925,16 @@
+@@ -1604,7 +1964,16 @@
  		pthread_mutex_unlock(&mq_lock);
  		return -1;
  	}
@@ -470,7 +509,7 @@
  		_set_pending_reason(job_ptr, "monthly capacity exhausted");
  		pthread_mutex_unlock(&mq_lock);
  		return -1;
-@@ -1623,10 +1953,16 @@
+@@ -1623,10 +1992,16 @@
  	active->base_gpu = gpu_count;
  	active->gpu_count = gpu_count;
  	active->anchor = now;
@@ -491,7 +530,7 @@
  		xfree(active);
  		_mark_unhealthy("PREPARE fsync failed");
  		_set_pending_reason(job_ptr, "ledger write failure");
-@@ -1730,6 +2066,18 @@
+@@ -1730,6 +2105,18 @@
  	}
  	if (!active->committed) {
  		_mark_unhealthy("release encountered uncommitted allocation");
@@ -510,7 +549,7 @@
  		pthread_mutex_unlock(&mq_lock);
  		return;
  	}
-@@ -1799,6 +2147,33 @@
+@@ -1799,6 +2186,33 @@
  			   !strcmp(existing->actor, actor);
  		pthread_mutex_unlock(&mq_lock);
  		return same ? 0 : -1;
@@ -546,18 +585,67 @@
  			  month, gpu_seconds, grant_id, actor) ||
 --- a/src/slurmctld/monthly_quota.h
 +++ b/src/slurmctld/monthly_quota.h
-@@ -55,6 +55,11 @@
+@@ -44,6 +44,15 @@
+ 	uint32_t active_allocation_count;
+ } monthly_quota_snapshot_t;
+ 
++/* Version 2 is only available after a verified selectable ledger cutover. */
++typedef struct {
++	uint32_t month, active_allocation_count;
++	uint64_t active_gpu_count, observed_sec, wal_sequence;
++	uint32_t observed_nsec;
++	monthly_quota_amount_t granted, used[3], overage;
++} monthly_quota_snapshot2_t;
++extern int monthly_quota_snapshot2(uid_t uid, monthly_quota_snapshot2_t *out);
++
+ /* Call only inside slurmctld. Future transport must authenticate the caller.
+  * Returns -1 and leaves output unchanged when disabled/unhealthy/unknown. */
+ extern int monthly_quota_inherited_witness_fd(void);
+@@ -54,6 +63,11 @@
+ extern int monthly_quota_tiers_at(const uid_t *uids, size_t count,
  				  uint64_t sec, uint32_t nsec,
  				  monthly_quota_tier_t *tiers);
- 
++
 +/* Per-job ordering snapshot for V2 selected tiers; NULL represents CPU-only. */
 +extern int monthly_quota_jobs_tiers_at(struct job_record *const *jobs, size_t count,
 +                                       uint64_t sec, uint32_t nsec,
 +                                       monthly_quota_tier_t *tiers);
-+
+ 
  /* Single-user convenience wrapper. Returns -1 for disabled/unknown state. */
  extern int monthly_quota_tier_at(uid_t uid, uint64_t sec, uint32_t nsec,
- 				 monthly_quota_tier_t *tier);
+--- a/src/slurmctld/monthly_quota_control.c
++++ b/src/slurmctld/monthly_quota_control.c
+@@ -54,6 +54,7 @@
+ 	uint64_t uid, month, sec;
+ 	int rc = -1;
+ 	monthly_quota_snapshot_t view;
++	monthly_quota_snapshot2_t view2;
+ 	slurmctld_lock_t config_lock = {READ_LOCK, NO_LOCK, NO_LOCK, NO_LOCK, NO_LOCK};
+ 	slurmctld_lock_t grant_lock = {READ_LOCK, WRITE_LOCK, NO_LOCK, NO_LOCK, NO_LOCK};
+ 
+@@ -87,6 +88,22 @@
+ 				 view.remaining.sec, view.remaining.nsec, view.overage.sec, view.overage.nsec,
+ 				 view.active_gpu_count, view.active_allocation_count,
+ 				 view.observed_sec, view.observed_nsec, view.wal_sequence);
++		}
++	} else if (count == 2 && !strcmp(part[0], "SNAP2")) {
++		lock_slurmctld(config_lock);
++		rc = monthly_quota_snapshot2((uid_t)uid, &view2);
++		unlock_slurmctld(config_lock);
++		if (!rc) {
++			snprintf(reply, sizeof(reply),
++				 "OK 2 %u %" PRIu64 " %u %" PRIu64 " %u %" PRIu64 " %u "
++				 "%" PRIu64 " %u %" PRIu64 " %u %" PRIu64 " %u %" PRIu64 " %u %" PRIu64 "\n",
++				 view2.month, view2.granted.sec, view2.granted.nsec,
++				 view2.used[0].sec, view2.used[0].nsec,
++				 view2.used[1].sec, view2.used[1].nsec,
++				 view2.used[2].sec, view2.used[2].nsec,
++				 view2.overage.sec, view2.overage.nsec,
++				 view2.observed_sec, view2.observed_nsec, view2.wal_sequence,
++				 view2.active_allocation_count, view2.active_gpu_count);
+ 		}
+ 	} else if (count == 6 && !strcmp(part[0], "GRANT") &&
+ 		   !number(part[2], &month) && month <= UINT32_MAX &&
 --- a/src/slurmctld/job_scheduler.c
 +++ b/src/slurmctld/job_scheduler.c
 @@ -1923,7 +1923,7 @@
