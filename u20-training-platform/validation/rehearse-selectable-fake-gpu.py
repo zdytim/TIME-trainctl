@@ -106,7 +106,8 @@ PartitionName=isolated Nodes=time-fake-node Default=YES MaxTime=00:05:00 State=U
 '''
     helper.write_new(config,text.encode(),0o644)
     helper.write_new(base/'gres.conf',f'NodeName=time-fake-node Name=gpu File={fake}\n'.encode(),0o644)
-    env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LANG':'C','SLURM_CONF':str(config)}
+    env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LANG':'C','SLURM_CONF':str(config),
+         'LD_LIBRARY_PATH':PLUGIN}
     log=(base/'daemons.log').open('ab',buffering=0)
     children=[]; fd=-1
     print('isolated fake GPU evidence:',base,flush=True)
