@@ -111,9 +111,13 @@ def main():
                         help="u20 layout embeds prospective system paths; never installs or starts it")
     parser.add_argument("--dependency-root", type=pathlib.Path,
                         help="optional build-only root containing munge and lua51 include/lib directories")
+    parser.add_argument("--experimental-selectable", action="store_true",
+                        help="compile the disabled-by-default selectable V2 path for isolated validation only")
     args = parser.parse_args()
     if args.layout != "isolated" and not args.build:
         raise ValueError("a non-isolated layout requires --build")
+    if args.experimental_selectable and not args.build:
+        raise ValueError("the experimental selectable flag requires --build")
     repo = pathlib.Path(__file__).resolve().parents[2]
     archive = args.archive.resolve(strict=True)
     output = args.output.absolute()
@@ -145,6 +149,12 @@ def main():
                      "--sysconfdir=" + sysconfdir,
                      "--localstatedir=" + localstatedir]
         env = os.environ.copy()
+        cppflags = env.get("CPPFLAGS", "")
+        if "TIME_ENABLE_SELECTABLE_V2" in cppflags:
+            raise ValueError("set selectable V2 only using --experimental-selectable")
+        if args.experimental_selectable:
+            env["CPPFLAGS"] = (cppflags + " -DTIME_ENABLE_SELECTABLE_V2=1").strip()
+            print("WARNING: selectable V2 experimental build; no deployment or readiness implied", flush=True)
         if args.dependency_root:
             deps = args.dependency_root.resolve(strict=True)
             if any(c.isspace() for c in str(deps)):
