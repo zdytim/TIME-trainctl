@@ -27,6 +27,21 @@ int time_tier_charge(struct time_tier_balance *balance, enum time_tier *current,
 /* A normal-tier grant first offsets overage. Returns -1 without mutation on
  * malformed state/overflow; durable idempotency is the caller's obligation. */
 int time_tier_add_normal(struct time_tier_balance *balance, uint64_t grant);
+/* Candidate boundary calculation for one user's concurrently running jobs.
+ * Rates are allocated GPU counts; current tiers represent running jobs, not
+ * new submissions. Returns the earliest wall-nanosecond where a shared tier
+ * can be depleted, capped by horizon. Does not mutate balances or jobs.
+ * The boundary can split GPU-nanoseconds and callers must assign the remainder
+ * deterministically before moving jobs; this helper does not perform charging. */
+struct time_running_allocation {
+    enum time_tier current;
+    uint64_t gpu_count;
+};
+int time_tier_next_boundary(const struct time_tier_balance *balance,
+                            const struct time_running_allocation *jobs,
+                            unsigned count, uint64_t horizon_ns,
+                            uint64_t *boundary_ns, int *depletes);
+
 /* Import a verified, settled legacy monthly total and grants using the old
  * debug -> important -> normal ordering. Caller must prove a consistent
  * controller snapshot, preserve the original ledger, and prevent live writes.

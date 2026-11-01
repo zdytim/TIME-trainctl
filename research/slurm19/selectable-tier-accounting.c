@@ -76,3 +76,39 @@ int time_tier_import_legacy(struct time_tier_balance *out,
     *out = imported;
     return 0;
 }
+
+int time_tier_next_boundary(const struct time_tier_balance *balance,
+                            const struct time_running_allocation *jobs,
+                            unsigned count, uint64_t horizon_ns,
+                            uint64_t *boundary_ns, int *depletes)
+{
+    uint64_t rates[TIME_TIER_COUNT] = {0, 0, 0};
+    uint64_t earliest = horizon_ns;
+    unsigned j, t;
+    int found = 0;
+    if (!valid(balance) || (count && !jobs) || !boundary_ns || !depletes)
+        return -1;
+    for (j = 0; j < count; j++) {
+        unsigned tier = (unsigned)jobs[j].current;
+        if (tier >= TIME_TIER_COUNT || !jobs[j].gpu_count) return -1;
+        while (tier < TIME_NORMAL && balance->used[tier] == balance->limit[tier])
+            tier++;
+        /* Fully depleted normal use is overage and has no next tier boundary. */
+        if (balance->used[tier] == balance->limit[tier]) continue;
+        if (UINT64_MAX - rates[tier] < jobs[j].gpu_count) return -1;
+        rates[tier] += jobs[j].gpu_count;
+    }
+    for (t = 0; t < TIME_TIER_COUNT; t++) {
+        uint64_t remaining, delta;
+        if (!rates[t]) continue;
+        remaining = balance->limit[t] - balance->used[t];
+        delta = remaining / rates[t] + (remaining % rates[t] != 0);
+        if (delta <= earliest) {
+            earliest = delta;
+            found = 1;
+        }
+    }
+    *boundary_ns = earliest;
+    *depletes = found;
+    return 0;
+}
