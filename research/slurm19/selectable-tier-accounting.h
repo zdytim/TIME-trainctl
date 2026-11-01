@@ -27,4 +27,11 @@ int time_tier_charge(struct time_tier_balance *balance, enum time_tier *current,
 /* A normal-tier grant first offsets overage. Returns -1 without mutation on
  * malformed state/overflow; durable idempotency is the caller's obligation. */
 int time_tier_add_normal(struct time_tier_balance *balance, uint64_t grant);
+/* Import a verified, settled legacy monthly total and grants using the old
+ * debug -> important -> normal ordering. Caller must prove a consistent
+ * controller snapshot, preserve the original ledger, and prevent live writes.
+ * On failure *out is unchanged; this function does not migrate a database. */
+int time_tier_import_legacy(struct time_tier_balance *out,
+                            uint64_t used_gpu_nanoseconds,
+                            uint64_t grant_gpu_nanoseconds);
 #endif

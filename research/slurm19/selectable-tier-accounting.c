@@ -56,3 +56,23 @@ int time_tier_add_normal(struct time_tier_balance *balance, uint64_t grant)
     *balance = next;
     return 0;
 }
+
+int time_tier_import_legacy(struct time_tier_balance *out,
+                            uint64_t used_gpu_nanoseconds,
+                            uint64_t grant_gpu_nanoseconds)
+{
+    const uint64_t ns_per_hour = UINT64_C(3600) * UINT64_C(1000000000);
+    struct time_tier_balance imported = {
+        .limit = {UINT64_C(5) * ns_per_hour, UINT64_C(100) * ns_per_hour,
+                  UINT64_C(500) * ns_per_hour},
+        .used = {0, 0, 0}, .overage = 0
+    };
+    enum time_tier current = TIME_DEBUG;
+    if (!out || UINT64_MAX - imported.limit[TIME_NORMAL] < grant_gpu_nanoseconds)
+        return -1;
+    imported.limit[TIME_NORMAL] += grant_gpu_nanoseconds;
+    if (time_tier_charge(&imported, &current, used_gpu_nanoseconds))
+        return -1;
+    *out = imported;
+    return 0;
+}
