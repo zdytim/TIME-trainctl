@@ -320,7 +320,111 @@
  		goto out;
  	rc = 0;
  out:
-@@ -1497,6 +1707,18 @@
+@@ -1357,6 +1567,103 @@
+ 	return rc;
+ }
+ 
++/* Project one user's V2 balances without writing WAL or mutating live state.
++ * The caller holds mq_lock; V2 active allocations share a settled anchor. */
++static int _project_selectable_user(uint32_t uid, const mq_time_t *now,
++                                    struct time_tier_balance *out)
++{
++	mq_active_record_t *a;
++	mq_month_record_t *record;
++	struct time_active_job *jobs = NULL;
++	struct time_tier_balance balance;
++	mq_time_t cursor, boundary, next;
++	mq_amount_t duration;
++	uint64_t nanos;
++	uint32_t month;
++	unsigned count = 0, i = 0;
++	int rc = -1;
++
++	for (a = mq_active; a; a = a->next)
++		if (a->uid == uid && ++count > 4096) return -1;
++	if (!count) {
++		if (_month_key(now, &month)) return -1;
++		record = _find_month(uid, month, false);
++		return record ? (*out = record->selectable, 0) :
++			time_tier_import_legacy(out, 0, 0);
++	}
++	jobs = xcalloc(count, sizeof(*jobs));
++	cursor = mq_active->anchor;
++	for (a = mq_active; a; a = a->next) {
++		if (!a->committed || _time_cmp(&a->anchor, &cursor) ||
++		    _time_cmp(&cursor, now) > 0) goto out;
++		if (a->uid != uid) continue;
++		jobs[i].job_id = a->job_id; jobs[i].generation = a->generation;
++		jobs[i].current = a->current_tier; jobs[i].gpu_count = a->gpu_count;
++		i++;
++	}
++	qsort(jobs, count, sizeof(*jobs), _compare_tier_jobs);
++	while (_time_cmp(&cursor, now) < 0) {
++		if (_month_key(&cursor, &month) || _next_month_boundary(&cursor, &boundary)) goto out;
++		next = _time_cmp(&boundary, now) < 0 ? boundary : *now;
++		if (_duration(&cursor, &next, &duration) || _legacy_to_selectable(duration, &nanos)) goto out;
++		record = _find_month(uid, month, false);
++		if (record) balance = record->selectable;
++		else if (time_tier_import_legacy(&balance, 0, 0)) goto out;
++		if (time_tier_advance(&balance, jobs, count, nanos)) goto out;
++		cursor = next;
++		/* A boundary belongs to the following month. */
++		if (_time_cmp(&cursor, now) == 0 && _time_cmp(&cursor, &boundary) != 0) {
++			*out = balance; rc = 0; goto out;
++		}
++	}
++	if (_month_key(now, &month)) goto out;
++	record = _find_month(uid, month, false);
++	if (record) *out = record->selectable;
++	else if (time_tier_import_legacy(out, 0, 0)) goto out;
++	rc = 0;
++out:
++	xfree(jobs);
++	return rc;
++}
++
++/* Freeze per-job selected tier and current eligibility for one sorting pass.
++ * The authoritative allocation gate is checked separately under mq_lock. */
++int monthly_quota_jobs_tiers_at(struct job_record *const *jobs, size_t count,
++                                uint64_t sec, uint32_t nsec,
++                                monthly_quota_tier_t *tiers)
++{
++	mq_time_t now = { .sec = sec, .nsec = nsec };
++	monthly_quota_tier_t *snapshot;
++	struct time_tier_balance balance;
++	enum time_tier selected;
++	char marker[33];
++	size_t i;
++	int eligible, rc = -1;
++	if (nsec >= MQ_NSEC_PER_SEC || (count && (!jobs || !tiers)) ||
++	    count > SIZE_MAX / sizeof(*snapshot)) return -1;
++	snapshot = count ? malloc(count * sizeof(*snapshot)) : NULL;
++	if (count && !snapshot) return -1;
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || !mq_reconciled) goto out;
++	for (i = 0; i < count; i++) {
++		if (!jobs[i]) { snapshot[i] = MONTHLY_QUOTA_NORMAL; continue; }
++		if (!mq_selectable_replay) {
++			if (_tier_locked(jobs[i]->user_id, &now, &snapshot[i])) goto out;
++			continue;
++		}
++		if (time_parse_job_marker(jobs[i]->comment, marker, &selected) ||
++		    _project_selectable_user(jobs[i]->user_id, &now, &balance) ||
++		    (eligible = time_tier_eligible(&balance, selected)) < 0) goto out;
++		snapshot[i] = eligible ? (monthly_quota_tier_t)selected : MONTHLY_QUOTA_EXHAUSTED;
++	}
++	if (count) memcpy(tiers, snapshot, count * sizeof(*tiers));
++	rc = 0;
++out:
++	pthread_mutex_unlock(&mq_lock);
++	free(snapshot);
++	return rc;
++}
++
+ /* All output belongs to one locked ledger state and one supplied timestamp.
+  * Failure leaves the caller's output unchanged. It does not reserve GPUs. */
+ int monthly_quota_tiers_at(const uid_t *uids, size_t count, uint64_t sec,
+@@ -1497,6 +1804,18 @@
  		_set_pending_reason(job_ptr, "ledger recovering or unavailable");
  		return -1;
  	}
@@ -339,7 +443,7 @@
  	available = _quota_available(job_ptr->user_id, month, &now, true);
  	if (available <= 0) {
  		_set_pending_reason(job_ptr,
-@@ -1577,6 +1799,8 @@
+@@ -1577,6 +1896,8 @@
  	mq_time_t now;
  	uint32_t month;
  	mq_active_record_t *active;
@@ -348,7 +452,7 @@
  
  	if (!job_ptr)
  		return -1;
-@@ -1604,7 +1828,16 @@
+@@ -1604,7 +1925,16 @@
  		pthread_mutex_unlock(&mq_lock);
  		return -1;
  	}
@@ -366,7 +470,7 @@
  		_set_pending_reason(job_ptr, "monthly capacity exhausted");
  		pthread_mutex_unlock(&mq_lock);
  		return -1;
-@@ -1623,10 +1856,16 @@
+@@ -1623,10 +1953,16 @@
  	active->base_gpu = gpu_count;
  	active->gpu_count = gpu_count;
  	active->anchor = now;
@@ -387,7 +491,7 @@
  		xfree(active);
  		_mark_unhealthy("PREPARE fsync failed");
  		_set_pending_reason(job_ptr, "ledger write failure");
-@@ -1730,6 +1969,18 @@
+@@ -1730,6 +2066,18 @@
  	}
  	if (!active->committed) {
  		_mark_unhealthy("release encountered uncommitted allocation");
@@ -406,7 +510,7 @@
  		pthread_mutex_unlock(&mq_lock);
  		return;
  	}
-@@ -1799,6 +2050,33 @@
+@@ -1799,6 +2147,33 @@
  			   !strcmp(existing->actor, actor);
  		pthread_mutex_unlock(&mq_lock);
  		return same ? 0 : -1;
@@ -440,6 +544,96 @@
  	}
  	if (_append_event("GRANT|%u|%u|%" PRIu64 "|0|%s|%s", uid32,
  			  month, gpu_seconds, grant_id, actor) ||
+--- a/src/slurmctld/monthly_quota.h
++++ b/src/slurmctld/monthly_quota.h
+@@ -55,6 +55,11 @@
+ 				  uint64_t sec, uint32_t nsec,
+ 				  monthly_quota_tier_t *tiers);
+ 
++/* Per-job ordering snapshot for V2 selected tiers; NULL represents CPU-only. */
++extern int monthly_quota_jobs_tiers_at(struct job_record *const *jobs, size_t count,
++                                       uint64_t sec, uint32_t nsec,
++                                       monthly_quota_tier_t *tiers);
++
+ /* Single-user convenience wrapper. Returns -1 for disabled/unknown state. */
+ extern int monthly_quota_tier_at(uid_t uid, uint64_t sec, uint32_t nsec,
+ 				 monthly_quota_tier_t *tier);
+--- a/src/slurmctld/job_scheduler.c
++++ b/src/slurmctld/job_scheduler.c
+@@ -1923,7 +1923,7 @@
+ {
+ 	ListIterator iter;
+ 	job_queue_rec_t *rec;
+-	uid_t *uids;
++	struct job_record **jobs;
+ 	monthly_quota_tier_t *tiers;
+ 	struct timeval now;
+ 	size_t count, i;
+@@ -1937,14 +1937,14 @@
+ 	list_iterator_destroy(iter);
+ 	if (monthly_quota_enabled() && count && !gettimeofday(&now, NULL) &&
+ 	    now.tv_sec >= 0) {
+-		uids = xcalloc(count, sizeof(*uids));
++		jobs = xcalloc(count, sizeof(*jobs));
+ 		tiers = xcalloc(count, sizeof(*tiers));
+ 		iter = list_iterator_create(job_queue);
+ 		for (i = 0; i < count && (rec = list_next(iter)); i++)
+-			uids[i] = rec->job_ptr->user_id;
++			jobs[i] = gres_get_job_state(rec->job_ptr->gres_list, "gpu") ? rec->job_ptr : NULL;
+ 		list_iterator_destroy(iter);
+-		if (i == count && !monthly_quota_tiers_at(
+-			    uids, count, (uint64_t)now.tv_sec,
++		if (i == count && !monthly_quota_jobs_tiers_at(
++			    jobs, count, (uint64_t)now.tv_sec,
+ 			    (uint32_t)now.tv_usec * 1000, tiers)) {
+ 			iter = list_iterator_create(job_queue);
+ 			for (i = 0; i < count && (rec = list_next(iter)); i++) {
+@@ -1955,7 +1955,7 @@
+ 			list_iterator_destroy(iter);
+ 		}
+ 		xfree(tiers);
+-		xfree(uids);
++		xfree(jobs);
+ 	}
+ 	list_sort(job_queue, sort_job_queue2);
+ }
+@@ -1996,7 +1996,7 @@
+ {
+ 	ListIterator iter;
+ 	job_queue_rec_t *rec;
+-	uid_t *uids;
++	struct job_record **jobs;
+ 	monthly_quota_tier_t *tiers, expected;
+ 	struct timeval now;
+ 	size_t count, i;
+@@ -2027,14 +2027,14 @@
+ 		_monthly_quota_queue_unavailable(job_queue, current);
+ 		return -1;
+ 	}
+-	uids = xcalloc(count, sizeof(*uids));
++	jobs = xcalloc(count, sizeof(*jobs));
+ 	tiers = xcalloc(count, sizeof(*tiers));
+-	uids[0] = current->job_ptr->user_id;
++	jobs[0] = gres_get_job_state(current->job_ptr->gres_list, "gpu") ? current->job_ptr : NULL;
+ 	iter = list_iterator_create(job_queue);
+ 	for (i = 1; i < count && (rec = list_next(iter)); i++)
+-		uids[i] = rec->job_ptr->user_id;
++		jobs[i] = gres_get_job_state(rec->job_ptr->gres_list, "gpu") ? rec->job_ptr : NULL;
+ 	list_iterator_destroy(iter);
+-	if (i != count || monthly_quota_tiers_at(uids, count,
++	if (i != count || monthly_quota_jobs_tiers_at(jobs, count,
+ 			(uint64_t)now.tv_sec, (uint32_t)now.tv_usec * 1000, tiers)) {
+ 		matches = -1;
+ 		goto out;
+@@ -2059,7 +2059,7 @@
+ 	if (matches < 0)
+ 		_monthly_quota_queue_unavailable(job_queue, current);
+ 	xfree(tiers);
+-	xfree(uids);
++	xfree(jobs);
+ 	return matches;
+ }
+ 
 --- /dev/null
 +++ b/src/slurmctld/selectable-tier-accounting.c
 @@ -0,0 +1,174 @@
