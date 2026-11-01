@@ -34,6 +34,7 @@ PATCHES = (
     "root-witness-anchor.patch",
     "preserve-witness-fd.patch",
     "queue-unavailable-reason.patch",
+    "selectable-tier-cutover-scaffold.patch",
 )
 
 # u20's live configuration requires these plugins.  A successful compiler

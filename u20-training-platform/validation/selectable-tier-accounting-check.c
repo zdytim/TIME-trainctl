@@ -23,6 +23,15 @@ int main(void) {
  for(int i=0;i<3;i++) assert(time_tier_advance(&multi_step,divided,2,1)==0);
  assert(memcmp(&multi,&multi_step,sizeof multi)==0);
  assert(multi.used[TIME_DEBUG]==10 && multi.used[TIME_IMPORTANT]==5);
+ const uint64_t hour=UINT64_C(3600)*UINT64_C(1000000000);
+ struct time_tier_balance migrated;
+ assert(time_tier_import_legacy(&migrated, 6*hour, 0)==0);
+ assert(migrated.used[TIME_DEBUG]==5*hour && migrated.used[TIME_IMPORTANT]==hour && migrated.used[TIME_NORMAL]==0);
+ assert(time_tier_import_legacy(&migrated, 610*hour, 3*hour)==0);
+ assert(migrated.limit[TIME_NORMAL]==503*hour && migrated.overage==2*hour);
+ struct time_tier_balance unchanged=migrated;
+ assert(time_tier_import_legacy(&migrated, 0, UINT64_MAX)==-1);
+ assert(memcmp(&migrated,&unchanged,sizeof migrated)==0);
  struct time_tier_balance debt={{5,10,20},{5,10,20},7};
  assert(time_tier_add_normal(&debt,10)==0 && debt.used[2]==27 && debt.limit[2]==30 && debt.overage==0);
  struct time_tier_balance full={{5,10,20},{5,10,20},UINT64_MAX}, before=full;
