@@ -20,7 +20,7 @@ def _amount(snapshot, key):
 def unavailable(verified=False):
     return {'state': 'unknown', 'reason': 'controller quota snapshot unavailable',
             'enabled': False, 'mode': 'unknown' if verified else 'staged',
-            'enforcement_ready': False, 'accounting_status': 'unknown',
+            'enforcement_ready': False, 'selectable_tiers_ready': False, 'accounting_status': 'unknown',
             'request_available': False,
             'enforcement_limitation': '无法确认控制器额度状态，请联系管理员。' if verified else '月度强制调度尚未启用。',
             'month': None, 'current_tier': None, 'tiers': [], 'usage_verified': False}
@@ -51,7 +51,7 @@ def snapshot_view(snapshot, activation_verified=False):
     return {'state': 'observed', 'snapshot': snapshot,
             'reason': None if verified else 'controller snapshot is staged; enforcement not verified',
             'enabled': verified, 'mode': 'enforcing' if verified else 'staged',
-            'enforcement_ready': verified, 'accounting_status': 'ok', 'usage_verified': True,
+            'enforcement_ready': verified, 'selectable_tiers_ready': False, 'accounting_status': 'ok', 'usage_verified': True,
             'enforcement_limitation': None if verified else '已读取控制器账本，但强制调度尚未完成上线核验。',
             'timezone': 'Asia/Shanghai', 'month': '%04d-%02d' % (month // 100, month % 100),
             'current_tier': tier, 'used_gpu_seconds': used / NANO,
