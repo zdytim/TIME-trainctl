@@ -57,3 +57,55 @@ def snapshot_view(snapshot, activation_verified=False):
             'current_tier': tier, 'used_gpu_seconds': used / NANO,
             'remaining_gpu_seconds': remaining / NANO, 'overage_gpu_seconds': overage / NANO,
             'additional_gpu_seconds': granted / NANO, 'tiers': tiers}
+
+
+def selectable_snapshot_view(snapshot, activation_verified=False):
+    """Normalize an authoritative per-tier controller snapshot.
+
+    This function does not fetch or authenticate a snapshot. The caller must
+    verify the controller peer, supported protocol, ledger recovery and the
+    deployed allocation gate before setting activation_verified. Legacy SNAP
+    totals must never be passed off as independent tier balances.
+    """
+    if not isinstance(snapshot, dict) or snapshot.get('schema_version') != 2:
+        raise ValueError('invalid selectable snapshot schema')
+    month = snapshot.get('month')
+    if (isinstance(month, bool) or not isinstance(month, int) or month < 197001 or
+            month > 999912 or not 1 <= month % 100 <= 12):
+        raise ValueError('invalid controller month')
+    raw_tiers = snapshot.get('tiers')
+    if not isinstance(raw_tiers, dict) or set(raw_tiers) != {name for name, _ in BASE}:
+        raise ValueError('missing or unexpected tier balances')
+    granted = _amount(snapshot, 'granted')
+    overage = _amount(snapshot, 'overage')
+    tiers, total_used, total_remaining = [], 0, 0
+    for name, base in BASE:
+        entry = raw_tiers[name]
+        if not isinstance(entry, dict):
+            raise ValueError('invalid tier balance')
+        used = _amount(entry, 'used')
+        limit = base * NANO + (granted if name == 'normal' else 0)
+        if limit > MAX_SECONDS * NANO or used > limit:
+            raise ValueError('tier balance exceeds limit')
+        total_used += used
+        total_remaining += limit - used
+        tiers.append({'name': name, 'limit_gpu_seconds': limit / NANO,
+                      'used_gpu_seconds': used / NANO,
+                      'remaining_gpu_seconds': (limit - used) / NANO})
+    normal = raw_tiers['normal']
+    if overage and _amount(normal, 'used') != BASE[2][1] * NANO + granted:
+        raise ValueError('overage exists before normal tier is exhausted')
+    if total_used + overage > MAX_SECONDS * NANO or total_remaining > MAX_SECONDS * NANO:
+        raise ValueError('selectable snapshot exceeds supported precision')
+    verified = activation_verified is True
+    return {'state': 'observed', 'snapshot': snapshot,
+            'reason': None if verified else 'selectable controller gate not verified',
+            'enabled': verified, 'mode': 'enforcing' if verified else 'staged',
+            'enforcement_ready': verified, 'selectable_tiers_ready': verified,
+            'accounting_status': 'ok', 'usage_verified': True,
+            'enforcement_limitation': None if verified else '手动选档强制调度尚未完成上线核验。',
+            'timezone': 'Asia/Shanghai', 'month': '%04d-%02d' % (month // 100, month % 100),
+            'current_tier': None, 'used_gpu_seconds': (total_used + overage) / NANO,
+            'remaining_gpu_seconds': total_remaining / NANO,
+            'overage_gpu_seconds': overage / NANO,
+            'additional_gpu_seconds': granted / NANO, 'tiers': tiers}
