@@ -15,6 +15,10 @@ function slurm_job_submit(job_desc, part_list, submit_uid)
     local comment = job_desc.comment or ""
     local id, tier = comment:match("^pro6000d%-job:([0-9a-f]+):tier=([a-z]+)$")
     if not id then
+        if selectable_tier_enforcement then
+            slurm.log_user("A platform quota tier is required")
+            return slurm.ERROR
+        end
         id = comment:match("^pro6000d%-job:([0-9a-f]+)$")
     elseif tier ~= "debug" and tier ~= "important" and tier ~= "normal" then
         slurm.log_user("Invalid platform quota tier")
