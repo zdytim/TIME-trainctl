@@ -338,7 +338,28 @@
  		goto out;
  	rc = 0;
  out:
-@@ -1357,6 +1574,142 @@
+@@ -1239,6 +1456,20 @@
+ 	job_ptr->state_reason = WAIT_ACCOUNT_POLICY;
+ 	xfree(job_ptr->state_desc);
+ 	job_ptr->state_desc = xstrdup_printf("MonthlyGpuQuota:%s", why);
++}
++
++/* Caller holds the Slurm job write lock. Avoid repeatedly changing the
++ * scheduler timestamp when an already queued job has the same reason. */
++void monthly_quota_mark_exhausted(struct job_record *job_ptr)
++{
++	const char *reason = "MonthlyGpuQuota:selected monthly tier exhausted";
++	if (!job_ptr || !IS_JOB_PENDING(job_ptr)) return;
++	if (job_ptr->state_reason == WAIT_ACCOUNT_POLICY && job_ptr->state_desc &&
++	    !strcmp(job_ptr->state_desc, reason)) return;
++	job_ptr->state_reason = WAIT_ACCOUNT_POLICY;
++	xfree(job_ptr->state_desc);
++	job_ptr->state_desc = xstrdup(reason);
++	last_job_update = time(NULL);
+ }
+ 
+ static int _month_start(uint32_t month, mq_time_t *start)
+@@ -1357,6 +1588,142 @@
  	return rc;
  }
  
@@ -481,7 +502,7 @@
  /* All output belongs to one locked ledger state and one supplied timestamp.
   * Failure leaves the caller's output unchanged. It does not reserve GPUs. */
  int monthly_quota_tiers_at(const uid_t *uids, size_t count, uint64_t sec,
-@@ -1374,7 +1727,7 @@
+@@ -1374,7 +1741,7 @@
  	if (count && !snapshot)
  		return -1;
  	pthread_mutex_lock(&mq_lock);
@@ -490,7 +511,7 @@
  		goto out;
  	for (i = 0; i < count; i++) {
  		if (_tier_locked(uids[i], &now, &snapshot[i]))
-@@ -1417,7 +1770,7 @@
+@@ -1417,7 +1784,7 @@
  		return -1;
  	memset(&result, 0, sizeof(result));
  	pthread_mutex_lock(&mq_lock);
@@ -499,7 +520,7 @@
  	    _month_key(&now, &result.month) ||
  	    _project_usage((uint32_t)uid, result.month, &now, &used) ||
  	    _tier_locked(uid, &now, &result.tier))
-@@ -1497,6 +1850,18 @@
+@@ -1497,6 +1864,18 @@
  		_set_pending_reason(job_ptr, "ledger recovering or unavailable");
  		return -1;
  	}
@@ -518,7 +539,7 @@
  	available = _quota_available(job_ptr->user_id, month, &now, true);
  	if (available <= 0) {
  		_set_pending_reason(job_ptr,
-@@ -1577,6 +1942,8 @@
+@@ -1577,6 +1956,8 @@
  	mq_time_t now;
  	uint32_t month;
  	mq_active_record_t *active;
@@ -527,7 +548,7 @@
  
  	if (!job_ptr)
  		return -1;
-@@ -1604,7 +1971,16 @@
+@@ -1604,7 +1985,16 @@
  		pthread_mutex_unlock(&mq_lock);
  		return -1;
  	}
@@ -545,7 +566,7 @@
  		_set_pending_reason(job_ptr, "monthly capacity exhausted");
  		pthread_mutex_unlock(&mq_lock);
  		return -1;
-@@ -1623,10 +1999,17 @@
+@@ -1623,10 +2013,17 @@
  	active->base_gpu = gpu_count;
  	active->gpu_count = gpu_count;
  	active->anchor = now;
@@ -567,7 +588,7 @@
  		xfree(active);
  		_mark_unhealthy("PREPARE fsync failed");
  		_set_pending_reason(job_ptr, "ledger write failure");
-@@ -1730,6 +2113,18 @@
+@@ -1730,6 +2127,18 @@
  	}
  	if (!active->committed) {
  		_mark_unhealthy("release encountered uncommitted allocation");
@@ -586,7 +607,7 @@
  		pthread_mutex_unlock(&mq_lock);
  		return;
  	}
-@@ -1800,6 +2195,33 @@
+@@ -1800,6 +2209,33 @@
  		pthread_mutex_unlock(&mq_lock);
  		return same ? 0 : -1;
  	}
@@ -620,7 +641,7 @@
  	if (_append_event("GRANT|%u|%u|%" PRIu64 "|0|%s|%s", uid32,
  			  month, gpu_seconds, grant_id, actor) ||
  	    _add_grant_memory(uid32, month, grant_id, gpu_seconds, 0, actor)) {
-@@ -1810,6 +2232,36 @@
+@@ -1810,6 +2246,36 @@
  	/* _quota_available subtracts usage before adding grants: debt is paid first. */
  	pthread_mutex_unlock(&mq_lock);
  	return 0;
@@ -657,7 +678,7 @@
  }
  
  int monthly_quota_reconcile(List jobs)
-@@ -1842,6 +2294,16 @@
+@@ -1842,6 +2308,16 @@
  			/* Missing job state does not prove a PREPARE was aborted. */
  			bad = true;
  			continue;
@@ -694,7 +715,7 @@
  /* Call only inside slurmctld. Future transport must authenticate the caller.
   * Returns -1 and leaves output unchanged when disabled/unhealthy/unknown. */
  extern int monthly_quota_inherited_witness_fd(void);
-@@ -54,6 +65,11 @@
+@@ -54,6 +65,14 @@
  extern int monthly_quota_tiers_at(const uid_t *uids, size_t count,
  				  uint64_t sec, uint32_t nsec,
  				  monthly_quota_tier_t *tiers);
@@ -703,6 +724,9 @@
 +extern int monthly_quota_jobs_tiers_at(struct job_record *const *jobs, size_t count,
 +                                       uint64_t sec, uint32_t nsec,
 +                                       monthly_quota_tier_t *tiers);
++
++/* Caller holds the Slurm job write lock. */
++extern void monthly_quota_mark_exhausted(struct job_record *job_ptr);
  
  /* Single-user convenience wrapper. Returns -1 for disabled/unknown state. */
  extern int monthly_quota_tier_at(uid_t uid, uint64_t sec, uint32_t nsec,
@@ -746,7 +770,19 @@
  		   !number(part[3], &sec)) {
 --- a/src/slurmctld/job_scheduler.c
 +++ b/src/slurmctld/job_scheduler.c
-@@ -1923,7 +1923,7 @@
+@@ -1387,6 +1387,11 @@
+ 					break;
+ 				}
+ 			}
++			if (job_queue_rec->monthly_tier == MONTHLY_QUOTA_EXHAUSTED) {
++				monthly_quota_mark_exhausted(job_queue_rec->job_ptr);
++				xfree(job_queue_rec);
++				continue;
++			}
+ 			array_task_id = job_queue_rec->array_task_id;
+ 			job_ptr  = job_queue_rec->job_ptr;
+ 			part_ptr = job_queue_rec->part_ptr;
+@@ -1923,7 +1928,7 @@
  {
  	ListIterator iter;
  	job_queue_rec_t *rec;
@@ -755,7 +791,7 @@
  	monthly_quota_tier_t *tiers;
  	struct timeval now;
  	size_t count, i;
-@@ -1937,14 +1937,14 @@
+@@ -1937,14 +1942,14 @@
  	list_iterator_destroy(iter);
  	if (monthly_quota_enabled() && count && !gettimeofday(&now, NULL) &&
  	    now.tv_sec >= 0) {
@@ -774,7 +810,7 @@
  			    (uint32_t)now.tv_usec * 1000, tiers)) {
  			iter = list_iterator_create(job_queue);
  			for (i = 0; i < count && (rec = list_next(iter)); i++) {
-@@ -1955,7 +1955,7 @@
+@@ -1955,7 +1960,7 @@
  			list_iterator_destroy(iter);
  		}
  		xfree(tiers);
@@ -783,7 +819,7 @@
  	}
  	list_sort(job_queue, sort_job_queue2);
  }
-@@ -1996,7 +1996,7 @@
+@@ -1996,7 +2001,7 @@
  {
  	ListIterator iter;
  	job_queue_rec_t *rec;
@@ -792,7 +828,7 @@
  	monthly_quota_tier_t *tiers, expected;
  	struct timeval now;
  	size_t count, i;
-@@ -2027,14 +2027,14 @@
+@@ -2027,14 +2032,14 @@
  		_monthly_quota_queue_unavailable(job_queue, current);
  		return -1;
  	}
@@ -811,7 +847,7 @@
  			(uint64_t)now.tv_sec, (uint32_t)now.tv_usec * 1000, tiers)) {
  		matches = -1;
  		goto out;
-@@ -2059,7 +2059,7 @@
+@@ -2059,7 +2064,7 @@
  	if (matches < 0)
  		_monthly_quota_queue_unavailable(job_queue, current);
  	xfree(tiers);
@@ -820,6 +856,38 @@
  	return matches;
  }
  
+--- a/src/plugins/sched/backfill/backfill.c
++++ b/src/plugins/sched/backfill/backfill.c
+@@ -1630,6 +1630,7 @@
+ 		/* SELECT_MODE_WILL_RUN below bypasses select_nodes(), so exclude
+ 		 * currently exhausted jobs before making a future reservation. */
+ 		if (job_queue_rec->monthly_tier == MONTHLY_QUOTA_EXHAUSTED) {
++			monthly_quota_mark_exhausted(job_queue_rec->job_ptr);
+ 			xfree(job_queue_rec);
+ 			job_ptr = NULL;
+ 			continue;
+--- a/src/plugins/sched/builtin/builtin.c
++++ b/src/plugins/sched/builtin/builtin.c
+@@ -61,6 +61,7 @@
+ 
+ #include "src/slurmctld/burst_buffer.h"
+ #include "src/slurmctld/locks.h"
++#include "src/slurmctld/monthly_quota.h"
+ #include "src/slurmctld/preempt.h"
+ #include "src/slurmctld/reservation.h"
+ #include "src/slurmctld/slurmctld.h"
+@@ -163,6 +164,11 @@
+ 				if (!fresh) queue_job_scheduler();
+ 				break;
+ 			}
++		}
++		if (job_queue_rec->monthly_tier == MONTHLY_QUOTA_EXHAUSTED) {
++			monthly_quota_mark_exhausted(job_queue_rec->job_ptr);
++			xfree(job_queue_rec);
++			continue;
+ 		}
+ 		job_ptr  = job_queue_rec->job_ptr;
+ 		part_ptr = job_queue_rec->part_ptr;
 --- /dev/null
 +++ b/src/slurmctld/selectable-tier-accounting.c
 @@ -0,0 +1,174 @@

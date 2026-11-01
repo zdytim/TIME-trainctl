@@ -25,6 +25,8 @@
   const errorText = e => (e && (e.message || e.code)) || '操作未完成，请稍后重试';
   const jobReasonNames = {
     'MonthlyGpuQuota:monthly_capacity_exhausted':'本月 GPU 时长额度已用完，任务继续排队；可申请追加额度。',
+    'MonthlyGpuQuota:selected_monthly_tier_exhausted':'所选额度档位已用完，任务继续排队且不会分配 GPU；请等待额度恢复。',
+    'MonthlyGpuQuota:selected monthly tier exhausted':'所选额度档位已用完，任务继续排队且不会分配 GPU；请等待额度恢复。',
     'MonthlyGpuQuota:quota_state_or_ordering_unavailable':'额度状态暂不可用，任务保持排队；请联系管理员检查调度器。',
     'MonthlyGpuQuota:ledger_recovering_or_unavailable':'额度账本正在恢复或暂不可用，任务保持排队；请联系管理员。'
   };
