@@ -549,11 +549,10 @@
  		pthread_mutex_unlock(&mq_lock);
  		return;
  	}
-@@ -1799,6 +2186,33 @@
- 			   !strcmp(existing->actor, actor);
+@@ -1800,6 +2187,33 @@
  		pthread_mutex_unlock(&mq_lock);
  		return same ? 0 : -1;
-+	}
+ 	}
 +	if (mq_selectable_replay) {
 +		mq_time_t now;
 +		mq_amount_t amount = { .sec = gpu_seconds, .nsec = 0 };
@@ -580,9 +579,26 @@
 +		record->selectable = updated;
 +		pthread_mutex_unlock(&mq_lock);
 +		return 0;
- 	}
++	}
  	if (_append_event("GRANT|%u|%u|%" PRIu64 "|0|%s|%s", uid32,
  			  month, gpu_seconds, grant_id, actor) ||
+ 	    _add_grant_memory(uid32, month, grant_id, gpu_seconds, 0, actor)) {
+@@ -1842,6 +2256,15 @@
+ 			/* Missing job state does not prove a PREPARE was aborted. */
+ 			bad = true;
+ 			continue;
++		}
++		if (mq_selectable_replay) {
++			enum time_tier selected;
++			char marker_id[33];
++			if (time_parse_job_marker(job_ptr->comment, marker_id, &selected) ||
++			    selected != active->selected_tier) {
++				bad = true;
++				continue;
++			}
+ 		}
+ 		if (!IS_JOB_RUNNING(job_ptr) && !IS_JOB_SUSPENDED(job_ptr) &&
+ 		    !IS_JOB_COMPLETING(job_ptr)) {
 --- a/src/slurmctld/monthly_quota.h
 +++ b/src/slurmctld/monthly_quota.h
 @@ -44,6 +44,15 @@
