@@ -20,6 +20,7 @@ PATCHES = (
     "u20-broker-probe-privileges.patch",
     "u20-broker-absolute-environment.patch",
     "u20-broker-job-tombstone.patch",
+    "u20-broker-selectable-tier.patch",
 )
 
 
