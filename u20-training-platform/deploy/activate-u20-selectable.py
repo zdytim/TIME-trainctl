@@ -68,7 +68,7 @@ def digest(data): return hashlib.sha256(data).hexdigest()
 def trusted(path, uid=0, private=False):
     for parent in reversed(path.parents):
         st=parent.lstat()
-        allowed_uid = uid if parent == STATE and uid != 0 else 0
+        allowed_uid = uid if uid != 0 and parent in (STATE, STATE.parent) else 0
         if not stat.S_ISDIR(st.st_mode) or st.st_uid != allowed_uid or st.st_mode & 0o022:
             raise ValueError('untrusted parent: '+str(parent))
     st=path.lstat()
