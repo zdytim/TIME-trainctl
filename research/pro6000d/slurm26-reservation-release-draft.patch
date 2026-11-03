@@ -1,0 +1,27 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -1151,0 +1152 @@
++		mq_reserve1_t *reservation = NULL;
+@@ -1157,0 +1159,7 @@
++		if (active->reservation_bound) {
++			reservation = _reserve1_find(active->uid, active->marker_id);
++			if (!reservation || reservation->job_id != active->job_id ||
++			    reservation->generation != active->generation)
++				return -1;
++			_reserve1_remove(reservation);
++		}
+@@ -2528,0 +2537 @@
++	mq_reserve1_t *reservation = NULL;
+@@ -2571,0 +2581,9 @@
++		if (active->reservation_bound) {
++			reservation = _reserve1_find(active->uid, active->marker_id);
++			if (!reservation || reservation->job_id != active->job_id ||
++			    reservation->generation != active->generation) {
++				_mark_unhealthy("release reservation identity mismatch");
++				pthread_mutex_unlock(&mq_lock);
++				return;
++			}
++		}
+@@ -2578,0 +2597,2 @@
++		if (reservation)
++			_reserve1_remove(reservation);
