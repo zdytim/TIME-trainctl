@@ -1,0 +1,124 @@
+--- a/src/slurmctld/node_scheduler.c
++++ b/src/slurmctld/node_scheduler.c
+@@ -50,0 +51 @@
++#include <time.h>
+@@ -84,0 +86,8 @@
++
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD && \
++    defined(TIME_ENABLE_MONTHLY_COMMIT5_DRAFT) && TIME_ENABLE_MONTHLY_COMMIT5_DRAFT && \
++    defined(TIME_ENABLE_MONTHLY_TRANSACTION_DRAFT) && TIME_ENABLE_MONTHLY_TRANSACTION_DRAFT
++#define TIME_TRANSACTION_PROTOTYPE 1
++#else
++#define TIME_TRANSACTION_PROTOTYPE 0
++#endif
+@@ -2588,0 +2598,6 @@
++#if TIME_TRANSACTION_PROTOTYPE
++	monthly_quota_intent_t monthly_intent = {0};
++	bool monthly_prepared = false;
++	bool monthly_selector_called = false;
++	struct timespec monthly_boundary = {0};
++#endif
+@@ -2744,0 +2760,4 @@
++			monthly_quota_intent_t *intent_ptr;
++#if TIME_TRANSACTION_PROTOTYPE
++			intent_ptr = &monthly_intent;
++#else
+@@ -2745,0 +2765,2 @@
++			intent_ptr = &intent;
++#endif
+@@ -2750 +2771 @@
+-							monthly_gpu_count, &intent);
++							monthly_gpu_count, intent_ptr);
+@@ -2751,0 +2773,11 @@
++#if TIME_TRANSACTION_PROTOTYPE
++			if (prepared == 1) {
++				monthly_prepared = true;
++			} else {
++				job_ptr->state_reason = WAIT_ACCOUNT_POLICY;
++				if (!job_ptr->state_desc)
++					job_ptr->state_desc = xstrdup("MonthlyGpuQuota: authorization unavailable");
++				error_code = ESLURM_ACCOUNTING_POLICY;
++				goto cleanup;
++			}
++#else
+@@ -2753 +2785 @@
+-				monthly_quota_intent_abort(job_ptr, &intent);
++				monthly_quota_intent_abort(job_ptr, intent_ptr);
+@@ -2762,0 +2795 @@
++#endif
+@@ -2769,0 +2803,4 @@
++#if TIME_TRANSACTION_PROTOTYPE
++		if (monthly_prepared)
++			monthly_selector_called = true;
++#endif
+@@ -2882,0 +2920,8 @@
++#if TIME_TRANSACTION_PROTOTYPE
++	/* Do not preempt an existing training job in this candidate. */
++	if (monthly_prepared && preemptee_job_list && list_count(preemptee_job_list)) {
++		error_code = ESLURM_NODES_BUSY;
++		job_ptr->state_reason = WAIT_RESOURCES;
++		goto cleanup;
++	}
++#endif
+@@ -3112,0 +3158,4 @@
++
++#if TIME_TRANSACTION_PROTOTYPE
++	if (!monthly_prepared)
++#endif
+@@ -3114,0 +3164,13 @@
++#if TIME_TRANSACTION_PROTOTYPE
++	/* This is a logical boundary immediately before the GRES plugin call,
++	 * not yet proof of exact hardware allocation time. */
++	if (monthly_prepared &&
++	    (clock_gettime(CLOCK_REALTIME, &monthly_boundary) || monthly_boundary.tv_sec < 0)) {
++		(void) bb_g_job_revoke_alloc(job_ptr);
++		error_code = ESLURM_ACCOUNTING_POLICY;
++		job_ptr->start_time = job_ptr->time_last_active = job_ptr->end_time = 0;
++		job_ptr->state_reason = WAIT_ACCOUNT_POLICY;
++		job_state_set(job_ptr, JOB_PENDING);
++		goto cleanup;
++	}
++#endif
+@@ -3116,0 +3179,10 @@
++#if TIME_TRANSACTION_PROTOTYPE
++		if (monthly_prepared) {
++			(void) bb_g_job_revoke_alloc(job_ptr);
++			error_code = ESLURM_NODES_BUSY;
++			job_ptr->start_time = job_ptr->time_last_active = job_ptr->end_time = 0;
++			job_ptr->state_reason = WAIT_RESOURCES;
++			job_state_set(job_ptr, JOB_PENDING);
++			goto cleanup;
++		}
++#endif
+@@ -3134,0 +3207,21 @@
++#if TIME_TRANSACTION_PROTOTYPE
++	if (monthly_prepared) {
++		assoc_mgr_lock_t tres_lock = { .tres = READ_LOCK };
++		int committed;
++		assoc_mgr_lock(&tres_lock);
++		committed = monthly_quota_intent_commit_at(job_ptr, &monthly_intent,
++					(uint64_t)monthly_boundary.tv_sec,
++					(uint32_t)monthly_boundary.tv_nsec);
++		assoc_mgr_unlock(&tres_lock);
++		if (committed != 0) {
++			(void) bb_g_job_revoke_alloc(job_ptr);
++			error_code = ESLURM_ACCOUNTING_POLICY;
++			job_ptr->start_time = job_ptr->time_last_active = job_ptr->end_time = 0;
++			job_ptr->state_reason = WAIT_ACCOUNT_POLICY;
++			job_state_set(job_ptr, JOB_PENDING);
++			goto cleanup;
++		}
++		monthly_prepared = false;
++		job_ptr->bit_flags |= JOB_WAS_RUNNING;
++	}
++#endif
+@@ -3193,0 +3287,9 @@
++#if TIME_TRANSACTION_PROTOTYPE
++	if (monthly_prepared) {
++		/* Selector or plugin failures do not prove resource rollback. */
++		if (monthly_selector_called)
++			monthly_quota_intent_unknown(job_ptr, &monthly_intent);
++		else
++			monthly_quota_intent_abort(job_ptr, &monthly_intent);
++	}
++#endif
