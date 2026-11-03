@@ -1,0 +1,38 @@
+--- a/src/slurmctld/controller.c
++++ b/src/slurmctld/controller.c
+@@ -1089,0 +1090,12 @@
++
++#if defined(TIME_ENABLE_MONTHLY_LIFECYCLE_DRAFT) && TIME_ENABLE_MONTHLY_LIFECYCLE_DRAFT && \
++    defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++		/* Experimental only: the allocation transaction remains disabled.
++		 * Recover while restored job and TRES state are stable, before the
++		 * main scheduling threads start. Failure keeps admission closed. */
++		{
++			slurmctld_lock_t recovery_locks = {
++				.conf = READ_LOCK, .job = READ_LOCK, .node = READ_LOCK
++			};
++			assoc_mgr_lock_t tres_lock = { .tres = READ_LOCK };
++			int quota_recovery;
+@@ -1090,0 +1103,12 @@
++			lock_slurmctld(recovery_locks);
++			assoc_mgr_lock(&tres_lock);
++			quota_recovery = monthly_quota_reconcile(job_list);
++			assoc_mgr_unlock(&tres_lock);
++			unlock_slurmctld(recovery_locks);
++			if (quota_recovery)
++				error("monthly quota recovery failed; GPU admission remains closed");
++			else if (monthly_quota_control_start())
++				error("monthly quota control unavailable; reservations cannot be issued");
++		}
++#endif
++
+@@ -1161,0 +1186,9 @@
++#if defined(TIME_ENABLE_MONTHLY_LIFECYCLE_DRAFT) && TIME_ENABLE_MONTHLY_LIFECYCLE_DRAFT && \
++    defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++		/* No Slurm locks held: control_stop joins the broker thread. */
++		monthly_quota_control_stop();
++		/* A reconfiguration repeats this loop in the same process. Keep
++		 * the held ledger descriptors and live accounting state intact. */
++		if (!reconfig)
++			monthly_quota_fini();
++#endif
