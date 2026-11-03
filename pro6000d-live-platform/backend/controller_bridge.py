@@ -229,13 +229,14 @@ class ControllerBridge:
         if (not 197001 <= month <= 999912 or not 1 <= month % 100 <= 12 or tier > 2 or
                 not 1 <= gpu <= 2**32 - 1 or not 1 <= minutes <= 2**32 - 1 or
                 amount > 2**64 - 1 or amount != gpu * minutes * 60 * 10**9 or
-                job > 2**32 - 1 or generation > 2**64 - 1 or sluid > 2**64 - 1 or state > 3 or
+                job > 2**32 - 1 or generation > 2**64 - 1 or sluid > 2**64 - 1 or state > 5 or
                 (state == 0 and (job or generation or sluid)) or
                 (state == 1 and (not job or generation or sluid)) or
-                (state >= 2 and (not job or not generation))):
+                (state in (2, 3, 5) and (not job or not generation)) or
+                (state == 4 and (job or generation or sluid))):
             raise ControllerUnavailable("invalid reservation status fields")
         return {"uid": uid, "request_id": request_id, "present": True, "month": month,
                 "tier": ("debug", "important", "normal")[tier], "gpu": gpu, "minutes": minutes,
-                "reserved_gpu_nanoseconds": amount, "scheduler_id": job or None,
+                "original_gpu_nanoseconds": amount, "hold_active": state < 4, "scheduler_id": job or None,
                 "generation": generation or None, "sluid": sluid or None,
-                "state": ("unbound", "bound", "prepared", "active")[state]}
+                "state": ("unbound", "bound", "prepared", "active", "cancelled", "released")[state]}

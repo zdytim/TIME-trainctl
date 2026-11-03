@@ -1,0 +1,99 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -128,0 +129,2 @@
++	uint64_t final_sluid;
++	uint32_t terminal; /* 0 live; 1 cancelled; 2 released */
+@@ -148,0 +151 @@
++#if !defined(TIME_ENABLE_MONTHLY_TOMBSTONES_DRAFT) || !TIME_ENABLE_MONTHLY_TOMBSTONES_DRAFT
+@@ -156,0 +160 @@
++#endif
+@@ -157,0 +162,12 @@
++static void _reserve1_finish(mq_reserve1_t *target, uint32_t terminal, uint64_t sluid)
++{
++#if defined(TIME_ENABLE_MONTHLY_TOMBSTONES_DRAFT) && TIME_ENABLE_MONTHLY_TOMBSTONES_DRAFT
++	target->terminal = terminal;
++	target->final_sluid = sluid;
++#else
++	(void)terminal;
++	(void)sluid;
++	_reserve1_remove(target);
++#endif
++}
++
+@@ -1059 +1075 @@
+-    if (!reservation || reservation->job_id != pending->job_id ||
++    if (!reservation || reservation->terminal || reservation->job_id != pending->job_id ||
+@@ -1105 +1121 @@
+-		    !(entry = _reserve1_find(uid, fields[4])) || entry->job_id)
++		    !(entry = _reserve1_find(uid, fields[4])) || entry->terminal || entry->job_id)
+@@ -1107 +1123 @@
+-		_reserve1_remove(entry);
++		_reserve1_finish(entry, 1, 0);
+@@ -1115 +1131 @@
+-		    !(entry = _reserve1_find(uid, fields[4])) || entry->job_id)
++		    !(entry = _reserve1_find(uid, fields[4])) || entry->terminal || entry->job_id)
+@@ -1118 +1134 @@
+-			if (other->job_id == job_id) return -1;
++			if (!other->terminal && other->job_id == job_id) return -1;
+@@ -1183 +1199 @@
+-			if (!bound || bound->job_id != job_id || bound->generation ||
++			if (!bound || bound->terminal || bound->job_id != job_id || bound->generation ||
+@@ -1228 +1244 @@
+-			if (!reservation || reservation->job_id != active->job_id ||
++			if (!reservation || reservation->terminal || reservation->job_id != active->job_id ||
+@@ -1231 +1247 @@
+-			_reserve1_remove(reservation);
++			_reserve1_finish(reservation, 2, active->sluid);
+@@ -1343 +1359 @@
+-				if (!reservation || reservation->job_id != active->job_id ||
++				if (!reservation || reservation->terminal || reservation->job_id != active->job_id ||
+@@ -2075 +2091 @@
+-			    !active->allocation_start_known || !entry ||
++			    !active->allocation_start_known || !entry || entry->terminal ||
+@@ -2089 +2105 @@
+-		if (entry->uid != uid)
++		if (entry->uid != uid || entry->terminal)
+@@ -2323 +2339 @@
+-			if (!bound || bound->job_id != job_ptr->job_id || bound->generation ||
++			if (!bound || bound->terminal || bound->job_id != job_ptr->job_id || bound->generation ||
+@@ -2562 +2578 @@
+-		if (!reservation || reservation->job_id != active->job_id ||
++		if (!reservation || reservation->terminal || reservation->job_id != active->job_id ||
+@@ -2768 +2784 @@
+-			if (!reservation || reservation->job_id != active->job_id ||
++			if (!reservation || reservation->terminal || reservation->job_id != active->job_id ||
+@@ -2783 +2799 @@
+-			_reserve1_remove(reservation);
++			_reserve1_finish(reservation, 2, active->sluid);
+@@ -3128 +3144 @@
+-		if (entry->month == month && entry->tier == tier && entry->gpu == gpu &&
++		if (!entry->terminal && entry->month == month && entry->tier == tier && entry->gpu == gpu &&
+@@ -3165,0 +3182,4 @@
++	if (entry->terminal) {
++		if (entry->terminal == 1) rc = 0;
++		goto out;
++	}
+@@ -3171 +3191 @@
+-	_reserve1_remove(entry);
++	_reserve1_finish(entry, 1, 0);
+@@ -3193 +3213 @@
+-	    !(entry = _reserve1_find(uid, request)) ||
++	    !(entry = _reserve1_find(uid, request)) || entry->terminal ||
+@@ -3206 +3226 @@
+-		if (other->job_id == job_id) goto out;
++		if (!other->terminal && other->job_id == job_id) goto out;
+@@ -3229 +3249 @@
+-	    (entry = _reserve1_find((uint32_t)uid, request))) {
++	    (entry = _reserve1_find((uint32_t)uid, request)) && !entry->terminal) {
+@@ -3259,0 +3280,11 @@
++	if (entry->terminal) {
++		if ((entry->terminal == 1 && (entry->job_id || entry->generation || entry->final_sluid)) ||
++		    (entry->terminal == 2 && (!entry->job_id || !entry->generation)) ||
++		    entry->terminal > 2)
++			goto done;
++		result.state = entry->terminal == 1 ? 4 : 5;
++		result.sluid = entry->final_sluid;
++		*out = result;
++		rc = 1;
++		goto done;
++	}
