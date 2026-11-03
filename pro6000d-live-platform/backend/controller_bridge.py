@@ -215,3 +215,27 @@ class ControllerBridge:
         if line != "OK":
             raise ControllerOutcomeUnknown("unexpected bind reply; reconcile request and job identity")
         return {"request_id": request_id, "scheduler_id": scheduler_id, "bound": True}
+
+    def reservation_status(self, uid, request_id):
+        """Read live binding state; absence is not proof of no prior effect."""
+        uid, request_id = self._reservation_request(uid, request_id)
+        fields = self._exchange("RESERVE2_GET %d %s" % (uid, request_id)).split(" ")
+        if fields == ["OK", "2", "ABSENT"]:
+            return {"uid": uid, "request_id": request_id, "present": False}
+        if (len(fields) != 12 or fields[:3] != ["OK", "2", "FOUND"] or
+                any(not re.fullmatch(r"[0-9]+", x) for x in fields[3:])):
+            raise ControllerUnavailable("invalid reservation status response")
+        month, tier, gpu, minutes, amount, job, generation, state, sluid = (int(x) for x in fields[3:])
+        if (not 197001 <= month <= 999912 or not 1 <= month % 100 <= 12 or tier > 2 or
+                not 1 <= gpu <= 2**32 - 1 or not 1 <= minutes <= 2**32 - 1 or
+                amount > 2**64 - 1 or amount != gpu * minutes * 60 * 10**9 or
+                job > 2**32 - 1 or generation > 2**64 - 1 or sluid > 2**64 - 1 or state > 3 or
+                (state == 0 and (job or generation or sluid)) or
+                (state == 1 and (not job or generation or sluid)) or
+                (state >= 2 and (not job or not generation))):
+            raise ControllerUnavailable("invalid reservation status fields")
+        return {"uid": uid, "request_id": request_id, "present": True, "month": month,
+                "tier": ("debug", "important", "normal")[tier], "gpu": gpu, "minutes": minutes,
+                "reserved_gpu_nanoseconds": amount, "scheduler_id": job or None,
+                "generation": generation or None, "sluid": sluid or None,
+                "state": ("unbound", "bound", "prepared", "active")[state]}

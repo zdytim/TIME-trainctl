@@ -1,0 +1,85 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -3236,0 +3237,9 @@
++
++#if defined(TIME_ENABLE_MONTHLY_QUERY2_DRAFT) && TIME_ENABLE_MONTHLY_QUERY2_DRAFT
++int monthly_quota_reservation_status(uid_t uid, const char *request,
++				     monthly_reservation_status_t *out)
++{
++	mq_reserve1_t *entry;
++	mq_active_record_t *active;
++	monthly_reservation_status_t result = {0};
++	int rc = -1;
+@@ -3237,0 +3247,34 @@
++	if (!TIME_ENABLE_SELECTABLE_V2 || (uid_t)(uint32_t)uid != uid ||
++	    !_reserve1_request_valid(request) || !out)
++		return -1;
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || !mq_reconciled || !mq_selectable_replay ||
++	    mq_fd < 0 || mq_checkpoint_fd < 0 || mq_witness_fd < 0)
++		goto done;
++	entry = _reserve1_find((uint32_t)uid, request);
++	if (!entry) { rc = 0; goto done; }
++	result.month = entry->month; result.tier = entry->tier;
++	result.gpu = entry->gpu; result.minutes = entry->minutes;
++	result.amount = entry->amount; result.job_id = entry->job_id;
++	result.generation = entry->generation;
++	if (!entry->job_id && entry->generation)
++		goto done;
++	if (entry->generation) {
++		active = _find_active(entry->job_id, entry->generation);
++		if (!active || !active->identity_bound || !active->reservation_bound ||
++		    active->uid != (uint32_t)uid || strcmp(active->marker_id, request) ||
++		    active->selected_tier != entry->tier || active->planned_gpu != entry->gpu)
++			goto done;
++		result.state = active->committed ? 3 : 2;
++		result.sluid = active->sluid;
++	} else {
++		result.state = entry->job_id ? 1 : 0;
++	}
++	*out = result;
++	rc = 1;
++done:
++	pthread_mutex_unlock(&mq_lock);
++	return rc;
++}
++#endif
++
+--- a/src/slurmctld/monthly_quota.h
++++ b/src/slurmctld/monthly_quota.h
+@@ -26,0 +27,10 @@
++#if defined(TIME_ENABLE_MONTHLY_QUERY2_DRAFT) && TIME_ENABLE_MONTHLY_QUERY2_DRAFT
++typedef struct {
++	uint32_t month, tier, gpu, minutes, job_id, state;
++	uint64_t amount, generation, sluid;
++} monthly_reservation_status_t;
++/* Return 1 if found, 0 if absent now, -1 if state is unavailable. Absence
++ * does not prove that a previous request never took effect. */
++extern int monthly_quota_reservation_status(uid_t uid, const char *request,
++					    monthly_reservation_status_t *out);
++#endif
+--- a/src/slurmctld/monthly_quota_control.c
++++ b/src/slurmctld/monthly_quota_control.c
+@@ -61,0 +62,3 @@
++#if defined(TIME_ENABLE_MONTHLY_QUERY2_DRAFT) && TIME_ENABLE_MONTHLY_QUERY2_DRAFT
++	monthly_reservation_status_t reservation_view;
++#endif
+@@ -111,0 +115,18 @@
++#if defined(TIME_ENABLE_MONTHLY_QUERY2_DRAFT) && TIME_ENABLE_MONTHLY_QUERY2_DRAFT
++	} else if (count == 3 && !strcmp(part[0], "RESERVE2_GET")) {
++		int status;
++		lock_slurmctld(config_lock);
++		status = monthly_quota_reservation_status((uid_t)uid, part[2], &reservation_view);
++		unlock_slurmctld(config_lock);
++		if (status == 0) {
++			rc = 0;
++			snprintf(reply, sizeof(reply), "OK 2 ABSENT\n");
++		} else if (status == 1) {
++			rc = 0;
++			snprintf(reply, sizeof(reply),
++				 "OK 2 FOUND %u %u %u %u %" PRIu64 " %u %" PRIu64 " %u %" PRIu64 "\n",
++				 reservation_view.month, reservation_view.tier, reservation_view.gpu,
++				 reservation_view.minutes, reservation_view.amount, reservation_view.job_id,
++				 reservation_view.generation, reservation_view.state, reservation_view.sluid);
++		}
++#endif
