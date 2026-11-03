@@ -1,0 +1,4106 @@
+--- a/src/slurmctld/Makefile.am
++++ b/src/slurmctld/Makefile.am
+@@ -32,6 +32,13 @@
+ 	job_state.c	\
+ 	licenses.c	\
+ 	licenses.h	\
++	monthly_quota.c \
++	monthly_quota.h \
++	monthly_quota_control.c \
++	selectable-tier-accounting.c \
++	selectable-tier-accounting.h \
++	selectable-tier-comment.c \
++	selectable-tier-comment.h \
+ 	locks.c   	\
+ 	locks.h  	\
+ 	node_mgr.c 	\
+@@ -74,7 +81,7 @@
+ 
+ dependencies = $(SLURMCTLD_INTERFACES) $(top_builddir)/src/stepmgr/libstepmgr.la
+ 
+-slurmctld_LDADD = $(LIB_SLURM) $(dependencies)
++slurmctld_LDADD = $(LIB_SLURM) $(dependencies) -lcrypto
+ slurmctld_LDFLAGS = $(CMD_LDFLAGS)
+ 
+ slurmctld_DEPENDENCIES = $(LIB_SLURM_BUILD) $(dependencies)
+--- a/src/slurmctld/Makefile.in
++++ b/src/slurmctld/Makefile.in
+@@ -192,7 +192,9 @@
+ 	fed_mgr.$(OBJEXT) gang.$(OBJEXT) groups.$(OBJEXT) \
+ 	heartbeat.$(OBJEXT) http.$(OBJEXT) job_mgr.$(OBJEXT) \
+ 	job_scheduler.$(OBJEXT) job_state.$(OBJEXT) licenses.$(OBJEXT) \
+-	locks.$(OBJEXT) node_mgr.$(OBJEXT) node_scheduler.$(OBJEXT) \
++	locks.$(OBJEXT) monthly_quota.$(OBJEXT) monthly_quota_control.$(OBJEXT) \
++	selectable-tier-accounting.$(OBJEXT) selectable-tier-comment.$(OBJEXT) \
++	node_mgr.$(OBJEXT) node_scheduler.$(OBJEXT) \
+ 	partition_mgr.$(OBJEXT) ping_nodes.$(OBJEXT) \
+ 	power_save.$(OBJEXT) prep_slurmctld.$(OBJEXT) \
+ 	proc_req.$(OBJEXT) rate_limit.$(OBJEXT) read_config.$(OBJEXT) \
+@@ -575,6 +577,13 @@
+ 	job_state.c	\
+ 	licenses.c	\
+ 	licenses.h	\
++	monthly_quota.c \
++	monthly_quota.h \
++	monthly_quota_control.c \
++	selectable-tier-accounting.c \
++	selectable-tier-accounting.h \
++	selectable-tier-comment.c \
++	selectable-tier-comment.h \
+ 	locks.c   	\
+ 	locks.h  	\
+ 	node_mgr.c 	\
+@@ -613,7 +622,7 @@
+ 	trigger_mgr.h
+ 
+ dependencies = $(SLURMCTLD_INTERFACES) $(top_builddir)/src/stepmgr/libstepmgr.la
+-slurmctld_LDADD = $(LIB_SLURM) $(dependencies) $(LIB_REF)
++slurmctld_LDADD = $(LIB_SLURM) $(dependencies) -lcrypto $(LIB_REF)
+ slurmctld_LDFLAGS = $(CMD_LDFLAGS)
+ slurmctld_DEPENDENCIES = $(LIB_SLURM_BUILD) $(dependencies)
+ REF = usage.txt
+--- a/src/slurmctld/controller.c
++++ b/src/slurmctld/controller.c
+@@ -128,6 +128,7 @@
+ #include "src/slurmctld/job_scheduler.h"
+ #include "src/slurmctld/licenses.h"
+ #include "src/slurmctld/locks.h"
++#include "src/slurmctld/monthly_quota.h"
+ #include "src/slurmctld/ping_nodes.h"
+ #include "src/slurmctld/power_save.h"
+ #include "src/slurmctld/proc_req.h"
+@@ -1087,6 +1088,23 @@
+ 
+ 		_restore_job_dependencies();
+ 
++#if defined(TIME_ENABLE_READONLY_RECOVERY_AUDIT) && TIME_ENABLE_READONLY_RECOVERY_AUDIT
++		{
++			slurmctld_lock_t recovery_locks = {
++				.conf = READ_LOCK, .job = READ_LOCK, .node = READ_LOCK
++			};
++			assoc_mgr_lock_t tres_lock = { .tres = READ_LOCK };
++			int audit_result;
++			lock_slurmctld(recovery_locks);
++			assoc_mgr_lock(&tres_lock);
++			audit_result = monthly_quota_reconcile_readonly(job_list);
++			assoc_mgr_unlock(&tres_lock);
++			unlock_slurmctld(recovery_locks);
++			if (audit_result)
++				info("monthly quota read-only recovery audit unavailable; gate remains disabled");
++		}
++#endif
++
+ 		sync_job_priorities();
+ 
+ 		if (mcs_g_init() != SLURM_SUCCESS)
+--- a/src/slurmctld/node_scheduler.c
++++ b/src/slurmctld/node_scheduler.c
+@@ -81,6 +81,8 @@
+ #include "src/slurmctld/agent.h"
+ #include "src/slurmctld/gang.h"
+ #include "src/slurmctld/job_scheduler.h"
++#include "src/slurmctld/monthly_quota.h"
++#include "src/slurmctld/locks.h"
+ #include "src/slurmctld/licenses.h"
+ #include "src/slurmctld/node_scheduler.h"
+ #include "src/slurmctld/power_save.h"
+@@ -339,6 +341,11 @@
+ 	if (select_g_job_fini(job_ptr) != SLURM_SUCCESS)
+ 		error("select_g_job_fini(%pJ): %m", job_ptr);
+ 
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	xassert(verify_lock(JOB_LOCK, WRITE_LOCK));
++	monthly_quota_release_unproven(job_ptr);
++#endif
++
+ 	/* Release any job-related switch data */
+ 	switch_g_job_complete(job_ptr);
+ 
+@@ -2490,6 +2497,67 @@
+  *	   the request, (e.g. best-fit or other criterion)
+  *	3) Call allocate_nodes() to perform the actual allocation
+  */
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++static int _monthly_preselect_classify(job_record_t *job, uint64_t *gpu_count)
++{
++	list_itr_t *iterator;
++	gres_state_t *state;
++	gres_job_state_t *gpu;
++	slurmdb_tres_rec_t gpu_tres = { .type = "gres", .name = "gpu" };
++	assoc_mgr_lock_t tres_lock = { .tres = READ_LOCK };
++	uint64_t tres_gpu;
++	int gpu_pos;
++	int result = -1;
++
++	*gpu_count = 0;
++	if (!job->details || !job->part_ptr || !running_cons_tres() ||
++	    job->reboot || job->details->whole_node || job->het_job_id ||
++	    job->array_job_id || job->array_recs || job->array_task_id != NO_VAL ||
++	    job->fed_details || (job->clusters && job->clusters[0]) ||
++	    job->details->share_res != 1 || !job->part_ptr->max_share ||
++	    job->part_ptr->max_share == NO_VAL16 ||
++	    (job->gres_list_req_accum && list_count(job->gres_list_req_accum)))
++		return -1;
++	assoc_mgr_lock(&tres_lock);
++	gpu_pos = assoc_mgr_find_tres_pos(&gpu_tres, false);
++	if (!job->tres_req_cnt || gpu_pos < 0 || gpu_pos >= slurmctld_tres_cnt) {
++		assoc_mgr_unlock(&tres_lock);
++		return -1;
++	}
++	tres_gpu = job->tres_req_cnt[gpu_pos];
++	assoc_mgr_unlock(&tres_lock);
++	if (tres_gpu >= NO_CONSUME_VAL64)
++		return -1;
++	if (!job->gres_list_req || !list_count(job->gres_list_req)) {
++		if (tres_gpu || job->tres_per_job || job->tres_per_node || job->tres_per_socket ||
++		    job->tres_per_task)
++			return -1;
++		return 0;
++	}
++	if (list_count(job->gres_list_req) != 1 ||
++	    job->details->min_nodes != 1 || job->details->max_nodes != 1)
++		return -1;
++	iterator = list_iterator_create(job->gres_list_req);
++	state = list_next(iterator);
++	if (!state || !state->gres_name || strcmp(state->gres_name, "gpu") ||
++	    state->plugin_id != gres_get_gpu_plugin_id() ||
++	    state->state_type != GRES_STATE_TYPE_JOB || !state->gres_data ||
++	    (state->config_flags & GRES_CONF_SHARED))
++		goto done;
++	gpu = state->gres_data;
++	if (gpu->type_name || (gpu->flags & GRES_CONF_SHARED) ||
++	    !gpu->gres_per_node || gpu->gres_per_node >= NO_CONSUME_VAL64 ||
++	    gpu->gres_per_job || gpu->gres_per_job_segment || gpu->gres_per_socket ||
++	    gpu->gres_per_task || tres_gpu != gpu->gres_per_node)
++		goto done;
++	*gpu_count = gpu->gres_per_node;
++	result = 1;
++done:
++	list_iterator_destroy(iterator);
++	return result;
++}
++#endif
++
+ extern int select_nodes(job_node_select_t *job_node_select,
+ 			bool test_only,	bool submission,
+ 			uint32_t scheduler_type)
+@@ -2515,10 +2583,29 @@
+ 	list_t *gres_list_pre = NULL;
+ 	bool gres_list_pre_set = false;
+ 	job_record_t *tmp_job, *job_ptr = job_node_select->job_ptr;
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	uint64_t monthly_gpu_count = 0;
++	int monthly_request_class = 0;
++#endif
+ 
+ 	xassert(job_ptr);
+ 	xassert(job_ptr->magic == JOB_MAGIC);
+ 
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	if (!test_only) {
++		xassert(verify_lock(JOB_LOCK, WRITE_LOCK));
++		monthly_request_class = _monthly_preselect_classify(job_ptr,
++							    &monthly_gpu_count);
++		if (monthly_request_class < 0) {
++			job_ptr->state_reason = WAIT_ACCOUNT_POLICY;
++			xfree(job_ptr->state_desc);
++			job_ptr->state_desc = xstrdup(
++				"MonthlyGpuQuota: GPU request or exclusive allocation unknown");
++			return ESLURM_ACCOUNTING_POLICY;
++		}
++	}
++#endif
++
+ 	/*
+ 	 * The call path from _get_req_features() (called later in this
+ 	 * function) can eventually call _resolve_shared_status(). This latter
+@@ -2652,6 +2739,29 @@
+ 		goto cleanup;
+ 	else if ((error_code != ESLURM_REQUESTED_PART_CONFIG_UNAVAILABLE) &&
+ 		 (error_code != ESLURM_RESERVATION_MAINT)) {
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++		if (monthly_request_class > 0) {
++			assoc_mgr_lock_t tres_lock = { .tres = READ_LOCK };
++			monthly_quota_intent_t intent;
++			int prepared;
++
++			assoc_mgr_lock(&tres_lock);
++			prepared = monthly_quota_intent_prepare(job_ptr,
++							monthly_gpu_count, &intent);
++			assoc_mgr_unlock(&tres_lock);
++			if (prepared == 1)
++				monthly_quota_intent_abort(job_ptr, &intent);
++			job_ptr->state_reason = WAIT_ACCOUNT_POLICY;
++			if (prepared == 1 || !job_ptr->state_desc) {
++				xfree(job_ptr->state_desc);
++				job_ptr->state_desc = xstrdup(prepared == 1 ?
++					"MonthlyGpuQuota: allocation transaction unavailable" :
++					"MonthlyGpuQuota: authorization unavailable");
++			}
++			error_code = ESLURM_ACCOUNTING_POLICY;
++			goto cleanup;
++		}
++#endif
+ 		/* Select resources for the job here */
+ 		job_array_pre_sched(job_ptr);
+ 		if (job_ptr->job_resrcs)
+--- /dev/null
++++ b/src/slurmctld/monthly_quota.c
+@@ -0,0 +1,3036 @@
++/*****************************************************************************\
++ *  monthly_quota.c - controller-side monthly GPU quota admission ledger
++ *
++ *  The ledger is intentionally conservative. It accounts exact untyped
++ *  GPU counts, stores GPU-seconds plus nanoseconds, and refuses every shape
++ *  for which the 19.05.5 controller cannot provide a stable
++ *  allocation identity or a proven rollback boundary.
++\*****************************************************************************/
++
++#include "config.h"
++#define _GNU_SOURCE
++
++#include <errno.h>
++#include <fcntl.h>
++#include <inttypes.h>
++#include <limits.h>
++#include <pthread.h>
++#include <openssl/sha.h>
++#include <stdarg.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/file.h>
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <time.h>
++#include <unistd.h>
++
++#include "src/common/assoc_mgr.h"
++#include "src/interfaces/gres.h"
++#include "src/common/job_resources.h"
++#include "src/common/macros.h"
++#include "src/common/xassert.h"
++#include "src/common/xmalloc.h"
++#include "src/common/xstring.h"
++
++#include "src/slurmctld/monthly_quota.h"
++#include "src/slurmctld/selectable-tier-accounting.h"
++#include "src/slurmctld/selectable-tier-comment.h"
++#include "src/slurmctld/slurmctld.h"
++
++/* Keep experimental recovery/cutover unreachable in ordinary builds. */
++#ifndef TIME_ENABLE_SELECTABLE_V2
++#define TIME_ENABLE_SELECTABLE_V2 0
++#endif
++#define MQ_WAL_VERSION                 "U20MQ1"
++#define MQ_ENABLE_TOKEN                "MonthlyGpuQuota"
++#define MQ_STATE_FILE                  "monthly-quota.wal"
++#define MQ_CHECKPOINT_FILE             "monthly-quota.checkpoint"
++#define MQ_NSEC_PER_SEC                1000000000U
++#define MQ_SECONDS_PER_DAY             86400LL
++#define MQ_SHANGHAI_OFFSET             (8LL * 60LL * 60LL)
++#define MQ_CAPACITY_GPU_SECONDS        ((uint64_t)605 * 60 * 60)
++#define MQ_MAX_FIELD                   128
++
++typedef struct {
++	uint64_t sec;
++	uint32_t nsec;
++} mq_time_t;
++
++typedef struct {
++	uint64_t sec;
++	uint32_t nsec;
++} mq_amount_t;
++
++typedef struct mq_month_record {
++	uint32_t uid;
++	uint32_t month; /* YYYYMM in Asia/Shanghai */
++	mq_amount_t usage;
++	mq_amount_t grants;
++	struct time_tier_balance selectable;
++	struct mq_month_record *next;
++} mq_month_record_t;
++
++typedef struct mq_grant_record {
++	uint32_t uid;
++	uint32_t month;
++	char *grant_id;
++	char *actor;
++	mq_amount_t amount;
++	struct mq_grant_record *next;
++} mq_grant_record_t;
++
++typedef struct mq_active_record {
++	uint32_t job_id;
++	uint32_t uid;
++	uint64_t generation;
++	uint64_t planned_gpu;
++	uint64_t base_gpu;
++	uint64_t gpu_count; /* GPU resources remain charged while held by Slurm */
++	uint64_t submit_sec;
++	uint32_t restart_count;
++	bool identity_bound;
++	char marker_id[33]; /* immutable platform job UUID for V2 recovery */
++	enum time_tier selected_tier; /* V2 only; legacy jobs do not carry this */
++	enum time_tier current_tier;  /* V2 running allocation cursor */
++	mq_time_t anchor;
++	bool committed;
++	struct mq_active_record *next;
++} mq_active_record_t;
++
++static pthread_mutex_t mq_lock = PTHREAD_MUTEX_INITIALIZER;
++static int mq_fd = -1;
++static int mq_checkpoint_fd = -1;
++static int mq_witness_fd = -1;
++static bool mq_initialized;
++static bool mq_enabled;
++static bool mq_healthy;
++/* WAL opening alone is not proof it matches restored Slurm jobs. */
++static bool mq_reconciled;
++/* Never enable selectable scheduling until the V2 writer and recovery exist. */
++static bool mq_selectable_replay;
++static uint64_t mq_seq;
++static SHA256_CTX mq_wal_digest;
++static uint64_t mq_next_generation;
++static char *mq_path;
++static mq_month_record_t *mq_months;
++static mq_grant_record_t *mq_grants;
++static mq_active_record_t *mq_active;
++typedef struct mq_reserve1 {
++	uint32_t uid, month, tier, gpu, minutes, job_id;
++	uint64_t amount, generation;
++	char request[33];
++	struct mq_reserve1 *next;
++} mq_reserve1_t;
++static mq_reserve1_t *mq_reserves;
++
++static bool _reserve1_request_valid(const char *request)
++{
++	return request && strlen(request) == 32 &&
++		strspn(request, "0123456789abcdef") == 32;
++}
++
++static mq_reserve1_t *_reserve1_find(uint32_t uid, const char *request)
++{
++	mq_reserve1_t *entry;
++	for (entry = mq_reserves; entry; entry = entry->next)
++		if (entry->uid == uid && !strcmp(entry->request, request))
++			return entry;
++	return NULL;
++}
++
++static void _reserve1_remove(mq_reserve1_t *target)
++{
++	mq_reserve1_t **cursor = &mq_reserves;
++	while (*cursor) {
++		if (*cursor == target) { *cursor = target->next; xfree(target); return; }
++		cursor = &(*cursor)->next;
++	}
++}
++
++static int _time_cmp(const mq_time_t *a, const mq_time_t *b)
++{
++	if (a->sec < b->sec)
++		return -1;
++	if (a->sec > b->sec)
++		return 1;
++	if (a->nsec < b->nsec)
++		return -1;
++	if (a->nsec > b->nsec)
++		return 1;
++	return 0;
++}
++
++static int _amount_add(mq_amount_t *dst, uint64_t sec, uint32_t nsec)
++{
++	uint64_t old_sec;
++	uint64_t carry;
++
++	carry = nsec / MQ_NSEC_PER_SEC;
++	nsec %= MQ_NSEC_PER_SEC;
++	if (UINT64_MAX - sec < carry)
++		return -1;
++	sec += carry;
++	old_sec = dst->sec;
++	if (UINT64_MAX - dst->sec < sec)
++		return -1;
++	dst->sec += sec;
++	dst->nsec += nsec;
++	if (dst->nsec >= MQ_NSEC_PER_SEC) {
++		dst->nsec -= MQ_NSEC_PER_SEC;
++		if (dst->sec == UINT64_MAX)
++			return -1;
++		dst->sec++;
++	}
++	/* Keep the compiler from treating the overflow checks as dead code. */
++	if (dst->sec < old_sec)
++		return -1;
++	return 0;
++}
++
++static int _amount_add_amount(mq_amount_t *dst, const mq_amount_t *src)
++{
++	return _amount_add(dst, src->sec, src->nsec);
++}
++
++static int _amount_cmp(const mq_amount_t *a, const mq_amount_t *b)
++{
++	if (a->sec < b->sec)
++		return -1;
++	if (a->sec > b->sec)
++		return 1;
++	if (a->nsec < b->nsec)
++		return -1;
++	if (a->nsec > b->nsec)
++		return 1;
++	return 0;
++}
++
++static int _duration(const mq_time_t *from, const mq_time_t *to,
++			     mq_amount_t *duration)
++{
++	if (_time_cmp(from, to) > 0)
++		return -1;
++	duration->sec = to->sec - from->sec;
++	if (to->nsec >= from->nsec) {
++		duration->nsec = to->nsec - from->nsec;
++	} else {
++		if (duration->sec == 0)
++			return -1;
++		duration->sec--;
++		duration->nsec = MQ_NSEC_PER_SEC + to->nsec - from->nsec;
++	}
++	return 0;
++}
++
++static int _multiply_duration(const mq_amount_t *duration, uint64_t count,
++			       mq_amount_t *charge)
++{
++	uint64_t nsec_product, extra_sec;
++
++	charge->sec = 0;
++	charge->nsec = 0;
++	if (count == 0)
++		return 0;
++	if (duration->sec && (count > (UINT64_MAX / duration->sec)))
++		return -1;
++	charge->sec = duration->sec * count;
++	if (duration->nsec &&
++	    (count > (UINT64_MAX / duration->nsec)))
++		return -1;
++	nsec_product = duration->nsec * count;
++	extra_sec = nsec_product / MQ_NSEC_PER_SEC;
++	if (UINT64_MAX - charge->sec < extra_sec)
++		return -1;
++	charge->sec += extra_sec;
++	charge->nsec = (uint32_t)(nsec_product % MQ_NSEC_PER_SEC);
++	return 0;
++}
++
++/* Howard Hinnant's civil calendar conversion, with no process-wide TZ change. */
++static int64_t _floor_div(int64_t value, int64_t divisor)
++{
++	if (value >= 0)
++		return value / divisor;
++	return -(((-value) + divisor - 1) / divisor);
++}
++
++static int64_t _days_from_civil(int year, unsigned month, unsigned day)
++{
++	int64_t y = year;
++	int64_t era;
++	int month_prime;
++	unsigned yoe, doy, doe;
++
++	y -= (month <= 2);
++	era = (y >= 0 ? y : y - 399) / 400;
++	yoe = (unsigned)(y - era * 400);
++	month_prime = (int)month + (month > 2 ? -3 : 9);
++	doy = (153 * (unsigned)month_prime + 2) / 5
++		+ day - 1;
++	doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
++	return era * 146097 + (int64_t)doe - 719468;
++}
++
++static void _civil_from_days(int64_t days, int *year, unsigned *month)
++{
++	int64_t z = days + 719468;
++	int64_t era = (z >= 0 ? z : z - 146096) / 146097;
++	unsigned doe = (unsigned)(z - era * 146097);
++	unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) /
++		365;
++	int y = (int)(yoe + era * 400);
++	unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
++	unsigned mp = (5 * doy + 2) / 153;
++
++	y += (mp >= 10);
++	*year = y;
++	*month = (unsigned)((int)mp + (mp < 10 ? 3 : -9));
++}
++
++static int _month_key(const mq_time_t *when, uint32_t *month)
++{
++	int64_t local_sec;
++	int64_t days;
++	int year;
++	unsigned mon;
++
++	if (when->sec > (uint64_t)INT64_MAX - MQ_SHANGHAI_OFFSET)
++		return -1;
++	local_sec = (int64_t)when->sec + MQ_SHANGHAI_OFFSET;
++	days = _floor_div(local_sec, MQ_SECONDS_PER_DAY);
++	_civil_from_days(days, &year, &mon);
++	if ((year < 0) || (year > 9999) || (mon < 1) || (mon > 12))
++		return -1;
++	*month = (uint32_t)(year * 100 + (int)mon);
++	return 0;
++}
++
++static int _next_month_boundary(const mq_time_t *when, mq_time_t *boundary)
++{
++	uint32_t key;
++	int year, month;
++	int64_t days, day_seconds, utc_sec;
++
++	if (_month_key(when, &key))
++		return -1;
++	year = (int)(key / 100);
++	month = (int)(key % 100) + 1;
++	if (month == 13) {
++		month = 1;
++		year++;
++	}
++	days = _days_from_civil(year, (unsigned)month, 1);
++	if (days > INT64_MAX / MQ_SECONDS_PER_DAY ||
++	    days < INT64_MIN / MQ_SECONDS_PER_DAY)
++		return -1;
++	day_seconds = days * MQ_SECONDS_PER_DAY;
++	if (day_seconds < INT64_MIN + MQ_SHANGHAI_OFFSET)
++		return -1;
++	utc_sec = day_seconds - MQ_SHANGHAI_OFFSET;
++	if (utc_sec < 0)
++		return -1;
++	boundary->sec = (uint64_t)utc_sec;
++	boundary->nsec = 0;
++	if (_time_cmp(boundary, when) <= 0)
++		return -1;
++	return 0;
++}
++
++static int _now(mq_time_t *when)
++{
++	struct timespec ts;
++
++	if (clock_gettime(CLOCK_REALTIME, &ts) < 0)
++		return -1;
++	if (ts.tv_sec < 0 || ts.tv_nsec < 0 ||
++	    ts.tv_nsec >= MQ_NSEC_PER_SEC)
++		return -1;
++	when->sec = (uint64_t)ts.tv_sec;
++	when->nsec = (uint32_t)ts.tv_nsec;
++	return 0;
++}
++
++static bool _field_safe(const char *field)
++{
++	size_t i, len;
++
++	if (!field || !field[0])
++		return false;
++	len = strlen(field);
++	if (len >= MQ_MAX_FIELD)
++		return false;
++	for (i = 0; i < len; i++) {
++		if (field[i] == '|' || field[i] == '\n' || field[i] == '\r' ||
++		    field[i] == ' ' || field[i] == '\t')
++			return false;
++	}
++	return true;
++}
++
++static int _write_all(const char *buf, size_t len)
++{
++	size_t offset = 0;
++	ssize_t written;
++
++	while (offset < len) {
++		written = write(mq_fd, buf + offset, len - offset);
++		if (written < 0 && errno == EINTR)
++			continue;
++		if (written <= 0)
++			return -1;
++		offset += (size_t)written;
++	}
++	if (fsync(mq_fd) < 0)
++		return -1;
++	return 0;
++}
++
++/* WAL is durable before the checkpoint. A crash between those writes is
++ * deliberately detected as ambiguous on recovery, never silently repaired. */
++static int _write_checkpoint(uint64_t seq, const unsigned char digest[SHA256_DIGEST_LENGTH])
++{
++	char buf[160], hex[SHA256_DIGEST_LENGTH * 2 + 1];
++	int len;
++	size_t offset = 0, i;
++	ssize_t written;
++	static const char digits[] = "0123456789abcdef";
++
++	for (i = 0; i < SHA256_DIGEST_LENGTH; i++) {
++		hex[i * 2] = digits[digest[i] >> 4];
++		hex[i * 2 + 1] = digits[digest[i] & 15];
++	}
++	hex[sizeof(hex) - 1] = '\0';
++	len = snprintf(buf, sizeof(buf), MQ_WAL_VERSION "|CHECKPOINT|%" PRIu64 "|%s\n", seq, hex);
++	if (mq_checkpoint_fd < 0 || len < 0 || (size_t)len >= sizeof(buf))
++		return -1;
++	while (offset < (size_t)len) {
++		written = pwrite(mq_checkpoint_fd, buf + offset, (size_t)len - offset,
++				 (off_t)offset);
++		if (written < 0 && errno == EINTR)
++			continue;
++		if (written <= 0)
++			return -1;
++		offset += (size_t)written;
++	}
++	if (ftruncate(mq_checkpoint_fd, len) || fsync(mq_checkpoint_fd))
++		return -1;
++	return 0;
++}
++
++/* The descriptor was opened and locked by the root launcher before the
++ * controller dropped privileges. Append + fsync is part of each transaction. */
++static int _append_witness(uint64_t seq, const unsigned char digest[SHA256_DIGEST_LENGTH])
++{
++	char line[160], hex[SHA256_DIGEST_LENGTH * 2 + 1];
++	static const char digits[] = "0123456789abcdef";
++	ssize_t n;
++	size_t i, offset = 0;
++	int len;
++	if (mq_witness_fd < 0) return -1;
++	for (i = 0; i < SHA256_DIGEST_LENGTH; i++) {
++		hex[i * 2] = digits[digest[i] >> 4];
++		hex[i * 2 + 1] = digits[digest[i] & 15];
++	}
++	hex[sizeof(hex) - 1] = '\0';
++	len = snprintf(line, sizeof(line), "U20MQA1|%" PRIu64 "|%s\n", seq, hex);
++	if (len <= 0 || (size_t)len >= sizeof(line)) return -1;
++	while (offset < (size_t)len) {
++		n = write(mq_witness_fd, line + offset, (size_t)len - offset);
++		if (n < 0 && errno == EINTR) continue;
++		if (n <= 0) return -1;
++		offset += (size_t)n;
++	}
++	return fsync(mq_witness_fd) == 0 ? 0 : -1;
++}
++
++static int _append_event(const char *format, ...)
++{
++	char body[900], line[1024];
++	va_list ap;
++	int body_len, line_len;
++	uint64_t seq = mq_seq + 1;
++	SHA256_CTX next, finalized;
++	unsigned char digest[SHA256_DIGEST_LENGTH];
++
++	if (mq_seq == UINT64_MAX)
++		return -1;
++	va_start(ap, format);
++	body_len = vsnprintf(body, sizeof(body), format, ap);
++	va_end(ap);
++	if (body_len < 0 || (size_t)body_len >= sizeof(body))
++		return -1;
++	line_len = snprintf(line, sizeof(line), MQ_WAL_VERSION "|%" PRIu64
++				   "|%s\n", seq, body);
++	if (line_len < 0 || (size_t)line_len >= sizeof(line))
++		return -1;
++	next = mq_wal_digest;
++	if (SHA256_Update(&next, line, (size_t)line_len) != 1)
++		return -1;
++	finalized = next;
++	if (SHA256_Final(digest, &finalized) != 1 ||
++	    _write_all(line, (size_t)line_len) || _write_checkpoint(seq, digest) ||
++	    _append_witness(seq, digest))
++		return -1;
++	mq_wal_digest = next;
++	mq_seq = seq;
++	return 0;
++}
++
++static mq_month_record_t *_find_month(uint32_t uid, uint32_t month,
++					      bool create)
++{
++	mq_month_record_t *record;
++
++	for (record = mq_months; record; record = record->next) {
++		if (record->uid == uid && record->month == month)
++			return record;
++	}
++	if (!create)
++		return NULL;
++	record = xcalloc(1, sizeof(*record));
++	record->uid = uid;
++	record->month = month;
++	if (mq_selectable_replay &&
++	    time_tier_import_legacy(&record->selectable, 0, 0)) {
++		xfree(record);
++		return NULL;
++	}
++	record->next = mq_months;
++	mq_months = record;
++	return record;
++}
++
++static mq_active_record_t *_find_active(uint32_t job_id, uint64_t generation)
++{
++	mq_active_record_t *record;
++
++	for (record = mq_active; record; record = record->next) {
++		if (record->job_id == job_id &&
++		    record->generation == generation)
++			return record;
++	}
++	return NULL;
++}
++
++static mq_active_record_t *_find_active_job(uint32_t job_id)
++{
++	mq_active_record_t *record;
++
++	for (record = mq_active; record; record = record->next) {
++		if (record->job_id == job_id)
++			return record;
++	}
++	return NULL;
++}
++
++static mq_grant_record_t *_find_grant(const char *grant_id)
++{
++	mq_grant_record_t *record;
++
++	for (record = mq_grants; record; record = record->next) {
++		if (!strcmp(record->grant_id, grant_id))
++			return record;
++	}
++	return NULL;
++}
++
++static int _add_grant_memory(uint32_t uid, uint32_t month,
++				     const char *grant_id, uint64_t sec,
++				     uint32_t nsec, const char *actor)
++{
++	mq_grant_record_t *grant;
++	mq_month_record_t *month_record;
++
++	grant = _find_grant(grant_id);
++	if (grant)
++		return (grant->uid == uid && grant->month == month &&
++			grant->amount.sec == sec && grant->amount.nsec == nsec &&
++			!strcmp(grant->actor, actor)) ? 0 : -1;
++	month_record = _find_month(uid, month, true);
++	if (_amount_add(&month_record->grants, sec, nsec))
++		return -1;
++	grant = xcalloc(1, sizeof(*grant));
++	grant->uid = uid;
++	grant->month = month;
++	grant->grant_id = xstrdup(grant_id);
++	grant->actor = xstrdup(actor);
++	grant->amount.sec = sec;
++	grant->amount.nsec = nsec;
++	grant->next = mq_grants;
++	mq_grants = grant;
++	return 0;
++}
++
++static int _charge_interval(mq_active_record_t *active,
++				    const mq_time_t *from, const mq_time_t *to)
++{
++	mq_time_t cursor, boundary, segment_end;
++	mq_amount_t duration, charge;
++	uint32_t month;
++	mq_month_record_t *month_record;
++
++	if (_time_cmp(from, to) > 0)
++		return -1;
++	cursor = *from;
++	while (_time_cmp(&cursor, to) < 0) {
++		if (_next_month_boundary(&cursor, &boundary))
++			return -1;
++		segment_end = (_time_cmp(&boundary, to) < 0) ? boundary : *to;
++		if (_month_key(&cursor, &month))
++			return -1;
++		if (_duration(&cursor, &segment_end, &duration))
++			return -1;
++		if (_multiply_duration(&duration, active->gpu_count, &charge))
++			return -1;
++		month_record = _find_month(active->uid, month, true);
++		if (_amount_add_amount(&month_record->usage, &charge))
++			return -1;
++		cursor = segment_end;
++	}
++	return 0;
++}
++
++static void _remove_active(mq_active_record_t *target)
++{
++	mq_active_record_t **cursor = &mq_active;
++
++	while (*cursor) {
++		if (*cursor != target) {
++			cursor = &(*cursor)->next;
++			continue;
++		}
++		*cursor = target->next;
++		xfree(target);
++		return;
++	}
++}
++
++static void _free_memory(void)
++{
++	mq_reserve1_t *reservation, *next_reservation;
++	mq_month_record_t *month, *next_month;
++	mq_grant_record_t *grant, *next_grant;
++	mq_active_record_t *active, *next_active;
++
++	for (month = mq_months; month; month = next_month) {
++		next_month = month->next;
++		xfree(month);
++	}
++	for (grant = mq_grants; grant; grant = next_grant) {
++		next_grant = grant->next;
++		xfree(grant->grant_id);
++		xfree(grant->actor);
++		xfree(grant);
++	}
++	for (active = mq_active; active; active = next_active) {
++		next_active = active->next;
++		xfree(active);
++	}
++	mq_months = NULL;
++	mq_grants = NULL;
++	mq_active = NULL;
++	for (reservation = mq_reserves; reservation; reservation = next_reservation) {
++		next_reservation = reservation->next;
++		xfree(reservation);
++	}
++	mq_reserves = NULL;
++	mq_selectable_replay = false;
++}
++
++static void _mark_unhealthy(const char *why)
++{
++	if (mq_healthy)
++		error("monthly quota ledger entering fail-closed state: %s", why);
++	mq_healthy = false;
++	mq_reconciled = false;
++}
++
++static int _settle_active(mq_active_record_t *active, const mq_time_t *to,
++				  bool durable)
++{
++	if (_time_cmp(&active->anchor, to) > 0) {
++		_mark_unhealthy("wall clock moved backwards");
++		return -1;
++	}
++	if (_time_cmp(&active->anchor, to) == 0)
++		return 0;
++	if (durable && _append_event("SETTLE|%u|%" PRIu64 "|%" PRIu64
++				     "|%u|%" PRIu64 "|%u", active->job_id,
++				     active->generation, active->anchor.sec,
++				     active->anchor.nsec, to->sec, to->nsec)) {
++		_mark_unhealthy("SETTLE fsync failed");
++		return -1;
++	}
++	if (_charge_interval(active, &active->anchor, to)) {
++		_mark_unhealthy("interval arithmetic overflow");
++		return -1;
++	}
++	active->anchor = *to;
++	return 0;
++}
++
++static int _replay_selectable_advance(const mq_time_t *end);
++
++static int _settle_all(const mq_time_t *now)
++{
++	mq_active_record_t *active;
++
++	for (active = mq_active; active; active = active->next)
++		if (!active->committed)
++			return -1;
++
++	/* This path remains unreachable while V2 replay is fail-closed. */
++	if (mq_selectable_replay) {
++		if (!mq_active) return 0;
++		if (_append_event("ADVANCE2|%" PRIu64 "|%u", now->sec, now->nsec) ||
++		    _replay_selectable_advance(now)) {
++			_mark_unhealthy("ADVANCE2 could not be durably settled");
++			return -1;
++		}
++		return 0;
++	}
++	for (active = mq_active; active; active = active->next) {
++		if (_settle_active(active, now, true))
++			return -1;
++	}
++	return 0;
++}
++
++static int _gpu_pos(void)
++{
++	slurmdb_tres_rec_t tres;
++
++	if (!assoc_mgr_tres_array || !g_tres_count)
++		return -1;
++	memset(&tres, 0, sizeof(tres));
++	tres.type = "gres";
++	tres.name = "gpu";
++	return assoc_mgr_find_tres_pos(&tres, false);
++}
++
++/* Enumerate public Slurm plugin IDs before using the type-sensitive lookup.
++ * Return -1 for unsupported/ambiguous GPU shapes, 0 for no relevant GRES,
++ * and 1 for a single untyped GPU record. */
++static int _quota_gpu_shape(list_t *gres_list, gres_job_state_t **gpu)
++{
++	list_itr_t *iterator;
++	gres_state_t *state;
++	int result = 0;
++
++	*gpu = NULL;
++	if (!gres_list)
++		return 0;
++	if (list_count(gres_list) > 1024)
++		return -1;
++	iterator = list_iterator_create(gres_list);
++	while ((state = list_next(iterator))) {
++		if (!state->gres_name || !state->gres_data ||
++		    state->state_type != GRES_STATE_TYPE_JOB ||
++		    !strcmp(state->gres_name, "mps") ||
++		    !strcmp(state->gres_name, "shard") ||
++		    !strcmp(state->gres_name, "mig")) {
++			result = -1;
++			break;
++		}
++		if (state->plugin_id != gres_get_gpu_plugin_id())
++			continue;
++		if (*gpu || strcmp(state->gres_name, "gpu") ||
++		    (state->config_flags & GRES_CONF_SHARED)) {
++			result = -1;
++			break;
++		}
++		*gpu = state->gres_data;
++		if ((*gpu)->type_name || ((*gpu)->flags & GRES_CONF_SHARED)) {
++			result = -1;
++			break;
++		}
++		result = 1;
++	}
++	list_iterator_destroy(iterator);
++	if (result < 0)
++		*gpu = NULL;
++	return result;
++}
++
++/* Return 1 for an exact supported GPU request, 0 for no GPU, -1 unsupported. */
++static int _job_gpu_count(struct job_record *job_ptr, uint64_t *tres_cnt,
++				  bool allocated, uint64_t *gpu_count,
++				  const char **why)
++{
++	gres_job_state_t *gpu_state;
++	int pos, shape;
++	uint64_t tres_gpu = 0;
++
++	*gpu_count = 0;
++	*why = NULL;
++	if (job_ptr->het_job_id || job_ptr->het_job_list) {
++		*why = "pack/heterogeneous job";
++		return -1;
++	}
++	if (job_ptr->fed_details || (job_ptr->clusters && job_ptr->clusters[0])) {
++		*why = "federated or multi-cluster job";
++		return -1;
++	}
++
++	pos = _gpu_pos();
++	if (pos >= 0 && tres_cnt) {
++		if (pos >= slurmctld_tres_cnt) {
++			*why = "GPU TRES index outside controller array";
++			return -1;
++		}
++		tres_gpu = tres_cnt[pos];
++	}
++
++	/* Inspect plugin identity, including typed records. The generic lookup
++	 * matches a type name for typed GRES and can miss gpu:MODEL entirely. */
++	shape = _quota_gpu_shape(allocated ? job_ptr->gres_list_alloc : job_ptr->gres_list_req, &gpu_state);
++	if (shape < 0) {
++		*why = "typed, duplicate or GPU-like GRES is unsupported";
++		return -1;
++	}
++	if (!shape) {
++		if (tres_gpu) {
++			*why = "gpu TRES has no matching GRES state";
++			return -1;
++		}
++		return 0;
++	}
++	if (job_ptr->array_job_id || job_ptr->array_recs ||
++	    (job_ptr->array_task_id != NO_VAL)) {
++		*why = "job arrays are not supported";
++		return -1;
++	}
++	if (gpu_state->type_name) {
++		*why = "typed GPU or MIG allocation";
++		return -1;
++	}
++	if (tres_gpu == NO_CONSUME_VAL64 || (allocated && !gpu_state->node_cnt)) {
++		*why = "non-consumable GPU GRES";
++		return -1;
++	}
++	if (pos < 0) {
++		/* Slurm 19 without an accounting provider can omit gpu TRES.
++		 * Support only the exact single-node per-node GPU shape here.
++		 * Before allocation, require the selector's count at the chosen
++		 * node to agree with both the request and its aggregate. After
++		 * allocation/recovery, require the recorded allocation to agree.
++		 * Any unsupported or unclear shape remains pending. */
++		uint64_t count;
++		int index;
++		bitstr_t *nodes = job_ptr->job_resrcs ?
++			job_ptr->job_resrcs->node_bitmap : NULL;
++
++		if (!gpu_state->gres_per_node || gpu_state->gres_per_job ||
++		    gpu_state->gres_per_socket || gpu_state->gres_per_task) {
++			*why = "GPU request shape needs accounting TRES";
++			return -1;
++		}
++		if (allocated) {
++			if (gpu_state->node_cnt != 1 || !gpu_state->gres_cnt_node_alloc ||
++			    !gpu_state->gres_bit_alloc || !gpu_state->gres_bit_alloc[0]) {
++				*why = "single-node GPU allocation is not provable";
++				return -1;
++			}
++			count = gpu_state->gres_cnt_node_alloc[0];
++			if (count != (uint64_t)bit_set_count(gpu_state->gres_bit_alloc[0])) {
++				*why = "GPU allocation bitmap disagrees with count";
++				return -1;
++			}
++		} else {
++			if (!nodes || bit_set_count(nodes) != 1 ||
++			    !gpu_state->gres_cnt_node_select ||
++			    gpu_state->total_node_cnt != (uint32_t)bit_size(nodes)) {
++				*why = "single-node GPU selection is not provable";
++				return -1;
++			}
++			index = bit_ffs(nodes);
++			if (index < 0 || (uint32_t)index >= gpu_state->total_node_cnt) {
++				*why = "selected GPU node is unavailable";
++				return -1;
++			}
++			count = gpu_state->gres_cnt_node_select[index];
++			if (gpu_state->gres_bit_select &&
++			    (!gpu_state->gres_bit_select[index] ||
++			     count != (uint64_t)bit_set_count(gpu_state->gres_bit_select[index]))) {
++				*why = "GPU selection bitmap disagrees with count";
++				return -1;
++			}
++		}
++		if (!count || count != gpu_state->gres_per_node ||
++		    count != gpu_state->total_gres) {
++			*why = "GPU selection or allocation count mismatch";
++			return -1;
++		}
++		*gpu_count = count;
++		return 1;
++	}
++	if (allocated)
++		*gpu_count = gpu_state->total_gres;
++	else
++		*gpu_count = tres_gpu;
++	if (!*gpu_count) {
++		*why = "GPU count is not exact at allocation boundary";
++		return -1;
++	}
++	return 1;
++}
++
++static bool _token_enabled(void)
++{
++	const char *cursor, *start;
++	size_t len;
++
++	if (!slurm_conf.slurmctld_params)
++		return false;
++	cursor = slurm_conf.slurmctld_params;
++	while (*cursor) {
++		while (*cursor == ',' || *cursor == ' ' || *cursor == '\t')
++			cursor++;
++		start = cursor;
++		while (*cursor && *cursor != ',' && *cursor != ' ' &&
++		       *cursor != '\t')
++			cursor++;
++		len = (size_t)(cursor - start);
++		if (len == strlen(MQ_ENABLE_TOKEN) &&
++		    !strncasecmp(start, MQ_ENABLE_TOKEN, len))
++			return true;
++	}
++	return false;
++}
++
++static int _parse_u64(const char *text, uint64_t *value)
++{
++	char *end = NULL;
++	const unsigned char *cursor;
++	unsigned long long parsed;
++
++	if (!text || !text[0])
++		return -1;
++	for (cursor = (const unsigned char *)text; *cursor; cursor++)
++		if (*cursor < '0' || *cursor > '9')
++			return -1;
++	errno = 0;
++	parsed = strtoull(text, &end, 10);
++	if (errno || !end || *end != '\0')
++		return -1;
++	*value = (uint64_t)parsed;
++	return 0;
++}
++
++static int _parse_u32(const char *text, uint32_t *value)
++{
++	uint64_t parsed;
++
++	if (_parse_u64(text, &parsed) || parsed > UINT32_MAX)
++		return -1;
++	*value = (uint32_t)parsed;
++	return 0;
++}
++
++/* Convert without truncation for V2 amounts. The old WAL remains protected
++ * by its checkpoint and witness during the staged cutover. */
++static int _legacy_to_selectable(mq_amount_t value, uint64_t *out)
++{
++    if (!out || value.nsec >= MQ_NSEC_PER_SEC ||
++        value.sec > (UINT64_MAX - value.nsec) / MQ_NSEC_PER_SEC)
++        return -1;
++    *out = value.sec * (uint64_t) MQ_NSEC_PER_SEC + value.nsec;
++    return 0;
++}
++
++static int _replay_selectable_cutover(bool validate_only)
++{
++    mq_month_record_t *record;
++    struct time_tier_balance converted;
++    uint64_t grants;
++    if (mq_selectable_replay || mq_active)
++        return -1;
++    /* Reset unclassified historical consumption, as requested. Preserve
++     * existing approved grants and retain the old WAL for audit/rollback.
++     * Validate all accounts before changing any in-memory record. */
++    for (record = mq_months; record; record = record->next) {
++        if (_legacy_to_selectable(record->grants, &grants) ||
++            time_tier_import_legacy(&converted, 0, grants))
++            return -1;
++    }
++    if (validate_only) return 0;
++    for (record = mq_months; record; record = record->next) {
++        if (_legacy_to_selectable(record->grants, &grants) ||
++            time_tier_import_legacy(&record->selectable, 0, grants))
++            return -1;
++    }
++    mq_selectable_replay = true;
++    return 0;
++}
++
++/* V2 replay-only advancement. The controller still rejects V2 WALs at
++ * completion until writer, scheduling and recovery are all integrated. */
++static int _compare_tier_jobs(const void *left, const void *right)
++{
++    const struct time_active_job *a = left, *b = right;
++    if (a->job_id != b->job_id) return a->job_id < b->job_id ? -1 : 1;
++    if (a->generation != b->generation) return a->generation < b->generation ? -1 : 1;
++    return 0;
++}
++
++static int _replay_selectable_advance(const mq_time_t *end)
++{
++    mq_active_record_t *a, *b;
++    mq_time_t cursor, boundary, next;
++    mq_amount_t duration;
++    uint64_t nanos;
++    uint32_t month;
++    unsigned count, i;
++    struct time_active_job *jobs;
++    mq_month_record_t *record;
++
++    if (!mq_active) return -1;
++    cursor = mq_active->anchor;
++    for (a = mq_active; a; a = a->next)
++        if (!a->committed || _time_cmp(&a->anchor, &cursor) ||
++            _time_cmp(&cursor, end) > 0) return -1;
++    while (_time_cmp(&cursor, end) < 0) {
++        if (_month_key(&cursor, &month) || _next_month_boundary(&cursor, &boundary))
++            return -1;
++        next = _time_cmp(&boundary, end) < 0 ? boundary : *end;
++        if (_duration(&cursor, &next, &duration) ||
++            _legacy_to_selectable(duration, &nanos)) return -1;
++        for (a = mq_active; a; a = a->next) {
++            /* Process each user exactly once per interval. */
++            for (b = mq_active; b != a; b = b->next)
++                if (b->uid == a->uid) break;
++            if (b != a) continue;
++            count = 0;
++            for (b = mq_active; b; b = b->next)
++                if (b->uid == a->uid && ++count > 4096) return -1;
++            jobs = xcalloc(count, sizeof(*jobs));
++            i = 0;
++            for (b = mq_active; b; b = b->next) {
++                if (b->uid != a->uid) continue;
++                jobs[i].job_id = b->job_id; jobs[i].generation = b->generation;
++                jobs[i].current = b->current_tier; jobs[i].gpu_count = b->gpu_count;
++                i++;
++            }
++            qsort(jobs, count, sizeof(*jobs), _compare_tier_jobs);
++            record = _find_month(a->uid, month, true);
++            if (!record || time_tier_advance(&record->selectable, jobs, count, nanos)) {
++                xfree(jobs); return -1;
++            }
++            for (i = 0; i < count; i++) {
++                b = _find_active(jobs[i].job_id, jobs[i].generation);
++                if (!b) { xfree(jobs); return -1; }
++                b->current_tier = jobs[i].current;
++            }
++            xfree(jobs);
++        }
++        cursor = next;
++    }
++    for (a = mq_active; a; a = a->next) a->anchor = *end;
++    return 0;
++}
++
++static int _replay_event(char **fields, int field_count)
++{
++	const char *event;
++	uint32_t job_id, uid, month, nsec;
++	uint64_t generation, gpu_count, sec;
++	mq_time_t from, to;
++	mq_active_record_t *active;
++
++	if (field_count < 3)
++		return -1;
++	event = fields[2];
++	if (mq_selectable_replay && !strcmp(event, "CANCEL1")) {
++		mq_reserve1_t *entry;
++		if (field_count != 5 || _parse_u32(fields[3], &uid) ||
++		    !_reserve1_request_valid(fields[4]) ||
++		    !(entry = _reserve1_find(uid, fields[4])) || entry->job_id)
++			return -1;
++		_reserve1_remove(entry);
++		return 0;
++	}
++	if (mq_selectable_replay && !strcmp(event, "BIND1")) {
++		mq_reserve1_t *entry, *other;
++		if (field_count != 6 || _parse_u32(fields[3], &uid) ||
++		    !_reserve1_request_valid(fields[4]) ||
++		    _parse_u32(fields[5], &job_id) || !job_id ||
++		    !(entry = _reserve1_find(uid, fields[4])) || entry->job_id)
++			return -1;
++		for (other = mq_reserves; other; other = other->next)
++			if (other->job_id == job_id) return -1;
++		entry->job_id = job_id;
++		return 0;
++	}
++	if (mq_selectable_replay && !strcmp(event, "RESERVE1")) {
++		mq_reserve1_t *entry;
++		uint32_t tier, gpu, minutes;
++		uint64_t amount;
++		if (field_count != 10 || _parse_u32(fields[3], &uid) ||
++		    !_reserve1_request_valid(fields[4]) || _parse_u32(fields[5], &month) ||
++		    month / 100 < 1970 || month / 100 > 9999 || month % 100 < 1 || month % 100 > 12 ||
++		    _parse_u32(fields[6], &tier) || tier >= TIME_TIER_COUNT ||
++		    _parse_u32(fields[7], &gpu) || !gpu ||
++		    _parse_u32(fields[8], &minutes) || !minutes ||
++		    _parse_u64(fields[9], &amount) ||
++		    (uint64_t)minutes > UINT64_MAX / (60ULL * MQ_NSEC_PER_SEC) ||
++		    (uint64_t)gpu > UINT64_MAX / ((uint64_t)minutes * 60ULL * MQ_NSEC_PER_SEC) ||
++		    amount != (uint64_t)gpu * minutes * 60ULL * MQ_NSEC_PER_SEC ||
++		    _reserve1_find(uid, fields[4]))
++			return -1;
++		entry = xcalloc(1, sizeof(*entry));
++		entry->uid = uid; entry->month = month; entry->tier = tier;
++		entry->gpu = gpu; entry->minutes = minutes; entry->amount = amount;
++		memcpy(entry->request, fields[4], sizeof(entry->request));
++		entry->next = mq_reserves; mq_reserves = entry;
++		return 0;
++	}
++	if (!strcmp(event, "CUTOVER2_RESET_USAGE"))
++		return field_count == 3 ? _replay_selectable_cutover(false) : -1;
++	if (mq_selectable_replay && (!strcmp(event, "PREPARE2") || !strcmp(event, "PREPARE3") || !strcmp(event, "PREPARE4"))) {
++		mq_active_record_t *new_active;
++		mq_reserve1_t *bound = NULL;
++		mq_month_record_t *record;
++		uint32_t selected;
++		bool identity_bound = strcmp(event, "PREPARE2") != 0;
++		uint64_t submit_sec = 0;
++		uint32_t restart_count = 0;
++		if (field_count != (identity_bound ? 13 : 11) || strlen(fields[10]) != 32 ||
++		    (identity_bound && (_parse_u64(fields[11], &submit_sec) || !submit_sec ||
++				       _parse_u32(fields[12], &restart_count) || restart_count > UINT16_MAX)) ||
++		    strspn(fields[10], "0123456789abcdef") != 32 ||
++		    _parse_u32(fields[3], &job_id) || _parse_u32(fields[4], &uid) ||
++		    _parse_u64(fields[5], &generation) || _parse_u64(fields[6], &gpu_count) ||
++		    _parse_u64(fields[7], &sec) || _parse_u32(fields[8], &nsec) ||
++		    _parse_u32(fields[9], &selected) || nsec >= MQ_NSEC_PER_SEC ||
++		    !job_id || !generation || generation == UINT64_MAX ||
++		    generation < mq_next_generation || !gpu_count || selected >= TIME_TIER_COUNT)
++			return -1;
++		from.sec = sec; from.nsec = nsec;
++		if (!strcmp(event, "PREPARE4")) {
++			bound = _reserve1_find(uid, fields[10]);
++			if (!bound || bound->job_id != job_id || bound->generation ||
++			    bound->tier != selected || bound->gpu != gpu_count)
++				return -1;
++		}
++		if (_find_active_job(job_id)) return -1;
++		for (active = mq_active; active; active = active->next)
++			if (!active->committed || _time_cmp(&active->anchor, &from)) return -1;
++		if (_month_key(&from, &month)) return -1;
++		if (bound && bound->month != month) return -1;
++		record = _find_month(uid, month, true);
++		if (!record || time_tier_eligible(&record->selectable, (enum time_tier)selected) != 1)
++			return -1;
++		new_active = xcalloc(1, sizeof(*new_active));
++		new_active->job_id = job_id; new_active->uid = uid;
++		new_active->generation = generation;
++		new_active->planned_gpu = gpu_count; new_active->base_gpu = gpu_count;
++		new_active->gpu_count = gpu_count; new_active->anchor = from;
++		new_active->selected_tier = (enum time_tier)selected;
++		new_active->current_tier = (enum time_tier)selected;
++		memcpy(new_active->marker_id, fields[10], sizeof(new_active->marker_id));
++		new_active->submit_sec = submit_sec;
++		new_active->restart_count = restart_count;
++		new_active->identity_bound = identity_bound;
++		new_active->next = mq_active; mq_active = new_active;
++		if (bound) bound->generation = generation;
++		mq_next_generation = generation + 1;
++		return 0;
++	}
++	if (mq_selectable_replay && !strcmp(event, "ADVANCE2")) {
++		if (field_count != 5 || _parse_u64(fields[3], &to.sec) ||
++		    _parse_u32(fields[4], &to.nsec) || to.nsec >= MQ_NSEC_PER_SEC)
++			return -1;
++		return _replay_selectable_advance(&to);
++	}
++	if (mq_selectable_replay && !strcmp(event, "RELEASE2")) {
++		if (field_count != 7 || _parse_u32(fields[3], &job_id) ||
++		    _parse_u64(fields[4], &generation) || _parse_u64(fields[5], &to.sec) ||
++		    _parse_u32(fields[6], &to.nsec) || to.nsec >= MQ_NSEC_PER_SEC)
++			return -1;
++		active = _find_active(job_id, generation);
++		if (!active || !active->committed || _time_cmp(&active->anchor, &to)) return -1;
++		_remove_active(active);
++		return 0;
++	}
++	if (mq_selectable_replay && !strcmp(event, "GRANT2")) {
++		mq_month_record_t *record;
++		mq_amount_t amount;
++		struct time_tier_balance updated;
++		uint64_t nanos;
++		if (field_count != 11 || _parse_u32(fields[3], &uid) ||
++		    _parse_u32(fields[4], &month) || _parse_u64(fields[5], &amount.sec) ||
++		    _parse_u32(fields[6], &amount.nsec) || amount.nsec != 0 || !amount.sec ||
++		    month / 100 < 1970 || month / 100 > 9999 ||
++		    month % 100 < 1 || month % 100 > 12 ||
++		    !_field_safe(fields[7]) || !_field_safe(fields[8]) ||
++		    _find_grant(fields[7]) || _parse_u64(fields[9], &to.sec) ||
++		    _parse_u32(fields[10], &to.nsec) || to.nsec >= MQ_NSEC_PER_SEC ||
++		    _legacy_to_selectable(amount, &nanos)) return -1;
++		/* Prior ADVANCE2 must establish the grant instant, so it cannot
++		 * retroactively change allocation of earlier overage. */
++		for (active = mq_active; active; active = active->next)
++			if (!active->committed || _time_cmp(&active->anchor, &to)) return -1;
++		record = _find_month(uid, month, true);
++		if (!record) return -1;
++		updated = record->selectable;
++		if (time_tier_add_normal(&updated, nanos) ||
++		    _add_grant_memory(uid, month, fields[7], amount.sec, amount.nsec, fields[8]))
++			return -1;
++		record->selectable = updated;
++		return 0;
++	}
++	if (mq_selectable_replay && !strcmp(event, "COMMIT4")) {
++		mq_active_record_t *other;
++		if (field_count != 7 || _parse_u32(fields[3], &job_id) ||
++		    _parse_u64(fields[4], &generation) ||
++		    _parse_u64(fields[5], &to.sec) ||
++		    _parse_u32(fields[6], &to.nsec) || to.nsec >= MQ_NSEC_PER_SEC)
++			return -1;
++		active = _find_active(job_id, generation);
++		if (!active || active->committed || _time_cmp(&to, &active->anchor) < 0)
++			return -1;
++		for (other = mq_active; other; other = other->next)
++			if (other != active)
++				return -1;
++		active->committed = true;
++		return 0;
++	}
++	if (!strcmp(event, "UNKNOWN4"))
++		return -1;
++	if (mq_selectable_replay && !strcmp(event, "COMMIT"))
++		return -1;
++	/* Reject any V2 records not explicitly implemented above.
++	 * Never interpret remaining V2 records under legacy rules. */
++	if (mq_selectable_replay && strcmp(event, "COMMIT") && strcmp(event, "ABORT"))
++		return -1;
++	if (!strcmp(event, "PREPARE")) {
++		mq_active_record_t *new_active;
++
++		if (field_count != 9 || _parse_u32(fields[3], &job_id) ||
++		    _parse_u32(fields[4], &uid) ||
++		    _parse_u64(fields[5], &generation) ||
++		    _parse_u64(fields[6], &gpu_count) ||
++		    _parse_u64(fields[7], &sec) ||
++		    _parse_u32(fields[8], &nsec) || nsec >= MQ_NSEC_PER_SEC ||
++		    !generation || generation == UINT64_MAX ||
++		    generation < mq_next_generation || !gpu_count ||
++		    _find_active_job(job_id))
++			return -1;
++		new_active = xcalloc(1, sizeof(*new_active));
++		new_active->job_id = job_id;
++		new_active->uid = uid;
++		new_active->generation = generation;
++		new_active->planned_gpu = gpu_count;
++		new_active->base_gpu = gpu_count;
++		new_active->gpu_count = gpu_count;
++		new_active->anchor.sec = sec;
++		new_active->anchor.nsec = nsec;
++		new_active->next = mq_active;
++		mq_active = new_active;
++		if (generation >= mq_next_generation)
++			mq_next_generation = generation + 1;
++		return 0;
++	}
++
++	if (!strcmp(event, "COMMIT") || !strcmp(event, "ABORT")) {
++		if (field_count != 5 || _parse_u32(fields[3], &job_id) ||
++		    _parse_u64(fields[4], &generation))
++			return -1;
++		active = _find_active(job_id, generation);
++		if (!active)
++			return -1;
++		if (!strcmp(event, "COMMIT")) {
++			if (active->committed)
++				return -1;
++			active->committed = true;
++		} else {
++			if (active->committed)
++				return -1;
++			_remove_active(active);
++		}
++		return 0;
++	}
++
++	if (!strcmp(event, "SETTLE")) {
++		if (field_count != 9 || _parse_u32(fields[3], &job_id) ||
++		    _parse_u64(fields[4], &generation) ||
++		    _parse_u64(fields[5], &from.sec) ||
++		    _parse_u32(fields[6], &from.nsec) ||
++		    _parse_u64(fields[7], &to.sec) ||
++		    _parse_u32(fields[8], &to.nsec) ||
++		    from.nsec >= MQ_NSEC_PER_SEC || to.nsec >= MQ_NSEC_PER_SEC)
++			return -1;
++		active = _find_active(job_id, generation);
++		if (!active || !active->committed ||
++		    _time_cmp(&active->anchor, &from) != 0 ||
++		    _time_cmp(&from, &to) > 0)
++			return -1;
++		if (_charge_interval(active, &from, &to))
++			return -1;
++		active->anchor = to;
++		return 0;
++	}
++
++	/* Prior drafts recorded zero GPU occupancy for suspended jobs although
++	 * cons_tres retains their GRES. Refuse those legacy journals; their
++	 * historical charges cannot be reconstructed safely from this record. */
++	if (!strcmp(event, "SUSPEND") || !strcmp(event, "RESUME"))
++		return -1;
++	if (!strcmp(event, "RELEASE")) {
++		if (field_count != 7 || _parse_u32(fields[3], &job_id) ||
++		    _parse_u64(fields[4], &generation) ||
++		    _parse_u64(fields[5], &to.sec) ||
++		    _parse_u32(fields[6], &to.nsec) ||
++		    to.nsec >= MQ_NSEC_PER_SEC)
++			return -1;
++		active = _find_active(job_id, generation);
++		if (!active || !active->committed ||
++		    _time_cmp(&active->anchor, &to) > 0)
++			return -1;
++		if (_charge_interval(active, &active->anchor, &to))
++			return -1;
++		active->anchor = to;
++		_remove_active(active);
++		return 0;
++	}
++
++	if (!strcmp(event, "GRANT")) {
++		if (field_count != 9 || _parse_u32(fields[3], &uid) ||
++		    _parse_u32(fields[4], &month) || _parse_u64(fields[5], &sec) ||
++		    _parse_u32(fields[6], &nsec) || nsec != 0 || !sec ||
++		    month / 100 < 1970 || month / 100 > 9999 ||
++		    month % 100 < 1 || month % 100 > 12 ||
++		    !_field_safe(fields[7]) || !_field_safe(fields[8]) ||
++		    _find_grant(fields[7]))
++			return -1;
++		return _add_grant_memory(uid, month, fields[7], sec, nsec, fields[8]);
++	}
++
++	return -1;
++}
++
++/* The writer's line buffer is 1024 bytes. Bound recovery memory to the same
++ * maximum and reject incomplete, oversized or binary records. */
++static int _read_wal_line(FILE *stream, char *line, size_t size, size_t *length)
++{
++	size_t used = 0;
++	int ch;
++
++	while ((ch = fgetc(stream)) != EOF) {
++		if (ch == '\0' || used >= size - 1)
++			return -1;
++		line[used++] = (char)ch;
++		if (ch == '\n') {
++			line[used] = '\0';
++			*length = used;
++			return 1;
++		}
++	}
++	return (ferror(stream) || used) ? -1 : 0;
++}
++
++static int _replay_wal(void)
++{
++	FILE *stream;
++	char line[1024];
++	size_t line_len = 0;
++	int read_rc;
++	uint64_t seq;
++	bool header_seen = false;
++	int rc = -1;
++
++	if (lseek(mq_fd, 0, SEEK_SET) < 0)
++		return -1;
++	stream = fdopen(dup(mq_fd), "r");
++	if (!stream)
++		return -1;
++	while ((read_rc = _read_wal_line(stream, line, sizeof(line), &line_len)) > 0) {
++		char *fields[16];
++		char *save = line;
++		char *field;
++		int field_count = 0;
++
++		line[line_len - 1] = '\0';
++		if (line_len > 1 && line[line_len - 2] == '\r')
++			line[line_len - 2] = '\0';
++		field = strsep(&save, "|");
++		while (field && field_count < (int)(sizeof(fields) /
++							 sizeof(fields[0]))) {
++			if (!field[0])
++				goto out;
++			fields[field_count++] = field;
++			field = strsep(&save, "|");
++		}
++		if (field || field_count < 3 || strcmp(fields[0], MQ_WAL_VERSION))
++			goto out;
++		if (!strcmp(fields[1], "HEADER")) {
++			if (header_seen || field_count != 3 || strcmp(fields[2], "1"))
++				goto out;
++			header_seen = true;
++			continue;
++		}
++		if (!header_seen || mq_seq == UINT64_MAX ||
++		    _parse_u64(fields[1], &seq) || seq != mq_seq + 1)
++			goto out;
++		if (_replay_event(fields, field_count))
++			goto out;
++		mq_seq = seq;
++	}
++	/* An ordinary build refuses V2 journals. Only an explicitly compiled
++	 * experimental binary can exercise V2 recovery in isolation. */
++	if (read_rc < 0 || !header_seen ||
++	    (mq_selectable_replay && !TIME_ENABLE_SELECTABLE_V2))
++		goto out;
++	rc = 0;
++out:
++	fclose(stream);
++	if (lseek(mq_fd, 0, SEEK_END) < 0)
++		return -1;
++	return rc;
++}
++
++/* Recompute a digest over the complete locked WAL without changing its
++ * append offset. Coordinated rollback of both files remains out of scope. */
++static int _hash_wal(unsigned char digest[SHA256_DIGEST_LENGTH])
++{
++	char block[8192];
++	off_t offset = 0;
++	ssize_t n;
++	SHA256_CTX finalized;
++	if (SHA256_Init(&mq_wal_digest) != 1)
++		return -1;
++	for (;;) {
++		do { n = pread(mq_fd, block, sizeof(block), offset); }
++		while (n < 0 && errno == EINTR);
++		if (n < 0) return -1;
++		if (n == 0) break;
++		if (offset > INT64_MAX - n || SHA256_Update(&mq_wal_digest, block, (size_t)n) != 1)
++			return -1;
++		offset += n;
++	}
++	finalized = mq_wal_digest;
++	return SHA256_Final(digest, &finalized) == 1 ? 0 : -1;
++}
++
++/* Reject old, incomplete, sequence-mismatched or content-mismatched state. */
++static int _read_checkpoint(uint64_t *seq, const unsigned char digest[SHA256_DIGEST_LENGTH])
++{
++	char buf[160], *value, *separator;
++	ssize_t len;
++	size_t i;
++	const char prefix[] = MQ_WAL_VERSION "|CHECKPOINT|";
++	static const char digits[] = "0123456789abcdef";
++	do { len = pread(mq_checkpoint_fd, buf, sizeof(buf), 0); }
++	while (len < 0 && errno == EINTR);
++	if (len <= (ssize_t)sizeof(prefix) || len >= (ssize_t)sizeof(buf) ||
++	    memcmp(buf, prefix, sizeof(prefix) - 1) || buf[len - 1] != '\n')
++		return -1;
++	buf[len - 1] = '\0';
++	value = buf + sizeof(prefix) - 1;
++	separator = strchr(value, '|');
++	if (!separator || separator == value || strlen(separator + 1) != SHA256_DIGEST_LENGTH * 2)
++		return -1;
++	for (i = 0; i < (size_t)(separator - value); i++)
++		if (value[i] < '0' || value[i] > '9') return -1;
++	for (i = 0; i < SHA256_DIGEST_LENGTH; i++)
++		if (separator[1 + i * 2] != digits[digest[i] >> 4] ||
++		    separator[2 + i * 2] != digits[digest[i] & 15]) return -1;
++	*separator = '\0';
++	return _parse_u64(value, seq);
++}
++
++/* Slurm normally closes all inherited descriptors at startup. Preserve only
++ * the pre-opened, root-owned witness and prevent its propagation on exec. */
++int monthly_quota_inherited_witness_fd(void)
++{
++	const char *text = getenv("TIME_QUOTA_WITNESS_FD");
++	char *end;
++	unsigned long raw;
++	struct stat st;
++	int flags;
++	size_t i;
++	if (!text || !text[0]) return -1;
++	for (i = 0; text[i]; i++) if (text[i] < '0' || text[i] > '9') return -1;
++	errno = 0;
++	raw = strtoul(text, &end, 10);
++	if (errno || *end || raw < 3 || raw > INT_MAX) return -1;
++	flags = fcntl((int)raw, F_GETFL);
++	if (flags < 0 || (flags & O_ACCMODE) != O_RDWR || !(flags & O_APPEND) ||
++	    fstat((int)raw, &st) || !S_ISREG(st.st_mode) || st.st_uid != 0 ||
++	    st.st_nlink != 1 || (st.st_mode & 0077) || st.st_size == 0 ||
++	    fcntl((int)raw, F_SETFD, FD_CLOEXEC)) return -1;
++	return (int)raw;
++}
++
++/* Fail closed if the root-owned witness cannot prove the local WAL is its
++ * latest committed version. Whole-device rollback remains out of scope. */
++static int _open_witness(uint64_t expected_seq, const unsigned char digest[SHA256_DIGEST_LENGTH])
++{
++	const char *text = getenv("TIME_QUOTA_WITNESS_FD");
++	static const char digits[] = "0123456789abcdef";
++	struct stat st;
++	uint64_t raw_fd, seq, last = 0;
++	int flags, duplicate, rc = -1;
++	bool any = false;
++	char line[160], *sep, *value;
++	unsigned char last_digest[SHA256_DIGEST_LENGTH];
++	FILE *stream;
++	size_t i, len;
++	if (!text || !text[0]) return -1;
++	for (i = 0; text[i]; i++) if (text[i] < '0' || text[i] > '9') return -1;
++	if (_parse_u64(text, &raw_fd) || raw_fd < 3 || raw_fd > INT_MAX) return -1;
++	flags = fcntl((int)raw_fd, F_GETFL);
++	if (flags < 0 || (flags & O_ACCMODE) != O_RDWR || !(flags & O_APPEND) ||
++	    fstat((int)raw_fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != 0 ||
++	    st.st_nlink != 1 || (st.st_mode & 0077) || st.st_size == 0 ||
++	    flock((int)raw_fd, LOCK_EX | LOCK_NB) ||
++	    fcntl((int)raw_fd, F_SETFD, FD_CLOEXEC)) return -1;
++	mq_witness_fd = (int)raw_fd;
++	if (lseek(mq_witness_fd, 0, SEEK_SET) < 0 || (duplicate = dup(mq_witness_fd)) < 0)
++		return -1;
++	stream = fdopen(duplicate, "r");
++	if (!stream) { close(duplicate); return -1; }
++	while (fgets(line, sizeof(line), stream)) {
++		len = strlen(line);
++		if (len < 75 || line[len - 1] != '\n' || strncmp(line, "U20MQA1|", 8)) goto done;
++		line[len - 1] = '\0';
++		value = line + 8;
++		sep = strchr(value, '|');
++		if (!sep || sep == value || strlen(sep + 1) != SHA256_DIGEST_LENGTH * 2) goto done;
++		for (i = 0; i < (size_t)(sep - value); i++) if (value[i] < '0' || value[i] > '9') goto done;
++		*sep = '\0';
++		if (_parse_u64(value, &seq) || (!any && seq != 0) ||
++		    (any && (last == UINT64_MAX || seq != last + 1))) goto done;
++		for (i = 0; i < SHA256_DIGEST_LENGTH; i++) {
++			const char *high = strchr(digits, sep[1 + i * 2]);
++			const char *low = strchr(digits, sep[2 + i * 2]);
++			if (!high || !low || high == digits + 16 || low == digits + 16) goto done;
++			last_digest[i] = (unsigned char)(((high - digits) << 4) | (low - digits));
++		}
++		last = seq;
++		any = true;
++	}
++	if (!ferror(stream) && any && last == expected_seq &&
++	    !memcmp(last_digest, digest, SHA256_DIGEST_LENGTH)) rc = 0;
++ done:
++	fclose(stream);
++	return rc;
++}
++
++static int _open_wal(void)
++{
++	struct stat stat_buf;
++	char *checkpoint_path;
++	uint64_t checkpoint_seq;
++	unsigned char digest[SHA256_DIGEST_LENGTH];
++	/* Never silently recreate a lost ledger. Initial provisioning is a
++	 * separate, explicit administrative operation outside this module. */
++	int flags = O_RDWR | O_APPEND;
++
++	if (!slurm_conf.state_save_location ||
++	    !slurm_conf.state_save_location[0])
++		return -1;
++	if (mq_fd >= 0)
++		return 0;
++	mq_path = xstrdup_printf("%s/%s", slurm_conf.state_save_location,
++					 MQ_STATE_FILE);
++#ifdef O_CLOEXEC
++	flags |= O_CLOEXEC;
++#endif
++#ifdef O_NOFOLLOW
++	flags |= O_NOFOLLOW;
++#endif
++	mq_fd = open(mq_path, flags);
++	if (mq_fd < 0)
++		return -1;
++	if (flock(mq_fd, LOCK_EX | LOCK_NB) < 0)
++		goto fail;
++	if (fstat(mq_fd, &stat_buf) < 0 || !S_ISREG(stat_buf.st_mode) ||
++	    stat_buf.st_uid != geteuid() || stat_buf.st_nlink != 1 ||
++	    (stat_buf.st_mode & 0077))
++		goto fail;
++	if (stat_buf.st_size == 0 || _replay_wal() || _hash_wal(digest))
++		goto fail;
++	checkpoint_path = xstrdup_printf("%s/%s", slurm_conf.state_save_location,
++					MQ_CHECKPOINT_FILE);
++	mq_checkpoint_fd = open(checkpoint_path, flags & ~O_APPEND);
++	xfree(checkpoint_path);
++	if (mq_checkpoint_fd < 0 || flock(mq_checkpoint_fd, LOCK_EX | LOCK_NB) < 0 ||
++	    fstat(mq_checkpoint_fd, &stat_buf) < 0 || !S_ISREG(stat_buf.st_mode) ||
++	    stat_buf.st_uid != geteuid() || stat_buf.st_nlink != 1 ||
++	    (stat_buf.st_mode & 0077) || _read_checkpoint(&checkpoint_seq, digest) ||
++	    checkpoint_seq != mq_seq || _open_witness(mq_seq, digest))
++		goto fail;
++	return 0;
++fail:
++	if (mq_checkpoint_fd >= 0) {
++		close(mq_checkpoint_fd);
++		mq_checkpoint_fd = -1;
++	}
++	close(mq_fd);
++	mq_fd = -1;
++	return -1;
++}
++
++static void _set_pending_reason(struct job_record *job_ptr, const char *why)
++{
++	job_ptr->state_reason = WAIT_ACCOUNT_POLICY;
++	xfree(job_ptr->state_desc);
++	job_ptr->state_desc = xstrdup_printf("MonthlyGpuQuota:%s", why);
++}
++
++/* Caller holds the Slurm job write lock. Avoid repeatedly changing the
++ * scheduler timestamp when an already queued job has the same reason. */
++void monthly_quota_mark_exhausted(struct job_record *job_ptr)
++{
++	const char *reason = "MonthlyGpuQuota:selected monthly tier exhausted";
++	if (!job_ptr || !IS_JOB_PENDING(job_ptr)) return;
++	if (job_ptr->state_reason == WAIT_ACCOUNT_POLICY && job_ptr->state_desc &&
++	    !strcmp(job_ptr->state_desc, reason)) return;
++	job_ptr->state_reason = WAIT_ACCOUNT_POLICY;
++	xfree(job_ptr->state_desc);
++	job_ptr->state_desc = xstrdup(reason);
++	last_job_update = time(NULL);
++}
++
++static int _month_start(uint32_t month, mq_time_t *start)
++{
++	int year = (int)(month / 100);
++	int mon = (int)(month % 100);
++	int64_t days;
++	int64_t day_seconds, utc_sec;
++
++	if (year < 0 || year > 9999 || mon < 1 || mon > 12)
++		return -1;
++	days = _days_from_civil(year, (unsigned)mon, 1);
++	if (days > INT64_MAX / MQ_SECONDS_PER_DAY ||
++	    days < INT64_MIN / MQ_SECONDS_PER_DAY)
++		return -1;
++	day_seconds = days * MQ_SECONDS_PER_DAY;
++	if (day_seconds < INT64_MIN + MQ_SHANGHAI_OFFSET)
++		return -1;
++	utc_sec = day_seconds - MQ_SHANGHAI_OFFSET;
++	if (utc_sec < 0)
++		return -1;
++	start->sec = (uint64_t)utc_sec;
++	start->nsec = 0;
++	return 0;
++}
++
++/* Project only the current user's active intervals; test_only never writes. */
++static int _project_usage(uint32_t uid, uint32_t month, const mq_time_t *now,
++				  mq_amount_t *usage)
++{
++	mq_month_record_t *record;
++	mq_active_record_t *active;
++	mq_time_t month_start, month_end, from, to;
++	mq_amount_t duration, charge;
++
++	memset(usage, 0, sizeof(*usage));
++	record = _find_month(uid, month, false);
++	if (record && _amount_add_amount(usage, &record->usage))
++		return -1;
++	if (_month_start(month, &month_start) ||
++	    _next_month_boundary(&month_start, &month_end))
++		return -1;
++	for (active = mq_active; active; active = active->next) {
++		if (active->uid != uid || !active->gpu_count)
++			continue;
++		if (_time_cmp(&active->anchor, now) > 0)
++			return -1;
++		from = (_time_cmp(&active->anchor, &month_start) > 0) ?
++			active->anchor : month_start;
++		to = (_time_cmp(now, &month_end) < 0) ? *now : month_end;
++		if (_time_cmp(&from, &to) >= 0)
++			continue;
++		if (_duration(&from, &to, &duration) ||
++		    _multiply_duration(&duration, active->gpu_count, &charge) ||
++		    _amount_add_amount(usage, &charge))
++			return -1;
++	}
++	return 0;
++}
++
++static int _quota_available(uint32_t uid, uint32_t month,
++				    const mq_time_t *now, bool projected)
++{
++	mq_amount_t usage, capacity;
++	mq_month_record_t *record;
++
++	if (projected) {
++		if (_project_usage(uid, month, now, &usage))
++			return -1;
++	} else {
++		record = _find_month(uid, month, false);
++		memset(&usage, 0, sizeof(usage));
++		if (record && _amount_add_amount(&usage, &record->usage))
++			return -1;
++	}
++	capacity.sec = MQ_CAPACITY_GPU_SECONDS;
++	capacity.nsec = 0;
++	record = _find_month(uid, month, false);
++	/* A grant is added after debt is computed, which makes it pay debt first. */
++	if (record && _amount_add_amount(&capacity, &record->grants))
++		return -1;
++	return (_amount_cmp(&capacity, &usage) > 0) ? 1 : 0;
++}
++
++static int _tier_locked(uid_t uid, const mq_time_t *now,
++			monthly_quota_tier_t *tier)
++{
++	mq_amount_t usage, debug_limit, important_limit, normal_limit;
++	mq_month_record_t *record;
++	uint32_t month;
++	int rc = -1;
++
++	if ((uid_t)(uint32_t)uid != uid ||
++	    _month_key(now, &month) ||
++	    _project_usage((uint32_t)uid, month, now, &usage))
++		goto out;
++	debug_limit.sec = 5ULL * 60 * 60;
++	debug_limit.nsec = 0;
++	important_limit.sec = 105ULL * 60 * 60;
++	important_limit.nsec = 0;
++	normal_limit.sec = MQ_CAPACITY_GPU_SECONDS;
++	normal_limit.nsec = 0;
++	record = _find_month((uint32_t)uid, month, false);
++	if (record && _amount_add_amount(&normal_limit, &record->grants))
++		goto out;
++	if (_amount_cmp(&usage, &debug_limit) < 0)
++		*tier = MONTHLY_QUOTA_DEBUG;
++	else if (_amount_cmp(&usage, &important_limit) < 0)
++		*tier = MONTHLY_QUOTA_IMPORTANT;
++	else if (_amount_cmp(&usage, &normal_limit) < 0)
++		*tier = MONTHLY_QUOTA_NORMAL;
++	else
++		*tier = MONTHLY_QUOTA_EXHAUSTED;
++	rc = 0;
++out:
++	return rc;
++}
++
++/* Project one user's V2 balances without writing WAL or mutating live state.
++ * The caller holds mq_lock; V2 active allocations share a settled anchor. */
++static int _project_selectable_user(uint32_t uid, const mq_time_t *now,
++                                    struct time_tier_balance *out)
++{
++	mq_active_record_t *a;
++	mq_month_record_t *record;
++	struct time_active_job *jobs = NULL;
++	struct time_tier_balance balance;
++	mq_time_t cursor, boundary, next;
++	mq_amount_t duration;
++	uint64_t nanos;
++	uint32_t month;
++	unsigned count = 0, i = 0;
++	int rc = -1;
++
++	for (a = mq_active; a; a = a->next)
++		if (a->uid == uid && ++count > 4096) return -1;
++	if (!count) {
++		if (_month_key(now, &month)) return -1;
++		record = _find_month(uid, month, false);
++		return record ? (*out = record->selectable, 0) :
++			time_tier_import_legacy(out, 0, 0);
++	}
++	jobs = xcalloc(count, sizeof(*jobs));
++	cursor = mq_active->anchor;
++	for (a = mq_active; a; a = a->next) {
++		if (!a->committed || _time_cmp(&a->anchor, &cursor) ||
++		    _time_cmp(&cursor, now) > 0) goto out;
++		if (a->uid != uid) continue;
++		jobs[i].job_id = a->job_id; jobs[i].generation = a->generation;
++		jobs[i].current = a->current_tier; jobs[i].gpu_count = a->gpu_count;
++		i++;
++	}
++	qsort(jobs, count, sizeof(*jobs), _compare_tier_jobs);
++	while (_time_cmp(&cursor, now) < 0) {
++		if (_month_key(&cursor, &month) || _next_month_boundary(&cursor, &boundary)) goto out;
++		next = _time_cmp(&boundary, now) < 0 ? boundary : *now;
++		if (_duration(&cursor, &next, &duration) || _legacy_to_selectable(duration, &nanos)) goto out;
++		record = _find_month(uid, month, false);
++		if (record) balance = record->selectable;
++		else if (time_tier_import_legacy(&balance, 0, 0)) goto out;
++		if (time_tier_advance(&balance, jobs, count, nanos)) goto out;
++		cursor = next;
++		/* A boundary belongs to the following month. */
++		if (_time_cmp(&cursor, now) == 0 && _time_cmp(&cursor, &boundary) != 0) {
++			*out = balance; rc = 0; goto out;
++		}
++	}
++	if (_month_key(now, &month)) goto out;
++	record = _find_month(uid, month, false);
++	if (record) *out = record->selectable;
++	else if (time_tier_import_legacy(out, 0, 0)) goto out;
++	rc = 0;
++out:
++	xfree(jobs);
++	return rc;
++}
++
++/* Freeze per-job selected tier and current eligibility for one sorting pass.
++ * The authoritative allocation gate is checked separately under mq_lock. */
++int monthly_quota_jobs_tiers_at(struct job_record *const *jobs, size_t count,
++                                uint64_t sec, uint32_t nsec,
++                                monthly_quota_tier_t *tiers)
++{
++	mq_time_t now = { .sec = sec, .nsec = nsec };
++	monthly_quota_tier_t *snapshot;
++	struct time_tier_balance balance;
++	enum time_tier selected;
++	char marker[33];
++	size_t i;
++	int eligible, rc = -1;
++	if (nsec >= MQ_NSEC_PER_SEC || (count && (!jobs || !tiers)) ||
++	    count > SIZE_MAX / sizeof(*snapshot)) return -1;
++	snapshot = count ? malloc(count * sizeof(*snapshot)) : NULL;
++	if (count && !snapshot) return -1;
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || !mq_reconciled) goto out;
++	for (i = 0; i < count; i++) {
++		if (!jobs[i]) { snapshot[i] = MONTHLY_QUOTA_NORMAL; continue; }
++		if (!mq_selectable_replay) {
++			if (_tier_locked(jobs[i]->user_id, &now, &snapshot[i])) goto out;
++			continue;
++		}
++		if (time_parse_job_marker(jobs[i]->comment, marker, &selected) ||
++		    _project_selectable_user(jobs[i]->user_id, &now, &balance) ||
++		    (eligible = time_tier_eligible(&balance, selected)) < 0) goto out;
++		snapshot[i] = eligible ? (monthly_quota_tier_t)selected : MONTHLY_QUOTA_EXHAUSTED;
++	}
++	if (count) memcpy(tiers, snapshot, count * sizeof(*tiers));
++	rc = 0;
++out:
++	pthread_mutex_unlock(&mq_lock);
++	free(snapshot);
++	return rc;
++}
++
++int monthly_quota_snapshot2(uid_t uid, monthly_quota_snapshot2_t *out)
++{
++	monthly_quota_snapshot2_t result;
++	struct time_tier_balance balance;
++	mq_month_record_t *record;
++	mq_active_record_t *active;
++	mq_time_t now;
++	unsigned i;
++	int rc = -1;
++	if (!out || (uid_t)(uint32_t)uid != uid) return -1;
++	memset(&result, 0, sizeof(result));
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || !mq_reconciled || !mq_selectable_replay ||
++	    _now(&now) || _month_key(&now, &result.month) ||
++	    _project_selectable_user((uint32_t)uid, &now, &balance)) goto out;
++	record = _find_month((uint32_t)uid, result.month, false);
++	if (record) { result.granted.sec = record->grants.sec; result.granted.nsec = record->grants.nsec; }
++	for (i = 0; i < TIME_TIER_COUNT; i++) {
++		result.used[i].sec = balance.used[i] / MQ_NSEC_PER_SEC;
++		result.used[i].nsec = balance.used[i] % MQ_NSEC_PER_SEC;
++	}
++	result.overage.sec = balance.overage / MQ_NSEC_PER_SEC;
++	result.overage.nsec = balance.overage % MQ_NSEC_PER_SEC;
++	for (active = mq_active; active; active = active->next) {
++		if (active->uid != (uint32_t)uid) continue;
++		if (!active->committed || result.active_allocation_count == UINT32_MAX ||
++		    UINT64_MAX - result.active_gpu_count < active->gpu_count) goto out;
++		result.active_allocation_count++;
++		result.active_gpu_count += active->gpu_count;
++	}
++	result.observed_sec = now.sec; result.observed_nsec = now.nsec;
++	result.wal_sequence = mq_seq;
++	*out = result;
++	rc = 0;
++out:
++	pthread_mutex_unlock(&mq_lock);
++	return rc;
++}
++
++/* All output belongs to one locked ledger state and one supplied timestamp.
++ * Failure leaves the caller's output unchanged. It does not reserve GPUs. */
++int monthly_quota_tiers_at(const uid_t *uids, size_t count, uint64_t sec,
++			   uint32_t nsec, monthly_quota_tier_t *tiers)
++{
++	mq_time_t now = { .sec = sec, .nsec = nsec };
++	monthly_quota_tier_t *snapshot;
++	size_t i;
++	int rc = -1;
++
++	if (nsec >= MQ_NSEC_PER_SEC || (count && (!uids || !tiers)) ||
++	    count > SIZE_MAX / sizeof(*snapshot))
++		return -1;
++	snapshot = count ? malloc(count * sizeof(*snapshot)) : NULL;
++	if (count && !snapshot)
++		return -1;
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || !mq_reconciled || mq_selectable_replay)
++		goto out;
++	for (i = 0; i < count; i++) {
++		if (_tier_locked(uids[i], &now, &snapshot[i]))
++			goto out;
++	}
++	if (count)
++		memcpy(tiers, snapshot, count * sizeof(*snapshot));
++	rc = 0;
++out:
++	pthread_mutex_unlock(&mq_lock);
++	free(snapshot);
++	return rc;
++}
++
++int monthly_quota_tier_at(uid_t uid, uint64_t sec, uint32_t nsec,
++			  monthly_quota_tier_t *tier)
++{
++	return monthly_quota_tiers_at(&uid, 1, sec, nsec, tier);
++}
++
++/* Subtraction uses integer GPU-seconds and the existing nanosecond borrow. */
++static int _amount_subtract(const mq_amount_t *a, const mq_amount_t *b,
++			    mq_amount_t *out)
++{
++	mq_time_t from = { .sec = b->sec, .nsec = b->nsec };
++	mq_time_t to = { .sec = a->sec, .nsec = a->nsec };
++	return _duration(&from, &to, out);
++}
++
++int monthly_quota_snapshot(uid_t uid, monthly_quota_snapshot_t *out)
++{
++	monthly_quota_snapshot_t result;
++	mq_time_t now;
++	mq_amount_t used, grant = {0}, capacity = {0}, remainder = {0};
++	mq_month_record_t *record;
++	mq_active_record_t *active;
++	int rc = -1;
++
++	if (!out || (uid_t)(uint32_t)uid != uid)
++		return -1;
++	memset(&result, 0, sizeof(result));
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || !mq_reconciled || mq_selectable_replay || _now(&now) ||
++	    _month_key(&now, &result.month) ||
++	    _project_usage((uint32_t)uid, result.month, &now, &used) ||
++	    _tier_locked(uid, &now, &result.tier))
++		goto out;
++	record = _find_month((uint32_t)uid, result.month, false);
++	if (record)
++		grant = record->grants;
++	capacity.sec = MQ_CAPACITY_GPU_SECONDS;
++	if (_amount_add_amount(&capacity, &grant))
++		goto out;
++	if (_amount_cmp(&capacity, &used) >= 0) {
++		if (_amount_subtract(&capacity, &used, &remainder))
++			goto out;
++		result.remaining.sec = remainder.sec;
++		result.remaining.nsec = remainder.nsec;
++	} else {
++		if (_amount_subtract(&used, &capacity, &remainder))
++			goto out;
++		result.overage.sec = remainder.sec;
++		result.overage.nsec = remainder.nsec;
++	}
++	for (active = mq_active; active; active = active->next) {
++		if (active->uid != (uint32_t)uid)
++			continue;
++		if (!active->committed || result.active_allocation_count == UINT32_MAX ||
++		    UINT64_MAX - result.active_gpu_count < active->gpu_count)
++			goto out;
++		result.active_allocation_count++;
++		result.active_gpu_count += active->gpu_count;
++	}
++	result.uid = uid;
++	result.observed_sec = now.sec;
++	result.observed_nsec = now.nsec;
++	result.wal_sequence = mq_seq;
++	result.used.sec = used.sec;
++	result.used.nsec = used.nsec;
++	result.granted.sec = grant.sec;
++	result.granted.nsec = grant.nsec;
++	result.capacity.sec = capacity.sec;
++	result.capacity.nsec = capacity.nsec;
++	*out = result;
++	rc = 0;
++out:
++	pthread_mutex_unlock(&mq_lock);
++	return rc;
++}
++
++static int _reserve1_available(uint32_t uid, uint32_t month, uint32_t tier,
++			       uint64_t *available)
++{
++	mq_reserve1_t *entry;
++	mq_month_record_t *record;
++	struct time_tier_balance balance;
++	uint64_t reserved = 0;
++
++	if (!available || tier >= TIME_TIER_COUNT || mq_active)
++		return -1;
++	for (entry = mq_reserves; entry; entry = entry->next) {
++		if (entry->month != month)
++			return -1;
++		if (entry->uid == uid && entry->tier == tier) {
++			if (UINT64_MAX - reserved < entry->amount)
++				return -1;
++			reserved += entry->amount;
++		}
++	}
++	record = _find_month(uid, month, false);
++	if (record)
++		balance = record->selectable;
++	else if (time_tier_import_legacy(&balance, 0, 0))
++		return -1;
++	if (balance.used[tier] > balance.limit[tier] ||
++	    reserved > balance.limit[tier] - balance.used[tier])
++		return -1;
++	*available = balance.limit[tier] - balance.used[tier] - reserved;
++	return 0;
++}
++
++static int _check_shape_and_quota(struct job_record *job_ptr,
++					  uint64_t *tres_req_cnt,
++					  bool test_only,
++					  bool preemption_candidate)
++{
++	uint64_t gpu_count;
++	const char *why = NULL;
++	mq_time_t now;
++	uint32_t month;
++	int shape_rc, available;
++
++	(void) test_only; /* All early checks project running usage without writes. */
++	shape_rc = _job_gpu_count(job_ptr, tres_req_cnt, false, &gpu_count, &why);
++	if (shape_rc == 0)
++		return 0;
++	if (shape_rc < 0) {
++		_set_pending_reason(job_ptr, why ? why : "unsupported job shape");
++		return -1;
++	}
++	if (_now(&now) || _month_key(&now, &month)) {
++		_set_pending_reason(job_ptr, "clock or month conversion unavailable");
++		return -1;
++	}
++	if (preemption_candidate) {
++		_set_pending_reason(job_ptr,
++				    "preemption path is not transactionally supported");
++		return -1;
++	}
++	if (!mq_healthy || !mq_reconciled) {
++		_set_pending_reason(job_ptr, "ledger recovering or unavailable");
++		return -1;
++	}
++	if (mq_selectable_replay) {
++		enum time_tier selected;
++		char marker_id[33];
++		uint64_t remaining;
++		/* Final admission, before GPU allocation, settles the common
++		 * timeline and checks this selected tier under the same lock.
++		 * Early scheduler checks are advisory and never reserve GPUs. */
++		if (time_parse_job_marker(job_ptr->comment, marker_id, &selected)) {
++			_set_pending_reason(job_ptr, "selected monthly tier missing or invalid");
++			return -1;
++		}
++		if (_reserve1_available(job_ptr->user_id, month, selected, &remaining) || !remaining) {
++			_set_pending_reason(job_ptr, "reserved or running quota unavailable");
++			return -1;
++		}
++		return 1;
++	}
++	if (mq_reserves) return -1;
++	available = _quota_available(job_ptr->user_id, month, &now, true);
++	if (available <= 0) {
++		_set_pending_reason(job_ptr,
++				    available < 0 ? "ledger arithmetic failure" :
++				    "monthly capacity exhausted");
++		return -1;
++	}
++	return 1;
++}
++
++static int _ensure_module_locked(void)
++{
++	bool wanted = _token_enabled();
++	bool opened = false;
++
++	if (!wanted) {
++		if (mq_initialized && mq_enabled && mq_active) {
++			/* Turning the gate off while allocations are live is unsafe. */
++			_mark_unhealthy("disable requested while allocations are live");
++			return 0;
++		}
++		mq_initialized = true;
++		mq_enabled = false;
++		mq_healthy = false;
++		mq_reconciled = false;
++		return 0;
++	}
++
++	mq_initialized = true;
++	mq_enabled = true;
++	if (mq_fd < 0) {
++		_free_memory();
++		mq_seq = 0;
++		mq_next_generation = 1;
++		xfree(mq_path);
++		mq_path = NULL;
++		if (_open_wal()) {
++			_mark_unhealthy("cannot open or exclusively lock WAL");
++			return -1;
++		}
++		opened = true;
++	}
++	if (opened) {
++		mq_healthy = true;
++		mq_reconciled = false;
++	}
++	return 0;
++}
++
++int monthly_quota_check(struct job_record *job_ptr, uint64_t *tres_req_cnt,
++				bool test_only, bool preemption_candidate)
++{
++	int rc;
++
++	if (!job_ptr)
++		return -1;
++	pthread_mutex_lock(&mq_lock);
++	if (_token_enabled() && !mq_enabled)
++		(void) _ensure_module_locked();
++	if (!_token_enabled() && !mq_enabled) {
++		pthread_mutex_unlock(&mq_lock);
++		return 0;
++	}
++	if (!mq_enabled) {
++		pthread_mutex_unlock(&mq_lock);
++		return 0;
++	}
++	rc = _check_shape_and_quota(job_ptr, tres_req_cnt, test_only,
++					preemption_candidate);
++	pthread_mutex_unlock(&mq_lock);
++	return rc;
++}
++
++static int _monthly_quota_begin(struct job_record *job_ptr,
++				uint64_t *tres_req_cnt, uint64_t expected_gpu,
++				bool preselect)
++{
++	uint64_t gpu_count;
++	const char *why = NULL;
++	mq_time_t now;
++	uint32_t month;
++	mq_active_record_t *active;
++	enum time_tier selected = TIME_DEBUG;
++	char marker_id[33];
++	mq_active_record_t *pending;
++	mq_reserve1_t *bound = NULL;
++
++	if (!job_ptr)
++		return -1;
++	pthread_mutex_lock(&mq_lock);
++	if (_token_enabled() && !mq_enabled)
++		(void) _ensure_module_locked();
++	if (!mq_enabled) {
++		pthread_mutex_unlock(&mq_lock);
++		return preselect ? -1 : 0;
++	}
++	if (preselect && (!TIME_ENABLE_SELECTABLE_V2 || !mq_selectable_replay ||
++			  !mq_healthy || !mq_reconciled || mq_fd < 0 ||
++			  mq_checkpoint_fd < 0 || mq_witness_fd < 0)) {
++		_set_pending_reason(job_ptr, "selectable ledger recovering or unavailable");
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++	if (_job_gpu_count(job_ptr, tres_req_cnt, false, &gpu_count, &why) <= 0) {
++		if (why)
++			_set_pending_reason(job_ptr, why);
++		pthread_mutex_unlock(&mq_lock);
++		return (why || preselect) ? -1 : 0;
++	}
++	if (preselect && (!expected_gpu || gpu_count != expected_gpu)) {
++		_set_pending_reason(job_ptr, "preselected GPU count changed");
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++	for (pending = mq_active; pending; pending = pending->next) {
++		if (!pending->committed) {
++			_set_pending_reason(job_ptr, "another allocation intent is unresolved");
++			pthread_mutex_unlock(&mq_lock);
++			return -1;
++		}
++	}
++	if (!mq_healthy || !mq_reconciled || _now(&now) ||
++	    _month_key(&now, &month) || _settle_all(&now)) {
++		_set_pending_reason(job_ptr, "ledger recovering or unavailable");
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++	if (_find_active_job(job_ptr->job_id)) {
++		_set_pending_reason(job_ptr, "allocation generation already active");
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++	if (mq_selectable_replay) {
++		mq_month_record_t *record;
++		uint64_t duration_ns, required, remaining;
++		if (!job_ptr->details || job_ptr->details->submit_time <= 0 ||
++		    time_parse_job_marker(job_ptr->comment, marker_id, &selected) ||
++		    !(record = _find_month(job_ptr->user_id, month, true)) ||
++		    time_tier_eligible(&record->selectable, selected) != 1) {
++			_set_pending_reason(job_ptr, "selected monthly tier unavailable");
++			pthread_mutex_unlock(&mq_lock);
++			return -1;
++		}
++		if (preselect) {
++			bound = _reserve1_find(job_ptr->user_id, marker_id);
++			if (!bound || bound->job_id != job_ptr->job_id || bound->generation ||
++			    bound->month != month || bound->tier != selected ||
++			    bound->gpu != gpu_count || bound->minutes != job_ptr->time_limit) {
++				_set_pending_reason(job_ptr, "bound reservation identity unavailable");
++				pthread_mutex_unlock(&mq_lock);
++				return -1;
++			}
++		}
++		if (_reserve1_available(job_ptr->user_id, month, selected, &remaining) ||
++		    (bound && UINT64_MAX - remaining < bound->amount)) {
++			_set_pending_reason(job_ptr, "reserved or running quota unavailable");
++			pthread_mutex_unlock(&mq_lock);
++			return -1;
++		}
++		if (bound) remaining += bound->amount;
++		if (!remaining) {
++			_set_pending_reason(job_ptr, "reserved or running quota unavailable");
++			pthread_mutex_unlock(&mq_lock);
++			return -1;
++		}
++		if (preselect) {
++			if (!job_ptr->time_limit || job_ptr->time_limit >= INFINITE ||
++			    (uint64_t)job_ptr->time_limit > UINT64_MAX / (60ULL * MQ_NSEC_PER_SEC)) {
++				_set_pending_reason(job_ptr, "finite job time limit required");
++				pthread_mutex_unlock(&mq_lock);
++				return -1;
++			}
++			duration_ns = (uint64_t)job_ptr->time_limit * 60ULL * MQ_NSEC_PER_SEC;
++			if (gpu_count > UINT64_MAX / duration_ns ||
++			    record->selectable.used[selected] > record->selectable.limit[selected]) {
++				_set_pending_reason(job_ptr, "reservation amount unavailable");
++				pthread_mutex_unlock(&mq_lock);
++				return -1;
++			}
++			required = gpu_count * duration_ns;
++			if (required > remaining) {
++				_set_pending_reason(job_ptr, "selected tier cannot cover requested GPU time");
++				pthread_mutex_unlock(&mq_lock);
++				return -1;
++			}
++		}
++	} else if (mq_reserves || _quota_available(job_ptr->user_id, month, &now, false) <= 0) {
++		_set_pending_reason(job_ptr, "monthly capacity exhausted");
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++	if (!mq_next_generation || mq_next_generation == UINT64_MAX) {
++		_mark_unhealthy("allocation generation exhausted");
++		_set_pending_reason(job_ptr, "allocation identity unavailable");
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++	active = xcalloc(1, sizeof(*active));
++	active->job_id = job_ptr->job_id;
++	active->uid = job_ptr->user_id;
++	active->generation = mq_next_generation++;
++	active->planned_gpu = gpu_count;
++	active->base_gpu = gpu_count;
++	active->gpu_count = gpu_count;
++	active->anchor = now;
++	active->selected_tier = selected;
++	active->current_tier = selected;
++	if (mq_selectable_replay) {
++		memcpy(active->marker_id, marker_id, sizeof(active->marker_id));
++		active->submit_sec = (uint64_t)job_ptr->details->submit_time;
++		active->restart_count = job_ptr->restart_cnt;
++		active->identity_bound = true;
++	}
++	if ((mq_selectable_replay &&
++	     _append_event(bound ? "PREPARE4|%u|%u|%" PRIu64 "|%" PRIu64 "|%" PRIu64 "|%u|%u|%s|%" PRIu64 "|%u" :
++			   "PREPARE3|%u|%u|%" PRIu64 "|%" PRIu64 "|%" PRIu64 "|%u|%u|%s|%" PRIu64 "|%u",
++			   active->job_id, active->uid, active->generation, active->planned_gpu,
++			   active->anchor.sec, active->anchor.nsec, (unsigned)selected, active->marker_id,
++			   active->submit_sec, active->restart_count)) ||
++	    (!mq_selectable_replay &&
++	     _append_event("PREPARE|%u|%u|%" PRIu64 "|%" PRIu64 "|%" PRIu64 "|%u",
++			   active->job_id, active->uid, active->generation, active->planned_gpu,
++			   active->anchor.sec, active->anchor.nsec))) {
++		xfree(active);
++		_mark_unhealthy("PREPARE fsync failed");
++		_set_pending_reason(job_ptr, "ledger write failure");
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++	active->next = mq_active;
++	mq_active = active;
++	if (bound) bound->generation = active->generation;
++	/* The caller must keep mq_lock through every allocation side effect. */
++	return 1;
++}
++
++int monthly_quota_begin(struct job_record *job_ptr, uint64_t *tres_req_cnt)
++{
++	return _monthly_quota_begin(job_ptr, tres_req_cnt, 0, false);
++}
++
++int monthly_quota_begin_preselect(struct job_record *job_ptr,
++				  uint64_t expected_gpu_count)
++{
++	if (!job_ptr || !job_ptr->tres_req_cnt)
++		return -1;
++	return _monthly_quota_begin(job_ptr, job_ptr->tres_req_cnt,
++				    expected_gpu_count, true);
++}
++
++int monthly_quota_commit(struct job_record *job_ptr)
++{
++	mq_active_record_t *active;
++	mq_active_record_t *other;
++	mq_time_t commit_time;
++	gres_job_state_t *gpu_state;
++	uint64_t actual_gpu;
++	const char *why = NULL;
++	enum time_tier selected;
++	char marker_id[33];
++	int pos;
++
++	if (!mq_enabled)
++		return 0;
++	active = _find_active_job(job_ptr->job_id);
++	if (!active || active->uid != job_ptr->user_id ||
++	    (active->identity_bound &&
++	     (!job_ptr->details || job_ptr->details->submit_time <= 0 ||
++	      (uint64_t)job_ptr->details->submit_time != active->submit_sec ||
++	      job_ptr->restart_cnt != active->restart_count ||
++	      time_parse_job_marker(job_ptr->comment, marker_id, &selected) ||
++	      strcmp(marker_id, active->marker_id) ||
++	      selected != active->selected_tier)) ||
++	    _job_gpu_count(job_ptr, NULL, true, &actual_gpu, &why) <= 0 ||
++	    actual_gpu != active->planned_gpu ||
++	    _quota_gpu_shape(job_ptr->gres_list_alloc, &gpu_state) != 1 ||
++	    !job_ptr->job_resrcs || !job_ptr->job_resrcs->node_bitmap ||
++	    bit_set_count(job_ptr->job_resrcs->node_bitmap) != 1 ||
++	    gpu_state->node_cnt != 1 || !gpu_state->gres_cnt_node_alloc ||
++	    !gpu_state->gres_bit_alloc || !gpu_state->gres_bit_alloc[0] ||
++	    gpu_state->gres_cnt_node_alloc[0] != actual_gpu ||
++	    (uint64_t)bit_set_count(gpu_state->gres_bit_alloc[0]) != actual_gpu) {
++		_mark_unhealthy("allocated GPU count differs from prepared count");
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++	pos = _gpu_pos();
++	if (job_ptr->tres_alloc_cnt && pos >= 0 && pos < slurmctld_tres_cnt &&
++	    job_ptr->tres_alloc_cnt[pos] &&
++	    job_ptr->tres_alloc_cnt[pos] != actual_gpu) {
++		_mark_unhealthy("allocated TRES disagrees with GRES state");
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++	if (mq_selectable_replay) {
++		for (other = mq_active; other; other = other->next)
++			if (other != active) {
++				_mark_unhealthy("concurrent V2 commit timeline unsupported");
++				pthread_mutex_unlock(&mq_lock);
++				return -1;
++			}
++		if (_now(&commit_time) || _time_cmp(&commit_time, &active->anchor) < 0 ||
++		    _append_event("COMMIT4|%u|%" PRIu64 "|%" PRIu64 "|%u",
++				  active->job_id, active->generation,
++				  commit_time.sec, commit_time.nsec)) {
++			_mark_unhealthy("COMMIT4 time or fsync failed");
++			pthread_mutex_unlock(&mq_lock);
++			return -1;
++		}
++	} else if (_append_event("COMMIT|%u|%" PRIu64, active->job_id,
++				 active->generation)) {
++		_mark_unhealthy("COMMIT fsync failed");
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++	active->committed = true;
++	pthread_mutex_unlock(&mq_lock);
++	return 0;
++}
++
++void monthly_quota_abort(struct job_record *job_ptr)
++{
++	mq_active_record_t *active;
++
++	if (!mq_enabled)
++		return;
++	active = _find_active_job(job_ptr->job_id);
++	if (!active) {
++		pthread_mutex_unlock(&mq_lock);
++		return;
++	}
++	if (active->committed || _append_event("ABORT|%u|%" PRIu64,
++						 active->job_id, active->generation)) {
++		_mark_unhealthy(active->committed ?
++				"attempted abort after commit" : "ABORT fsync failed");
++		pthread_mutex_unlock(&mq_lock);
++		return;
++	}
++	_remove_active(active);
++	pthread_mutex_unlock(&mq_lock);
++}
++
++void monthly_quota_ambiguous(struct job_record *job_ptr)
++{
++	mq_active_record_t *active;
++	if (!mq_enabled)
++		return;
++	active = job_ptr ? _find_active_job(job_ptr->job_id) : NULL;
++	if (active && !active->committed && mq_healthy &&
++	    _append_event("UNKNOWN4|%u|%" PRIu64, active->job_id,
++			  active->generation))
++		_mark_unhealthy("UNKNOWN4 fsync failed");
++	_mark_unhealthy("resource side effect has no proven rollback");
++	pthread_mutex_unlock(&mq_lock);
++}
++
++int monthly_quota_intent_prepare(struct job_record *job_ptr, uint64_t gpu_count,
++				 monthly_quota_intent_t *intent)
++{
++	mq_active_record_t *active;
++	int rc;
++
++	if (!intent)
++		return -1;
++	memset(intent, 0, sizeof(*intent));
++	rc = monthly_quota_begin_preselect(job_ptr, gpu_count);
++	if (rc != 1)
++		return -1;
++	active = _find_active_job(job_ptr->job_id);
++	if (!active || active->committed || !active->identity_bound ||
++	    active->uid != job_ptr->user_id || active->planned_gpu != gpu_count) {
++		_mark_unhealthy("prepared allocation identity unavailable");
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++	intent->job_id = active->job_id;
++	intent->uid = active->uid;
++	intent->generation = active->generation;
++	intent->gpu_count = active->planned_gpu;
++	pthread_mutex_unlock(&mq_lock);
++	return 1;
++}
++
++static bool _intent_matches(struct job_record *job_ptr,
++			    const monthly_quota_intent_t *intent)
++{
++	mq_active_record_t *active;
++
++	if (!job_ptr || !intent || !intent->generation ||
++	    job_ptr->job_id != intent->job_id || job_ptr->user_id != intent->uid)
++		return false;
++	active = _find_active(intent->job_id, intent->generation);
++	return active && !active->committed && active->identity_bound &&
++		active->uid == intent->uid && active->planned_gpu == intent->gpu_count;
++}
++
++int monthly_quota_intent_commit(struct job_record *job_ptr,
++				const monthly_quota_intent_t *intent)
++{
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || !mq_reconciled ||
++	    !_intent_matches(job_ptr, intent)) {
++		_mark_unhealthy("allocation intent cannot be committed");
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++	return monthly_quota_commit(job_ptr);
++}
++
++void monthly_quota_intent_abort(struct job_record *job_ptr,
++				const monthly_quota_intent_t *intent)
++{
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || !_intent_matches(job_ptr, intent)) {
++		_mark_unhealthy("allocation intent cannot be aborted");
++		pthread_mutex_unlock(&mq_lock);
++		return;
++	}
++	monthly_quota_abort(job_ptr);
++}
++
++void monthly_quota_intent_unknown(struct job_record *job_ptr,
++				  const monthly_quota_intent_t *intent)
++{
++	pthread_mutex_lock(&mq_lock);
++	if (!_intent_matches(job_ptr, intent)) {
++		_mark_unhealthy("unknown allocation intent identity");
++		pthread_mutex_unlock(&mq_lock);
++		return;
++	}
++	monthly_quota_ambiguous(job_ptr);
++}
++
++void monthly_quota_release_unproven(struct job_record *job_ptr)
++{
++	mq_active_record_t *active;
++
++	if (!job_ptr)
++		return;
++	pthread_mutex_lock(&mq_lock);
++	active = _find_active_job(job_ptr->job_id);
++	if (mq_enabled && active) {
++		if (mq_healthy && _append_event("UNKNOWN4|%u|%" PRIu64,
++					       active->job_id, active->generation))
++			_mark_unhealthy("release UNKNOWN4 fsync failed");
++		_mark_unhealthy(active->uid == job_ptr->user_id ?
++				"GPU release not proven" : "release identity mismatch");
++	}
++	pthread_mutex_unlock(&mq_lock);
++}
++
++void monthly_quota_release(struct job_record *job_ptr)
++{
++	mq_active_record_t *active;
++	mq_time_t now;
++	enum time_tier selected;
++	char marker_id[33];
++
++	if (!job_ptr)
++		return;
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled) {
++		pthread_mutex_unlock(&mq_lock);
++		return;
++	}
++	/* Never append to a ledger with unresolved or failed durable writes.
++	 * Keep the active record as evidence; recovery will remain fail-closed. */
++	if (!mq_healthy || !mq_reconciled) {
++		pthread_mutex_unlock(&mq_lock);
++		return;
++	}
++	active = _find_active_job(job_ptr->job_id);
++	if (!active) {
++		pthread_mutex_unlock(&mq_lock);
++		return;
++	}
++	if (!active->committed) {
++		_mark_unhealthy("release encountered uncommitted allocation");
++		pthread_mutex_unlock(&mq_lock);
++		return;
++	}
++	if (!active->identity_bound || !active->generation ||
++	    active->uid != job_ptr->user_id || !job_ptr->details ||
++	    job_ptr->details->submit_time <= 0 ||
++	    (uint64_t)job_ptr->details->submit_time != active->submit_sec ||
++	    job_ptr->restart_cnt != active->restart_count ||
++	    time_parse_job_marker(job_ptr->comment, marker_id, &selected) ||
++	    strcmp(marker_id, active->marker_id) ||
++	    selected != active->selected_tier) {
++		if (_append_event("UNKNOWN4|%u|%" PRIu64,
++				  active->job_id, active->generation))
++			_mark_unhealthy("release identity UNKNOWN4 fsync failed");
++		_mark_unhealthy("release identity cannot be verified");
++		pthread_mutex_unlock(&mq_lock);
++		return;
++	}
++	if (mq_selectable_replay) {
++		if (_now(&now) || _settle_all(&now) ||
++		    _append_event("RELEASE2|%u|%" PRIu64 "|%" PRIu64 "|%u",
++				  active->job_id, active->generation, now.sec, now.nsec)) {
++			_mark_unhealthy("RELEASE2 could not be durably settled");
++			pthread_mutex_unlock(&mq_lock);
++			return;
++		}
++		_remove_active(active);
++		pthread_mutex_unlock(&mq_lock);
++		return;
++	}
++	if (_now(&now) || _append_event("RELEASE|%u|%" PRIu64 "|%" PRIu64
++					"|%u", active->job_id, active->generation,
++					 now.sec, now.nsec) ||
++	    _charge_interval(active, &active->anchor, &now)) {
++		_mark_unhealthy("RELEASE could not be durably settled");
++		pthread_mutex_unlock(&mq_lock);
++		return;
++	}
++	active->anchor = now;
++	_remove_active(active);
++	pthread_mutex_unlock(&mq_lock);
++}
++
++void monthly_quota_suspend(struct job_record *job_ptr, bool indefinite)
++{
++	/* cons_tres suspends CPU cores, retaining memory and GRES ownership. */
++	(void) job_ptr;
++	(void) indefinite;
++}
++
++void monthly_quota_resume(struct job_record *job_ptr, bool indefinite)
++{
++	/* GPU accounting continues through suspend and resume. */
++	(void) job_ptr;
++	(void) indefinite;
++}
++
++bool monthly_quota_job_resize_denied(struct job_record *job_ptr,
++					     bool resize_request)
++{
++	bool denied = false;
++
++	if (!job_ptr || !resize_request)
++		return false;
++	pthread_mutex_lock(&mq_lock);
++	if (mq_enabled && (IS_JOB_RUNNING(job_ptr) || IS_JOB_SUSPENDED(job_ptr)))
++		denied = true;
++	pthread_mutex_unlock(&mq_lock);
++	return denied;
++}
++
++int monthly_quota_grant(uid_t uid, uint32_t month, uint64_t gpu_seconds,
++				const char *grant_id, const char *actor)
++{
++	uint32_t uid32 = (uint32_t)uid;
++	mq_grant_record_t *existing;
++
++	pthread_mutex_lock(&mq_lock);
++	if (_token_enabled() && !mq_enabled)
++		(void) _ensure_module_locked();
++	if (!mq_enabled || !mq_healthy || !mq_reconciled ||
++	    (uid_t)uid32 != uid || month % 100 < 1 || month % 100 > 12 ||
++	    month / 100 < 1970 || month / 100 > 9999 ||
++	    !gpu_seconds || !_field_safe(grant_id) ||
++	    !_field_safe(actor)) {
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++	existing = _find_grant(grant_id);
++	if (existing) {
++		int same = existing->uid == uid32 && existing->month == month &&
++			   existing->amount.sec == gpu_seconds &&
++			   existing->amount.nsec == 0 &&
++			   !strcmp(existing->actor, actor);
++		pthread_mutex_unlock(&mq_lock);
++		return same ? 0 : -1;
++	}
++	if (mq_selectable_replay) {
++		mq_time_t now;
++		mq_amount_t amount = { .sec = gpu_seconds, .nsec = 0 };
++		mq_month_record_t *record;
++		struct time_tier_balance updated;
++		uint64_t nanos;
++		if (_legacy_to_selectable(amount, &nanos) || _now(&now) || _settle_all(&now) ||
++		    !(record = _find_month(uid32, month, true))) {
++			pthread_mutex_unlock(&mq_lock);
++			return -1;
++		}
++		updated = record->selectable;
++		if (time_tier_add_normal(&updated, nanos)) {
++			pthread_mutex_unlock(&mq_lock);
++			return -1;
++		}
++		if (_append_event("GRANT2|%u|%u|%" PRIu64 "|0|%s|%s|%" PRIu64 "|%u",
++				  uid32, month, gpu_seconds, grant_id, actor, now.sec, now.nsec) ||
++		    _add_grant_memory(uid32, month, grant_id, gpu_seconds, 0, actor)) {
++			_mark_unhealthy("GRANT2 could not be durably applied");
++			pthread_mutex_unlock(&mq_lock);
++			return -1;
++		}
++		record->selectable = updated;
++		pthread_mutex_unlock(&mq_lock);
++		return 0;
++	}
++	if (_append_event("GRANT|%u|%u|%" PRIu64 "|0|%s|%s", uid32,
++			  month, gpu_seconds, grant_id, actor) ||
++	    _add_grant_memory(uid32, month, grant_id, gpu_seconds, 0, actor)) {
++		_mark_unhealthy("GRANT could not be durably applied");
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++	/* _quota_available subtracts usage before adding grants: debt is paid first. */
++	pthread_mutex_unlock(&mq_lock);
++	return 0;
++}
++
++/* Caller holds the Slurm job write lock. This operation is disabled in
++ * ordinary builds. No job is cancelled: all active and queued work must
++ * have drained before the durable reset marker can be appended. */
++int monthly_quota_selectable_cutover(list_t *jobs)
++{
++	list_itr_t *iterator;
++	struct job_record *job_ptr;
++	int rc = -1;
++	if (!TIME_ENABLE_SELECTABLE_V2 || !jobs) return -1;
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || !mq_reconciled || mq_fd < 0 ||
++	    mq_active) goto out;
++	if (mq_selectable_replay) { rc = 0; goto out; }
++	iterator = list_iterator_create(jobs);
++	while ((job_ptr = (struct job_record *)list_next(iterator))) {
++		if (IS_JOB_PENDING(job_ptr) || IS_JOB_RUNNING(job_ptr) ||
++		    IS_JOB_SUSPENDED(job_ptr) || IS_JOB_COMPLETING(job_ptr)) break;
++	}
++	list_iterator_destroy(iterator);
++	if (job_ptr || _replay_selectable_cutover(true)) goto out;
++	if (_append_event("CUTOVER2_RESET_USAGE") || _replay_selectable_cutover(false)) {
++		_mark_unhealthy("selectable cutover could not be durably applied");
++		goto out;
++	}
++	rc = 0;
++out:
++	pthread_mutex_unlock(&mq_lock);
++	return rc;
++}
++
++int monthly_quota_reconcile_readonly(list_t *jobs)
++{
++	list_itr_t *iterator;
++	struct job_record *job_ptr;
++	mq_active_record_t *active;
++	int result = -1;
++
++	pthread_mutex_lock(&mq_lock);
++	if (!jobs || !mq_initialized || !mq_enabled || !mq_healthy ||
++	    mq_fd < 0 || mq_checkpoint_fd < 0 || mq_witness_fd < 0)
++		goto done;
++	for (active = mq_active; active; active = active->next) {
++		uint64_t gpu = 0;
++		const char *why = NULL;
++		char marker_id[33];
++		enum time_tier selected;
++		mq_active_record_t *other;
++		for (other = active->next; other; other = other->next) {
++			if (active->job_id == other->job_id ||
++			    active->generation == other->generation ||
++			    (active->identity_bound && other->identity_bound &&
++			     !strcmp(active->marker_id, other->marker_id)))
++				goto done;
++		}
++		job_ptr = find_job_record(active->job_id);
++		if (!active->committed || !active->generation || !active->identity_bound || !job_ptr ||
++		    job_ptr->user_id != active->uid ||
++		    !job_ptr->details || job_ptr->details->submit_time <= 0 ||
++		    (uint64_t)job_ptr->details->submit_time != active->submit_sec ||
++		    job_ptr->restart_cnt != active->restart_count ||
++		    time_parse_job_marker(job_ptr->comment, marker_id, &selected) ||
++		    strcmp(marker_id, active->marker_id) || selected != active->selected_tier ||
++		    (!IS_JOB_RUNNING(job_ptr) && !IS_JOB_SUSPENDED(job_ptr) &&
++		     !IS_JOB_COMPLETING(job_ptr)) ||
++		    _job_gpu_count(job_ptr, job_ptr->tres_alloc_cnt, true, &gpu, &why) != 1 ||
++		    gpu != active->gpu_count)
++			goto done;
++	}
++	iterator = list_iterator_create(jobs);
++	result = 0;
++	while ((job_ptr = list_next(iterator))) {
++		uint64_t gpu = 0;
++		const char *why = NULL;
++		int shape;
++		if (!IS_JOB_RUNNING(job_ptr) && !IS_JOB_SUSPENDED(job_ptr) &&
++		    !IS_JOB_COMPLETING(job_ptr))
++			continue;
++		if (IS_JOB_COMPLETING(job_ptr)) {
++			result = -1;
++			break;
++		}
++		shape = _job_gpu_count(job_ptr, job_ptr->tres_alloc_cnt, true, &gpu, &why);
++		if (shape < 0 || (shape > 0 && !_find_active_job(job_ptr->job_id))) {
++			result = -1;
++			break;
++		}
++	}
++	list_iterator_destroy(iterator);
++	if (mq_active)
++		result = -1;
++done:
++	pthread_mutex_unlock(&mq_lock);
++	return result;
++}
++
++int monthly_quota_reconcile(list_t *jobs)
++{
++	list_itr_t *iterator;
++	struct job_record *job_ptr;
++	mq_active_record_t *active;
++	mq_time_t now;
++	bool bad = false;
++
++	pthread_mutex_lock(&mq_lock);
++	(void) _ensure_module_locked();
++	if (!mq_enabled) {
++		pthread_mutex_unlock(&mq_lock);
++		return 0;
++	}
++	if (!mq_healthy || mq_fd < 0 || !jobs || _now(&now)) {
++		_mark_unhealthy("startup/reconfiguration ledger recovery failed");
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++
++	/* Validate the entire recovered state before writing any new WAL event. */
++	for (active = mq_active; active; active = active->next) {
++		uint64_t actual_gpu = 0;
++		const char *why = NULL;
++
++		job_ptr = find_job_record(active->job_id);
++		if (!job_ptr || job_ptr->user_id != active->uid) {
++			/* Missing job state does not prove a PREPARE was aborted. */
++			bad = true;
++			continue;
++		}
++		if (mq_selectable_replay) {
++			enum time_tier selected;
++			char marker_id[33];
++			if (time_parse_job_marker(job_ptr->comment, marker_id, &selected) ||
++			    selected != active->selected_tier ||
++			    strcmp(marker_id, active->marker_id)) {
++				bad = true;
++				continue;
++			}
++		}
++		if (!IS_JOB_RUNNING(job_ptr) && !IS_JOB_SUSPENDED(job_ptr) &&
++		    !IS_JOB_COMPLETING(job_ptr)) {
++			bad = true;
++			continue;
++		}
++		if (IS_JOB_COMPLETING(job_ptr)) {
++			/* GRES may already be gone; a PREPARE cannot be proven here. */
++			if (!active->committed)
++				bad = true;
++			continue;
++		}
++		if (_job_gpu_count(job_ptr, NULL, true, &actual_gpu, &why) <= 0 ||
++		    actual_gpu != active->gpu_count)
++			bad = true;
++	}
++
++	/* Every recovered running GPU job must have exactly one ledger record.
++	 * COMPLETING may have already lost its GRES information, so absence
++	 * of a record cannot prove it was CPU-only or not consuming a GPU. */
++	iterator = list_iterator_create(jobs);
++	while ((job_ptr = (struct job_record *)list_next(iterator))) {
++		uint64_t actual_gpu = 0;
++		const char *why = NULL;
++		int shape;
++
++		if (IS_JOB_COMPLETING(job_ptr) && !_find_active_job(job_ptr->job_id)) {
++			bad = true;
++			continue;
++		}
++		if (!IS_JOB_RUNNING(job_ptr) && !IS_JOB_SUSPENDED(job_ptr))
++			continue;
++		shape = _job_gpu_count(job_ptr, job_ptr->tres_alloc_cnt, true,
++				       &actual_gpu, &why);
++		if (shape < 0 || (shape > 0 && !_find_active_job(job_ptr->job_id)))
++			bad = true;
++	}
++	list_iterator_destroy(iterator);
++
++	if (bad) {
++		_mark_unhealthy("recovered jobs and ledger do not match");
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++	for (active = mq_active; active; active = active->next) {
++		if (active->committed)
++			continue;
++		if (_append_event("COMMIT|%u|%" PRIu64, active->job_id,
++				  active->generation)) {
++			_mark_unhealthy("recovery COMMIT could not be durably recorded");
++			pthread_mutex_unlock(&mq_lock);
++			return -1;
++		}
++		active->committed = true;
++	}
++	if (_settle_all(&now)) {
++		_mark_unhealthy("recovered allocations could not be durably settled");
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++	mq_reconciled = true;
++	pthread_mutex_unlock(&mq_lock);
++	return 0;
++}
++
++/* A stale control socket is recoverable only while this controller owns
++ * a healthy reconciled ledger and its exclusive WAL/checkpoint locks. */
++int monthly_quota_reserve1(uid_t uid, const char *request, uint32_t tier,
++			   uint32_t gpu, uint32_t minutes, uint64_t *amount)
++{
++	mq_reserve1_t *entry, *created;
++	mq_time_t now;
++	uint32_t month;
++	uint64_t required, available, duration;
++	int rc = -1;
++
++	if (!TIME_ENABLE_SELECTABLE_V2 || (uid_t)(uint32_t)uid != uid ||
++	    !_reserve1_request_valid(request) || tier >= TIME_TIER_COUNT || !gpu || !minutes ||
++	    (uint64_t)minutes > UINT64_MAX / (60ULL * MQ_NSEC_PER_SEC) || !amount)
++		return -1;
++	duration = (uint64_t)minutes * 60ULL * MQ_NSEC_PER_SEC;
++	if (gpu > UINT64_MAX / duration)
++		return -1;
++	required = gpu * duration;
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || !mq_reconciled || !mq_selectable_replay ||
++	    mq_fd < 0 || mq_checkpoint_fd < 0 || mq_witness_fd < 0 ||
++	    _now(&now) || _month_key(&now, &month))
++		goto out;
++	entry = _reserve1_find((uint32_t)uid, request);
++	if (entry) {
++		if (entry->month == month && entry->tier == tier && entry->gpu == gpu &&
++		    entry->minutes == minutes && entry->amount == required) {
++			*amount = required;
++			rc = 0;
++		}
++		goto out;
++	}
++	if (_settle_all(&now))
++		goto out;
++	if (_reserve1_available(uid, month, tier, &available) || required > available)
++		goto out;
++	created = xcalloc(1, sizeof(*created));
++	created->uid = uid; created->month = month; created->tier = tier;
++	created->gpu = gpu; created->minutes = minutes; created->amount = required;
++	memcpy(created->request, request, sizeof(created->request));
++	if (_append_event("RESERVE1|%u|%s|%u|%u|%u|%u|%" PRIu64,
++			  created->uid, created->request, month, tier, gpu, minutes, required)) {
++		xfree(created);
++		_mark_unhealthy("RESERVE1 persistence failed");
++		goto out;
++	}
++	created->next = mq_reserves; mq_reserves = created;
++	*amount = required;
++	rc = 0;
++out:
++	pthread_mutex_unlock(&mq_lock);
++	return rc;
++}
++
++int monthly_quota_cancel1(uid_t uid, const char *request)
++{
++	mq_reserve1_t *entry;
++	int rc = -1;
++	if (!TIME_ENABLE_SELECTABLE_V2 || (uid_t)(uint32_t)uid != uid ||
++	    !_reserve1_request_valid(request)) return -1;
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || !mq_reconciled || !mq_selectable_replay ||
++	    !(entry = _reserve1_find((uint32_t)uid, request))) goto out;
++	if (entry->job_id || _append_event("CANCEL1|%u|%s", (uint32_t)uid, request)) {
++		if (entry->job_id) _mark_unhealthy("bound reservation cancellation refused");
++		else _mark_unhealthy("CANCEL1 persistence failed");
++		goto out;
++	}
++	_reserve1_remove(entry);
++	rc = 0;
++out:
++	pthread_mutex_unlock(&mq_lock);
++	return rc;
++}
++
++int monthly_quota_bind1(uid_t uid, const char *request, uint32_t job_id)
++{
++	mq_reserve1_t *entry, *other;
++	struct job_record *job;
++	enum time_tier selected;
++	char marker[33];
++	uint64_t gpu;
++	const char *why = NULL;
++	int rc = -1;
++
++	if (!TIME_ENABLE_SELECTABLE_V2 || (uid_t)(uint32_t)uid != uid ||
++	    !_reserve1_request_valid(request) || !job_id)
++		return -1;
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || !mq_reconciled || !mq_selectable_replay ||
++	    !(entry = _reserve1_find(uid, request)) ||
++	    !(job = find_job_record(job_id)) || job->user_id != uid ||
++	    !IS_JOB_PENDING(job) || !job->details || job->details->submit_time <= 0 ||
++	    time_parse_job_marker(job->comment, marker, &selected) ||
++	    strcmp(marker, request) || selected != entry->tier ||
++	    job->time_limit != entry->minutes ||
++	    _job_gpu_count(job, job->tres_req_cnt, false, &gpu, &why) != 1 || gpu != entry->gpu)
++		goto out;
++	if (entry->job_id) {
++		rc = entry->job_id == job_id ? 0 : -1;
++		goto out;
++	}
++	for (other = mq_reserves; other; other = other->next)
++		if (other->job_id == job_id) goto out;
++	if (_append_event("BIND1|%u|%s|%u", (uint32_t)uid, request, job_id)) {
++		_mark_unhealthy("BIND1 persistence failed");
++		goto out;
++	}
++	entry->job_id = job_id;
++	rc = 0;
++out:
++	pthread_mutex_unlock(&mq_lock);
++	return rc;
++}
++
++int monthly_quota_reserve1_lookup(uid_t uid, const char *request, uint32_t *month,
++				  uint32_t *tier, uint32_t *gpu, uint32_t *minutes,
++				  uint64_t *amount)
++{
++	mq_reserve1_t *entry;
++	int rc = -1;
++	if (!TIME_ENABLE_SELECTABLE_V2 || (uid_t)(uint32_t)uid != uid ||
++	    !_reserve1_request_valid(request) || !month || !tier || !gpu || !minutes || !amount)
++		return -1;
++	pthread_mutex_lock(&mq_lock);
++	if (mq_enabled && mq_healthy && mq_reconciled && mq_selectable_replay &&
++	    (entry = _reserve1_find((uint32_t)uid, request))) {
++		*month = entry->month; *tier = entry->tier; *gpu = entry->gpu;
++		*minutes = entry->minutes; *amount = entry->amount;
++		rc = 0;
++	}
++	pthread_mutex_unlock(&mq_lock);
++	return rc;
++}
++
++bool monthly_quota_control_recovery_ready(void)
++{
++	bool ready;
++	pthread_mutex_lock(&mq_lock);
++	ready = mq_enabled && mq_healthy && mq_reconciled &&
++		(mq_fd >= 0) && (mq_checkpoint_fd >= 0) && (mq_witness_fd >= 0);
++	pthread_mutex_unlock(&mq_lock);
++	return ready;
++}
++
++bool monthly_quota_enabled(void)
++{
++	bool enabled;
++
++	pthread_mutex_lock(&mq_lock);
++	enabled = mq_enabled;
++	pthread_mutex_unlock(&mq_lock);
++	return enabled;
++}
++
++void monthly_quota_fini(void)
++{
++	pthread_mutex_lock(&mq_lock);
++	if (mq_fd >= 0) {
++		close(mq_fd);
++		mq_fd = -1;
++	}
++	if (mq_checkpoint_fd >= 0) {
++		close(mq_checkpoint_fd);
++		mq_checkpoint_fd = -1;
++	}
++	if (mq_witness_fd >= 0) {
++		close(mq_witness_fd);
++		mq_witness_fd = -1;
++	}
++	_free_memory();
++	xfree(mq_path);
++	mq_path = NULL;
++	mq_initialized = false;
++	mq_enabled = false;
++	mq_healthy = false;
++	mq_reconciled = false;
++	mq_seq = 0;
++	mq_next_generation = 0;
++	pthread_mutex_unlock(&mq_lock);
++}
+--- /dev/null
++++ b/src/slurmctld/monthly_quota.h
+@@ -0,0 +1,153 @@
++/*****************************************************************************\
++ *  monthly_quota.h - controller-side monthly GPU quota admission ledger
++ *
++ *  This module is deliberately private to slurmctld.  It is disabled unless
++ *  the exact SlurmctldParameters token MonthlyGpuQuota is present.
++\*****************************************************************************/
++
++#ifndef _HAVE_SLURMCTLD_MONTHLY_QUOTA_H
++#define _HAVE_SLURMCTLD_MONTHLY_QUOTA_H
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <stddef.h>
++#include <sys/types.h>
++
++#include "src/common/list.h"
++
++struct job_record;
++extern int monthly_quota_bind1(uid_t uid, const char *request, uint32_t job_id);
++extern int monthly_quota_reserve1(uid_t uid, const char *request, uint32_t tier,
++				  uint32_t gpu, uint32_t minutes, uint64_t *amount);
++extern int monthly_quota_cancel1(uid_t uid, const char *request);
++extern int monthly_quota_reserve1_lookup(uid_t uid, const char *request,
++					 uint32_t *month, uint32_t *tier,
++					 uint32_t *gpu, uint32_t *minutes,
++					 uint64_t *amount);
++
++/* Ordered user consumption tiers; unknown must never be treated as normal. */
++typedef enum {
++	MONTHLY_QUOTA_DEBUG = 0,
++	MONTHLY_QUOTA_IMPORTANT = 1,
++	MONTHLY_QUOTA_NORMAL = 2,
++	MONTHLY_QUOTA_EXHAUSTED = 3
++} monthly_quota_tier_t;
++
++/* A projected view, not an allocation authorization. `wal_sequence` is a
++ * durable event position, not a cache key for continuously changing usage. */
++typedef struct {
++	uint64_t sec;
++	uint32_t nsec;
++} monthly_quota_amount_t;
++
++typedef struct {
++	uid_t uid;
++	uint32_t month; /* Asia/Shanghai YYYYMM */
++	uint64_t observed_sec;
++	uint32_t observed_nsec;
++	uint64_t wal_sequence;
++	monthly_quota_tier_t tier;
++	monthly_quota_amount_t used, granted, capacity, remaining, overage;
++	uint64_t active_gpu_count;
++	uint32_t active_allocation_count;
++} monthly_quota_snapshot_t;
++
++/* Version 2 is only available after a verified selectable ledger cutover. */
++typedef struct {
++	uint32_t month, active_allocation_count;
++	uint64_t active_gpu_count, observed_sec, wal_sequence;
++	uint32_t observed_nsec;
++	monthly_quota_amount_t granted, used[3], overage;
++} monthly_quota_snapshot2_t;
++extern int monthly_quota_snapshot2(uid_t uid, monthly_quota_snapshot2_t *out);
++/* Caller must hold Slurm job write lock; disabled in ordinary builds. */
++extern int monthly_quota_selectable_cutover(list_t *jobs);
++
++/* Call only inside slurmctld. Future transport must authenticate the caller.
++ * Returns -1 and leaves output unchanged when disabled/unhealthy/unknown. */
++extern int monthly_quota_inherited_witness_fd(void);
++extern int monthly_quota_snapshot(uid_t uid, monthly_quota_snapshot_t *out);
++
++/* Atomic read-only snapshot at a supplied realtime value. Failure leaves
++ * output unchanged; success does not reserve resources. */
++extern int monthly_quota_tiers_at(const uid_t *uids, size_t count,
++				  uint64_t sec, uint32_t nsec,
++				  monthly_quota_tier_t *tiers);
++
++/* Per-job ordering snapshot for V2 selected tiers; NULL represents CPU-only. */
++extern int monthly_quota_jobs_tiers_at(struct job_record *const *jobs, size_t count,
++                                       uint64_t sec, uint32_t nsec,
++                                       monthly_quota_tier_t *tiers);
++
++/* Caller holds the Slurm job write lock. */
++extern void monthly_quota_mark_exhausted(struct job_record *job_ptr);
++
++/* Single-user convenience wrapper. Returns -1 for disabled/unknown state. */
++extern int monthly_quota_tier_at(uid_t uid, uint64_t sec, uint32_t nsec,
++				 monthly_quota_tier_t *tier);
++
++/*
++ * Return values for the read-only and prepare calls:
++ *   1  quota applies and the operation is allowed
++ *   0  quota is disabled or the job has no supported GPU allocation
++ *  -1  quota applies and the operation is denied/fail-closed
++ */
++extern int monthly_quota_check(struct job_record *job_ptr,
++			       uint64_t *tres_req_cnt, bool test_only,
++			       bool preemption_candidate);
++
++/* On success this leaves the ledger mutex held until commit/abort/ambiguous. */
++extern int monthly_quota_begin(struct job_record *job_ptr,
++			       uint64_t *tres_req_cnt);
++extern int monthly_quota_begin_preselect(struct job_record *job_ptr,
++					uint64_t expected_gpu_count);
++typedef struct {
++	uint32_t job_id;
++	uint32_t uid;
++	uint64_t generation;
++	uint64_t gpu_count;
++} monthly_quota_intent_t;
++extern int monthly_quota_intent_prepare(struct job_record *job_ptr,
++					uint64_t gpu_count,
++					monthly_quota_intent_t *intent);
++extern int monthly_quota_intent_commit(struct job_record *job_ptr,
++				       const monthly_quota_intent_t *intent);
++extern void monthly_quota_intent_abort(struct job_record *job_ptr,
++				       const monthly_quota_intent_t *intent);
++extern void monthly_quota_intent_unknown(struct job_record *job_ptr,
++					 const monthly_quota_intent_t *intent);
++extern int monthly_quota_commit(struct job_record *job_ptr);
++extern void monthly_quota_abort(struct job_record *job_ptr);
++extern void monthly_quota_ambiguous(struct job_record *job_ptr);
++
++/* Close the allocation only after Slurm has completed its release path. */
++extern void monthly_quota_release(struct job_record *job_ptr);
++extern void monthly_quota_release_unproven(struct job_record *job_ptr);
++
++/* cons_tres retains GRES during suspension; GPU accounting continues. */
++extern void monthly_quota_suspend(struct job_record *job_ptr, bool indefinite);
++extern void monthly_quota_resume(struct job_record *job_ptr, bool indefinite);
++
++/* Running/suspended resize is unsupported while the gate is active. */
++extern bool monthly_quota_job_resize_denied(struct job_record *job_ptr,
++						bool resize_request);
++
++/* Called after job/select/GRES state has been restored, before scheduling. */
++extern int monthly_quota_reconcile(list_t *job_list);
++extern int monthly_quota_reconcile_readonly(list_t *job_list);
++extern int monthly_quota_control_start(void);
++extern void monthly_quota_control_stop(void);
++extern void monthly_quota_fini(void);
++extern bool monthly_quota_control_recovery_ready(void);
++extern bool monthly_quota_enabled(void);
++
++/*
++ * Controller-only grant primitive.  No user-facing RPC is added by this
++ * patch; an authenticated administrative caller must supply a stable,
++ * pipe-free idempotency key and actor string before using it.
++ */
++extern int monthly_quota_grant(uid_t uid, uint32_t month,
++			       uint64_t gpu_seconds, const char *grant_id,
++			       const char *actor);
++
++#endif /* _HAVE_SLURMCTLD_MONTHLY_QUOTA_H */
+--- /dev/null
++++ b/src/slurmctld/monthly_quota_control.c
+@@ -0,0 +1,272 @@
++/* Local root-broker bridge for the disabled-by-default monthly quota candidate. */
++#define _GNU_SOURCE
++#include "config.h"
++#include <errno.h>
++#include <fcntl.h>
++#include <inttypes.h>
++#include <poll.h>
++#include <pthread.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/time.h>
++#include <sys/un.h>
++#include <time.h>
++#include <unistd.h>
++#include "src/common/log.h"
++#include "src/common/assoc_mgr.h"
++#include "src/slurmctld/locks.h"
++#include "src/slurmctld/monthly_quota.h"
++#include "src/slurmctld/slurmctld.h"
++
++static int listener = -1, wakepipe[2] = {-1, -1};
++static pthread_t thread;
++static bool started;
++static char socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
++static dev_t socket_dev;
++static ino_t socket_ino;
++
++static int number(const char *s, uint64_t *out)
++{
++	char *end;
++	unsigned long long value;
++	const unsigned char *p = (const unsigned char *)s;
++	if (!*p) return -1;
++	for (; *p; p++) if (*p < '0' || *p > '9') return -1;
++	errno = 0;
++	value = strtoull(s, &end, 10);
++	if (errno || *end) return -1;
++	*out = value;
++	return 0;
++}
++
++static void handle(int fd)
++{
++	struct ucred peer;
++	socklen_t peer_len = sizeof(peer);
++	struct timeval timeout = {2, 0};
++	char buf[512], reply[1024], *part[7], *save, *p;
++	size_t length = 0, count = 0;
++	ssize_t n;
++	uint64_t uid, month, sec;
++	uint64_t tier_num, gpu_num, minutes_num, amount;
++	uint64_t bind_job;
++	uint32_t result_month, result_tier, result_gpu, result_minutes;
++	int rc = -1;
++	monthly_quota_snapshot_t view;
++	monthly_quota_snapshot2_t view2;
++	slurmctld_lock_t config_lock = {READ_LOCK, NO_LOCK, NO_LOCK, NO_LOCK, NO_LOCK};
++	slurmctld_lock_t grant_lock = {READ_LOCK, WRITE_LOCK, NO_LOCK, NO_LOCK, NO_LOCK};
++
++	if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &peer_len) ||
++	    peer_len != sizeof(peer) || peer.uid != 0)
++		return;
++	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
++	setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
++	while (length < sizeof(buf) - 1) {
++		n = recv(fd, buf + length, 1, 0);
++		if (n < 0 && errno == EINTR) continue;
++		if (n != 1) return;
++		if (buf[length++] == '\n') break;
++	}
++	if (!length || buf[length - 1] != '\n' || memchr(buf, '\0', length)) return;
++	buf[length - 1] = '\0';
++	p = strtok_r(buf, " ", &save);
++	while (p && count < 7) { part[count++] = p; p = strtok_r(NULL, " ", &save); }
++	if (p || count < 2 || number(part[1], &uid) || uid > UINT32_MAX) return;
++	if (count == 3 && !strcmp(part[0], "CANCEL1")) {
++		lock_slurmctld(grant_lock);
++		rc = monthly_quota_cancel1((uid_t)uid, part[2]);
++		unlock_slurmctld(grant_lock);
++		if (!rc) snprintf(reply, sizeof(reply), "OK\n");
++	} else if (count == 4 && !strcmp(part[0], "BIND1") &&
++	    !number(part[3], &bind_job) && bind_job > 0 && bind_job <= UINT32_MAX) {
++		assoc_mgr_lock_t tres_lock = { .tres = READ_LOCK };
++		lock_slurmctld(grant_lock);
++		assoc_mgr_lock(&tres_lock);
++		rc = monthly_quota_bind1((uid_t)uid, part[2], bind_job);
++		assoc_mgr_unlock(&tres_lock);
++		unlock_slurmctld(grant_lock);
++		if (!rc) snprintf(reply, sizeof(reply), "OK\n");
++	} else if (count == 6 && !strcmp(part[0], "RESERVE1") &&
++	    !number(part[3], &tier_num) && tier_num < 3 &&
++	    !number(part[4], &gpu_num) && gpu_num > 0 && gpu_num <= UINT32_MAX &&
++	    !number(part[5], &minutes_num) && minutes_num > 0 && minutes_num <= UINT32_MAX) {
++		lock_slurmctld(grant_lock);
++		rc = monthly_quota_reserve1((uid_t)uid, part[2], tier_num, gpu_num,
++					    minutes_num, &amount);
++		unlock_slurmctld(grant_lock);
++		if (!rc) snprintf(reply, sizeof(reply), "OK %" PRIu64 "\n", amount);
++	} else if (count == 3 && !strcmp(part[0], "RESERVE1_GET")) {
++		lock_slurmctld(config_lock);
++		rc = monthly_quota_reserve1_lookup((uid_t)uid, part[2], &result_month,
++						   &result_tier, &result_gpu,
++						   &result_minutes, &amount);
++		unlock_slurmctld(config_lock);
++		if (!rc) snprintf(reply, sizeof(reply), "OK %u %u %u %u %" PRIu64 "\n",
++				  result_month, result_tier, result_gpu, result_minutes, amount);
++	} else if (count == 2 && !strcmp(part[0], "SNAP")) {
++		lock_slurmctld(config_lock);
++		rc = monthly_quota_snapshot((uid_t)uid, &view);
++		unlock_slurmctld(config_lock);
++		if (!rc) {
++			snprintf(reply, sizeof(reply),
++				 "OK %u %u %" PRIu64 " %u %" PRIu64 " %u "
++				 "%" PRIu64 " %u %" PRIu64 " %u %" PRIu64 " %u "
++				 "%" PRIu64 " %u %" PRIu64 " %u %" PRIu64 "\n",
++				 view.month, (unsigned)view.tier, view.used.sec, view.used.nsec,
++				 view.granted.sec, view.granted.nsec, view.capacity.sec, view.capacity.nsec,
++				 view.remaining.sec, view.remaining.nsec, view.overage.sec, view.overage.nsec,
++				 view.active_gpu_count, view.active_allocation_count,
++				 view.observed_sec, view.observed_nsec, view.wal_sequence);
++		}
++	} else if (count == 2 && !strcmp(part[0], "SNAP2")) {
++		lock_slurmctld(config_lock);
++		rc = monthly_quota_snapshot2((uid_t)uid, &view2);
++		unlock_slurmctld(config_lock);
++		if (!rc) {
++			snprintf(reply, sizeof(reply),
++				 "OK 2 %u %" PRIu64 " %u %" PRIu64 " %u %" PRIu64 " %u "
++				 "%" PRIu64 " %u %" PRIu64 " %u %" PRIu64 " %u %" PRIu64 " %u %" PRIu64 "\n",
++				 view2.month, view2.granted.sec, view2.granted.nsec,
++				 view2.used[0].sec, view2.used[0].nsec,
++				 view2.used[1].sec, view2.used[1].nsec,
++				 view2.used[2].sec, view2.used[2].nsec,
++				 view2.overage.sec, view2.overage.nsec,
++				 view2.observed_sec, view2.observed_nsec, view2.wal_sequence,
++				 view2.active_allocation_count, view2.active_gpu_count);
++		}
++	} else if (count == 2 && uid == 0 && !strcmp(part[0], "CUTOVER2_RESET_USAGE")) {
++		lock_slurmctld(grant_lock);
++		rc = monthly_quota_selectable_cutover(job_list);
++		unlock_slurmctld(grant_lock);
++		if (!rc) snprintf(reply, sizeof(reply), "OK\n");
++	} else if (count == 6 && !strcmp(part[0], "GRANT") &&
++		   !number(part[2], &month) && month <= UINT32_MAX &&
++		   !number(part[3], &sec)) {
++		time_t changed;
++		lock_slurmctld(grant_lock);
++		rc = monthly_quota_grant((uid_t)uid, (uint32_t)month, sec, part[4], part[5]);
++		if (!rc) {
++			changed = time(NULL);
++			if (changed != (time_t)-1)
++				last_job_update = changed;
++		}
++		unlock_slurmctld(grant_lock);
++		if (!rc) {
++			queue_job_scheduler();
++			snprintf(reply, sizeof(reply), "OK\n");
++		}
++	}
++	if (rc) snprintf(reply, sizeof(reply), "ERROR unavailable_or_invalid\n");
++	length = 0;
++	while (length < strlen(reply)) {
++		n = send(fd, reply + length, strlen(reply) - length, MSG_NOSIGNAL);
++		if (n < 0 && errno == EINTR) continue;
++		if (n <= 0) break; /* caller must treat an incomplete reply as unknown */
++		length += (size_t)n;
++	}
++}
++
++static void *serve(void *unused)
++{
++	struct pollfd fds[2] = {{0}};
++	(void)unused;
++	fds[0].fd = listener; fds[0].events = POLLIN;
++	fds[1].fd = wakepipe[0]; fds[1].events = POLLIN;
++	for (;;) {
++		int fd, ready = poll(fds, 2, -1);
++		if (ready < 0 && errno == EINTR) continue;
++		if (ready < 0) break;
++		if (fds[1].revents) break;
++		if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) break;
++		if (!(fds[0].revents & POLLIN)) continue;
++		fd = accept4(listener, NULL, NULL, SOCK_CLOEXEC);
++		if (fd >= 0) { handle(fd); close(fd); }
++	}
++	return NULL;
++}
++
++/* Only remove an owned, private socket that refuses connections and has
++ * not changed identity. The state directory is owned by the service user;
++ * an adversary with that same UID remains outside this trust boundary. */
++static int recover_stale_socket(struct sockaddr_un *addr)
++{
++	struct stat before, after;
++	int probe, result, saved_errno;
++	if (lstat(socket_path, &before))
++		return errno == ENOENT ? 0 : -1;
++	if (!monthly_quota_control_recovery_ready() || !S_ISSOCK(before.st_mode) ||
++	    before.st_uid != geteuid() || (before.st_mode & 0077)) return -1;
++	probe = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
++	if (probe < 0) return -1;
++	result = connect(probe, (struct sockaddr *)addr, sizeof(*addr));
++	saved_errno = errno;
++	close(probe);
++	if (result == 0 || saved_errno != ECONNREFUSED) return -1;
++	if (lstat(socket_path, &after) || !S_ISSOCK(after.st_mode) ||
++	    after.st_uid != geteuid() || (after.st_mode & 0077) ||
++	    after.st_dev != before.st_dev || after.st_ino != before.st_ino) return -1;
++	if (unlink(socket_path)) return -1;
++	info("monthly quota: removed verified stale control socket");
++	return 0;
++}
++
++int monthly_quota_control_start(void)
++{
++	struct sockaddr_un addr = {0};
++	struct stat dir, sock;
++	int rc;
++	if (!monthly_quota_enabled()) return 0;
++	if (started || !slurm_conf.state_save_location ||
++	    lstat(slurm_conf.state_save_location, &dir) || !S_ISDIR(dir.st_mode) ||
++	    dir.st_uid != geteuid() || (dir.st_mode & 0022)) return -1;
++	rc = snprintf(socket_path, sizeof(socket_path), "%s/time-quota.sock",
++		      slurm_conf.state_save_location);
++	if (rc < 0 || (size_t)rc >= sizeof(socket_path)) return -1;
++	addr.sun_family = AF_UNIX;
++	memcpy(addr.sun_path, socket_path, strlen(socket_path) + 1);
++	if (recover_stale_socket(&addr)) return -1;
++	listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
++	if (listener < 0) return -1;
++	if (bind(listener, (struct sockaddr *)&addr, sizeof(addr))) goto fail;
++	if (lstat(socket_path, &sock) || !S_ISSOCK(sock.st_mode) ||
++	    sock.st_uid != geteuid()) goto fail_path;
++	socket_dev = sock.st_dev; socket_ino = sock.st_ino;
++	if (chmod(socket_path, 0600) || listen(listener, 8) || pipe2(wakepipe, O_CLOEXEC))
++		goto fail_path;
++	if (pthread_create(&thread, NULL, serve, NULL)) goto fail_path;
++	started = true;
++	return 0;
++fail_path:
++	if (!lstat(socket_path, &sock) && S_ISSOCK(sock.st_mode) &&
++	    sock.st_uid == geteuid() && sock.st_dev == socket_dev && sock.st_ino == socket_ino)
++		unlink(socket_path);
++fail:
++	if (wakepipe[0] >= 0) close(wakepipe[0]);
++	if (wakepipe[1] >= 0) close(wakepipe[1]);
++	wakepipe[0] = wakepipe[1] = -1;
++	close(listener); listener = -1;
++	return -1;
++}
++
++void monthly_quota_control_stop(void)
++{
++	struct stat sock;
++	ssize_t sent;
++	if (!started) return;
++	do { sent = write(wakepipe[1], "x", 1); } while (sent < 0 && errno == EINTR);
++	if (sent != 1) { close(wakepipe[1]); wakepipe[1] = -1; }
++	pthread_join(thread, NULL);
++	close(listener); close(wakepipe[0]);
++	if (wakepipe[1] >= 0) close(wakepipe[1]);
++	listener = wakepipe[0] = wakepipe[1] = -1;
++	if (!lstat(socket_path, &sock) && S_ISSOCK(sock.st_mode) &&
++	    sock.st_dev == socket_dev && sock.st_ino == socket_ino && sock.st_uid == geteuid())
++		unlink(socket_path);
++	started = false;
++}
+--- /dev/null
++++ b/src/slurmctld/selectable-tier-accounting.c
+@@ -0,0 +1,174 @@
++/* Candidate arithmetic only: this is not a scheduler or an online ledger. */
++#include "selectable-tier-accounting.h"
++#include <stddef.h>
++#include <stdlib.h>
++#include <string.h>
++#include <stdint.h>
++
++static int valid(const struct time_tier_balance *balance)
++{
++    unsigned i;
++    if (!balance) return 0;
++    if (balance->overage && balance->used[TIME_NORMAL] != balance->limit[TIME_NORMAL]) return 0;
++    for (i = 0; i < TIME_TIER_COUNT; i++)
++        if (balance->used[i] > balance->limit[i]) return 0;
++    return 1;
++}
++
++int time_tier_eligible(const struct time_tier_balance *balance, enum time_tier selected)
++{
++    if (!valid(balance) || (unsigned)selected >= TIME_TIER_COUNT) return -1;
++    return balance->used[selected] < balance->limit[selected];
++}
++
++int time_tier_charge(struct time_tier_balance *balance, enum time_tier *current,
++                     uint64_t gpu_nanoseconds)
++{
++    struct time_tier_balance next;
++    unsigned i;
++    if (!valid(balance) || !current || (unsigned)*current >= TIME_TIER_COUNT) return -1;
++    next = *balance;
++    i = (unsigned)*current;
++    while (i < TIME_TIER_COUNT) {
++        uint64_t available = next.limit[i] - next.used[i];
++        uint64_t charge = gpu_nanoseconds < available ? gpu_nanoseconds : available;
++        next.used[i] += charge;
++        gpu_nanoseconds -= charge;
++        if (next.used[i] < next.limit[i] || i == TIME_NORMAL) break;
++        i++;
++    }
++    if (UINT64_MAX - next.overage < gpu_nanoseconds) return -1;
++    next.overage += gpu_nanoseconds;
++    *balance = next;
++    *current = (enum time_tier)i;
++    return 0;
++}
++
++int time_tier_add_normal(struct time_tier_balance *balance, uint64_t grant)
++{
++    struct time_tier_balance next;
++    uint64_t offset;
++    if (!valid(balance) || !grant || UINT64_MAX - balance->limit[TIME_NORMAL] < grant)
++        return -1;
++    next = *balance;
++    next.limit[TIME_NORMAL] += grant;
++    offset = next.overage < grant ? next.overage : grant;
++    next.used[TIME_NORMAL] += offset;
++    next.overage -= offset;
++    *balance = next;
++    return 0;
++}
++
++int time_tier_import_legacy(struct time_tier_balance *out,
++                            uint64_t used_gpu_nanoseconds,
++                            uint64_t grant_gpu_nanoseconds)
++{
++    const uint64_t ns_per_hour = UINT64_C(3600) * UINT64_C(1000000000);
++    struct time_tier_balance imported = {
++        .limit = {UINT64_C(5) * ns_per_hour, UINT64_C(100) * ns_per_hour,
++                  UINT64_C(500) * ns_per_hour},
++        .used = {0, 0, 0}, .overage = 0
++    };
++    enum time_tier current = TIME_DEBUG;
++    if (!out || UINT64_MAX - imported.limit[TIME_NORMAL] < grant_gpu_nanoseconds)
++        return -1;
++    imported.limit[TIME_NORMAL] += grant_gpu_nanoseconds;
++    if (time_tier_charge(&imported, &current, used_gpu_nanoseconds))
++        return -1;
++    *out = imported;
++    return 0;
++}
++
++int time_tier_next_boundary(const struct time_tier_balance *balance,
++                            const struct time_running_allocation *jobs,
++                            unsigned count, uint64_t horizon_ns,
++                            uint64_t *boundary_ns, int *depletes)
++{
++    uint64_t rates[TIME_TIER_COUNT] = {0, 0, 0};
++    uint64_t earliest = horizon_ns;
++    unsigned j, t;
++    int found = 0;
++    if (!valid(balance) || (count && !jobs) || !boundary_ns || !depletes)
++        return -1;
++    for (j = 0; j < count; j++) {
++        unsigned tier = (unsigned)jobs[j].current;
++        if (tier >= TIME_TIER_COUNT || !jobs[j].gpu_count) return -1;
++        while (tier < TIME_NORMAL && balance->used[tier] == balance->limit[tier])
++            tier++;
++        /* Fully depleted normal use is overage and has no next tier boundary. */
++        if (balance->used[tier] == balance->limit[tier]) continue;
++        if (UINT64_MAX - rates[tier] < jobs[j].gpu_count) return -1;
++        rates[tier] += jobs[j].gpu_count;
++    }
++    for (t = 0; t < TIME_TIER_COUNT; t++) {
++        uint64_t remaining, delta;
++        if (!rates[t]) continue;
++        remaining = balance->limit[t] - balance->used[t];
++        delta = remaining / rates[t] + (remaining % rates[t] != 0);
++        if (delta <= earliest) {
++            earliest = delta;
++            found = 1;
++        }
++    }
++    *boundary_ns = earliest;
++    *depletes = found;
++    return 0;
++}
++
++int time_tier_advance(struct time_tier_balance *balance,
++                      struct time_active_job *jobs, unsigned count,
++                      uint64_t wall_nanoseconds)
++{
++    struct time_tier_balance next;
++    struct time_active_job *copy = NULL;
++    struct time_running_allocation *rates = NULL;
++    uint64_t remaining = wall_nanoseconds;
++    unsigned i;
++    int rc = -1;
++    /* Keep controller work and temporary memory bounded. */
++    if (!valid(balance) || (count && !jobs) || count > 4096) return -1;
++    for (i = 0; i < count; i++) {
++        if (!jobs[i].job_id || !jobs[i].generation || !jobs[i].gpu_count ||
++            (unsigned)jobs[i].current >= TIME_TIER_COUNT ||
++            (i && (jobs[i-1].job_id > jobs[i].job_id ||
++             (jobs[i-1].job_id == jobs[i].job_id &&
++              jobs[i-1].generation >= jobs[i].generation)))) return -1;
++    }
++    if (!count || !remaining) return 0;
++    copy = malloc(count * sizeof(*copy));
++    rates = malloc(count * sizeof(*rates));
++    if (!copy || !rates) goto out;
++    memcpy(copy, jobs, count * sizeof(*copy));
++    next = *balance;
++    while (remaining) {
++        uint64_t delta, bulk;
++        int depletes;
++        for (i = 0; i < count; i++) {
++            rates[i].current = copy[i].current;
++            rates[i].gpu_count = copy[i].gpu_count;
++        }
++        if (time_tier_next_boundary(&next, rates, count, remaining, &delta, &depletes) ||
++            !delta || delta > remaining) goto out;
++        /* Before the boundary no tier can be exhausted. At the last wall
++         * nanosecond, stable job order assigns indivisible GPU-nanoseconds. */
++        bulk = depletes ? delta - 1 : delta;
++        for (i = 0; i < count; i++) {
++            if (bulk && copy[i].gpu_count > UINT64_MAX / bulk) goto out;
++            if (time_tier_charge(&next, &copy[i].current, bulk * copy[i].gpu_count))
++                goto out;
++        }
++        if (depletes) {
++            for (i = 0; i < count; i++)
++                if (time_tier_charge(&next, &copy[i].current, copy[i].gpu_count))
++                    goto out;
++        }
++        remaining -= delta;
++    }
++    *balance = next;
++    memcpy(jobs, copy, count * sizeof(*copy));
++    rc = 0;
++out:
++    free(rates);
++    free(copy);
++    return rc;
++}
+--- /dev/null
++++ b/src/slurmctld/selectable-tier-accounting.h
+@@ -0,0 +1,67 @@
++/* Candidate arithmetic for selectable quota tiers; not wired into Slurm. */
++#ifndef TIME_SELECTABLE_TIER_ACCOUNTING_H
++#define TIME_SELECTABLE_TIER_ACCOUNTING_H
++#include <stdint.h>
++
++#define TIME_TIER_COUNT 3
++
++enum time_tier { TIME_DEBUG = 0, TIME_IMPORTANT = 1, TIME_NORMAL = 2 };
++
++/* Values are integer GPU-nanoseconds, including approved additions in limit.
++ * Callers own persistence, synchronization and calendar boundaries. */
++struct time_tier_balance {
++    uint64_t limit[TIME_TIER_COUNT];
++    uint64_t used[TIME_TIER_COUNT];
++    uint64_t overage;
++};
++
++/* A new job may start only in its explicitly chosen, nonempty tier. */
++int time_tier_eligible(const struct time_tier_balance *balance, enum time_tier selected);
++
++/* Charge a running allocation, overflowing toward lower priorities only.
++ * Updates the task cursor to the next nonempty tier. Returns -1 on malformed
++ * state/overflow, with *balance and *current unchanged. */
++int time_tier_charge(struct time_tier_balance *balance, enum time_tier *current,
++                     uint64_t gpu_nanoseconds);
++
++/* A normal-tier grant first offsets overage. Returns -1 without mutation on
++ * malformed state/overflow; durable idempotency is the caller's obligation. */
++int time_tier_add_normal(struct time_tier_balance *balance, uint64_t grant);
++/* Candidate boundary calculation for one user's concurrently running jobs.
++ * Rates are allocated GPU counts; current tiers represent running jobs, not
++ * new submissions. Returns the earliest wall-nanosecond where a shared tier
++ * can be depleted, capped by horizon. Does not mutate balances or jobs.
++ * The boundary can split GPU-nanoseconds and callers must assign the remainder
++ * deterministically before moving jobs; this helper does not perform charging. */
++struct time_running_allocation {
++    enum time_tier current;
++    uint64_t gpu_count;
++};
++int time_tier_next_boundary(const struct time_tier_balance *balance,
++                            const struct time_running_allocation *jobs,
++                            unsigned count, uint64_t horizon_ns,
++                            uint64_t *boundary_ns, int *depletes);
++
++/* Advance a single account over a common interval. Entries must be sorted by
++ * strictly increasing (job_id, generation); this order breaks ties within the
++ * same wall nanosecond. The caller must split at job start/end and month
++ * boundaries. On error the account and all cursors remain unchanged. This is
++ * an arithmetic candidate, not a durable WAL or allocation gate. */
++struct time_active_job {
++    uint32_t job_id;
++    uint64_t generation;
++    enum time_tier current;
++    uint64_t gpu_count;
++};
++int time_tier_advance(struct time_tier_balance *balance,
++                      struct time_active_job *jobs, unsigned count,
++                      uint64_t wall_nanoseconds);
++
++/* Import a verified, settled legacy monthly total and grants using the old
++ * debug -> important -> normal ordering. Caller must prove a consistent
++ * controller snapshot, preserve the original ledger, and prevent live writes.
++ * On failure *out is unchanged; this function does not migrate a database. */
++int time_tier_import_legacy(struct time_tier_balance *out,
++                            uint64_t used_gpu_nanoseconds,
++                            uint64_t grant_gpu_nanoseconds);
++#endif
+--- /dev/null
++++ b/src/slurmctld/selectable-tier-comment.c
+@@ -0,0 +1,34 @@
++/* Parsing alone does not authenticate the comment or enable scheduling. */
++#include "selectable-tier-comment.h"
++#include <stddef.h>
++#include <string.h>
++
++int time_parse_job_marker(const char *comment, char job_id[33], enum time_tier *tier)
++{
++    static const char prefix[] = "pro6000d-job:";
++    const char *cursor;
++    enum time_tier parsed;
++    size_t i;
++    if (!comment || !job_id || !tier || strncmp(comment, prefix, sizeof(prefix) - 1))
++        return -1;
++    cursor = comment + sizeof(prefix) - 1;
++    for (i = 0; i < 32; i++) {
++        char c = cursor[i];
++        if (!c || !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
++            return -1;
++    }
++    cursor += 32;
++    if (!*cursor) {
++        memcpy(job_id, cursor - 32, 32);
++        job_id[32] = '\0';
++        return 1;
++    }
++    if (!strcmp(cursor, ":tier=debug")) parsed = TIME_DEBUG;
++    else if (!strcmp(cursor, ":tier=important")) parsed = TIME_IMPORTANT;
++    else if (!strcmp(cursor, ":tier=normal")) parsed = TIME_NORMAL;
++    else return -1;
++    memcpy(job_id, cursor - 32, 32);
++    job_id[32] = '\0';
++    *tier = parsed;
++    return 0;
++}
+--- /dev/null
++++ b/src/slurmctld/selectable-tier-comment.h
+@@ -0,0 +1,9 @@
++/* Candidate parser for broker-authored Slurm job identities. */
++#ifndef TIME_SELECTABLE_TIER_COMMENT_H
++#define TIME_SELECTABLE_TIER_COMMENT_H
++#include "selectable-tier-accounting.h"
++/* Returns 0 for a selected tier, 1 for a valid legacy marker with no tier,
++ * and -1 for an invalid marker. On failure, outputs remain unchanged.
++ * The marker is trusted only when enforced by the root-only submit plugin. */
++int time_parse_job_marker(const char *comment, char job_id[33], enum time_tier *tier);
++#endif
+--- a/src/stepmgr/gres_stepmgr.c
++++ b/src/stepmgr/gres_stepmgr.c
+@@ -1573,6 +1573,9 @@
+ 		if (gres_state_node == NULL) {
+ 			error("%s: node %s lacks gres/%s for job %u", __func__,
+ 			      node_name, gres_state_job->gres_name, job_id);
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++			rc = SLURM_ERROR;
++#endif
+ 			continue;
+ 		}
+ 
+@@ -1580,6 +1583,9 @@
+ 				   gres_state_node->gres_data, node_offset,
+ 				   job_id, node_name, old_job, resize);
+ 		if (rc2 == ESLURM_UNSUPPORTED_GRES) {
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++			rc = SLURM_ERROR;
++#endif
+ 			list_delete_item(job_gres_iter);
+ 		} else if (rc2 != SLURM_SUCCESS)
+ 			rc = rc2;
+--- a/src/plugins/select/cons_tres/job_resources.c
++++ b/src/plugins/select/cons_tres/job_resources.c
+@@ -433,6 +433,9 @@
+ 	struct job_resources *job = job_ptr->job_resrcs;
+ 	node_record_t *node_ptr;
+ 	int i, n;
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	int gres_rc = SLURM_SUCCESS;
++#endif
+ 	bool old_job = false;
+ 
+ 	if (select_state_initializing) {
+@@ -483,11 +486,18 @@
+ 			else
+ 				node_gres_list = node_ptr->gres_list;
+ 
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++			if (gres_stepmgr_job_dealloc(job_ptr->gres_list_alloc,
++						     node_gres_list, n, job_ptr->job_id,
++						     node_ptr->name, old_job, false) != SLURM_SUCCESS)
++				gres_rc = SLURM_ERROR;
++#else
+ 			gres_stepmgr_job_dealloc(job_ptr->gres_list_alloc,
+ 						 node_gres_list,
+ 						 n, job_ptr->job_id,
+ 						 node_ptr->name, old_job,
+ 						 false);
++#endif
+ 			gres_node_state_log(node_gres_list, node_ptr->name);
+ 
+ 			if (node_usage[i].alloc_memory <
+@@ -551,7 +561,11 @@
+ 		}
+ 
+ 		if (!p_ptr->row)
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++			return gres_rc;
++#else
+ 			return SLURM_SUCCESS;
++#endif
+ 
+ 		/* remove the job from the job_list */
+ 		n = 0;
+@@ -615,5 +629,9 @@
+ 		_log_tres_state(node_usage, part_record_ptr);
+ 	}
+ 
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	return gres_rc;
++#else
+ 	return SLURM_SUCCESS;
+-}
++#endif
++}
+--- a/src/plugins/select/cons_tres/select_cons_tres.c
++++ b/src/plugins/select/cons_tres/select_cons_tres.c
+@@ -764,10 +764,15 @@
+ 
+ 	log_flag(SELECT_TYPE, "%pJ", job_ptr);
+ 
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	return job_res_rm_job(select_part_record, select_node_usage, NULL,
++			      job_ptr, JOB_RES_ACTION_NORMAL, NULL);
++#else
+ 	job_res_rm_job(select_part_record, select_node_usage, NULL,
+ 		       job_ptr, JOB_RES_ACTION_NORMAL, NULL);
+ 
+ 	return SLURM_SUCCESS;
++#endif
+ }
+ 
+ /* NOTE: This function is not called with gang scheduling because it
