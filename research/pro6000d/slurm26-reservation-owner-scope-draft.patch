@@ -1,0 +1,10 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -1980,0 +1981,4 @@
++		/* A stale reservation belonging to another user cannot consume
++		 * this user's balance and must not hold their queue indefinitely. */
++		if (entry->uid != uid)
++			continue;
+@@ -1983 +1987 @@
+-		if (entry->uid == uid && entry->tier == tier) {
++		if (entry->tier == tier) {
