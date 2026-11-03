@@ -1,0 +1,78 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -96,0 +97,2 @@
++	bool allocation_start_known; /* set only by COMMIT5 */
++	mq_time_t allocation_start;
+@@ -1076,0 +1079,2 @@
++    pending->allocation_start = *at;
++    pending->allocation_start_known = true;
+@@ -2034 +2038 @@
+-			       uint64_t *available)
++			       const mq_time_t *now, uint64_t *available)
+@@ -2038 +2041,0 @@
+-	mq_month_record_t *record;
+@@ -2042 +2045 @@
+-	if (!available || tier >= TIME_TIER_COUNT)
++	if (!available || !now || tier >= TIME_TIER_COUNT)
+@@ -2047,2 +2050,2 @@
+-	for (active = mq_active; active; active = active->next)
+-		if (!active->committed || active->uid == uid)
++	for (active = mq_active; active; active = active->next) {
++		if (!active->committed)
+@@ -2049,0 +2053,15 @@
++		if (active->uid == uid) {
++#if defined(TIME_ENABLE_MONTHLY_COMMIT5_DRAFT) && TIME_ENABLE_MONTHLY_COMMIT5_DRAFT
++			entry = _reserve1_find(uid, active->marker_id);
++			if (!active->identity_bound || !active->reservation_bound ||
++			    !active->allocation_start_known || !entry ||
++			    entry->job_id != active->job_id ||
++			    entry->generation != active->generation ||
++			    entry->gpu != active->gpu_count ||
++			    entry->tier != active->selected_tier)
++				return -1;
++#else
++			return -1;
++#endif
++		}
++	}
+@@ -2058 +2076,21 @@
+-			if (UINT64_MAX - reserved < entry->amount)
++			uint64_t held = entry->amount;
++#if defined(TIME_ENABLE_MONTHLY_COMMIT5_DRAFT) && TIME_ENABLE_MONTHLY_COMMIT5_DRAFT
++			if (entry->generation) {
++				mq_amount_t elapsed;
++				uint64_t elapsed_ns;
++				active = _find_active(entry->job_id, entry->generation);
++				if (!entry->gpu || !active || !active->committed || !active->allocation_start_known ||
++				    active->uid != uid || !active->reservation_bound ||
++				    strcmp(active->marker_id, entry->request) ||
++				    active->gpu_count != entry->gpu ||
++				    _duration(&active->allocation_start, now, &elapsed) ||
++				    _legacy_to_selectable(elapsed, &elapsed_ns))
++					return -1;
++				if (elapsed_ns >= (entry->amount / entry->gpu) +
++				    !!(entry->amount % entry->gpu))
++					held = 0;
++				else
++					held -= elapsed_ns * entry->gpu;
++			}
++#endif
++			if (UINT64_MAX - reserved < held)
+@@ -2060 +2098 @@
+-			reserved += entry->amount;
++			reserved += held;
+@@ -2063,4 +2101 @@
+-	record = _find_month(uid, month, false);
+-	if (record)
+-		balance = record->selectable;
+-	else if (time_tier_import_legacy(&balance, 0, 0))
++	if (_project_selectable_user(uid, now, &balance))
+@@ -2118 +2153 @@
+-		if (_reserve1_available(job_ptr->user_id, month, selected, &remaining) || !remaining) {
++		if (_reserve1_available(job_ptr->user_id, month, selected, &now, &remaining) || !remaining) {
+@@ -2278 +2313 @@
+-		if (_reserve1_available(job_ptr->user_id, month, selected, &remaining) ||
++		if (_reserve1_available(job_ptr->user_id, month, selected, &now, &remaining) ||
+@@ -3042 +3077 @@
+-	if (_reserve1_available(uid, month, tier, &available) || required > available)
++	if (_reserve1_available(uid, month, tier, &now, &available) || required > available)
