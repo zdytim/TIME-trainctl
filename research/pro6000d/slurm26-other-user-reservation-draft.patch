@@ -1,0 +1,14 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -1973,0 +1974 @@
++	mq_active_record_t *active;
+@@ -1978 +1979 @@
+-	if (!available || tier >= TIME_TIER_COUNT || mq_active)
++	if (!available || tier >= TIME_TIER_COUNT)
+@@ -1979,0 +1981,6 @@
++	/* Existing activity by this user still needs a correct unspent
++	 * reservation calculation. A different user's committed allocation
++	 * does not consume this user's tier; unresolved intents remain global. */
++	for (active = mq_active; active; active = active->next)
++		if (!active->committed || active->uid == uid)
++			return -1;
