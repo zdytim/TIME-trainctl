@@ -1,0 +1,73 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -93,0 +94 @@
++	uint64_t sluid; /* Slurm 26 identity of this specific job run */
+@@ -1053,0 +1055,3 @@
++#if defined(TIME_ENABLE_MONTHLY_SLUID_DRAFT) && TIME_ENABLE_MONTHLY_SLUID_DRAFT
++    if (!pending->sluid) return -1;
++#endif
+@@ -1115,0 +1120,13 @@
++		return 0;
++	}
++#if defined(TIME_ENABLE_MONTHLY_SLUID_DRAFT) && TIME_ENABLE_MONTHLY_SLUID_DRAFT
++	if (mq_selectable_replay && !strcmp(event, "SLUID1")) {
++		uint64_t sluid;
++		if (field_count != 6 || _parse_u32(fields[3], &job_id) ||
++		    _parse_u64(fields[4], &generation) || _parse_u64(fields[5], &sluid) || !sluid)
++			return -1;
++		active = _find_active(job_id, generation);
++		if (!active || active->committed || !active->identity_bound ||
++		    !active->reservation_bound || active->sluid)
++			return -1;
++		active->sluid = sluid;
+@@ -1117,0 +1135 @@
++#endif
+@@ -2373,0 +2392,11 @@
++#if defined(TIME_ENABLE_MONTHLY_SLUID_DRAFT) && TIME_ENABLE_MONTHLY_SLUID_DRAFT
++	if (bound) {
++		if (!job_ptr->step_id.sluid) {
++			xfree(active);
++			_set_pending_reason(job_ptr, "Slurm run identity unavailable");
++			pthread_mutex_unlock(&mq_lock);
++			return -1;
++		}
++		active->sluid = job_ptr->step_id.sluid;
++	}
++#endif
+@@ -2386,0 +2416,9 @@
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++#if defined(TIME_ENABLE_MONTHLY_SLUID_DRAFT) && TIME_ENABLE_MONTHLY_SLUID_DRAFT
++	if (bound && _append_event("SLUID1|%u|%" PRIu64 "|%" PRIu64,
++				   active->job_id, active->generation, active->sluid)) {
++		xfree(active);
++		_mark_unhealthy("SLUID1 fsync failed after PREPARE");
++		_set_pending_reason(job_ptr, "ledger identity write failure");
+@@ -2389,0 +2428 @@
++#endif
+@@ -2592,0 +2632,4 @@
++#if defined(TIME_ENABLE_MONTHLY_SLUID_DRAFT) && TIME_ENABLE_MONTHLY_SLUID_DRAFT
++	if (!active || !active->sluid || active->sluid != job_ptr->step_id.sluid)
++		return false;
++#endif
+@@ -2699,0 +2743,7 @@
++#if defined(TIME_ENABLE_MONTHLY_SLUID_DRAFT) && TIME_ENABLE_MONTHLY_SLUID_DRAFT
++	if (!active->sluid || active->sluid != job_ptr->step_id.sluid) {
++		_mark_unhealthy("release SLUID does not match allocation");
++		pthread_mutex_unlock(&mq_lock);
++		return;
++	}
++#endif
+@@ -2898,0 +2949,4 @@
++#if defined(TIME_ENABLE_MONTHLY_SLUID_DRAFT) && TIME_ENABLE_MONTHLY_SLUID_DRAFT
++		if (!job_ptr || !active->sluid || active->sluid != job_ptr->step_id.sluid)
++			goto done;
++#endif
+@@ -2978,0 +3033,6 @@
++#if defined(TIME_ENABLE_MONTHLY_SLUID_DRAFT) && TIME_ENABLE_MONTHLY_SLUID_DRAFT
++			if (!active->sluid || active->sluid != job_ptr->step_id.sluid) {
++				bad = true;
++				continue;
++			}
++#endif
