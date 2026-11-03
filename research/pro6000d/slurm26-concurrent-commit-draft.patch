@@ -1,0 +1,123 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -1035,0 +1036,11 @@
++
++#if defined(TIME_ENABLE_MONTHLY_COMMIT5_DRAFT) && TIME_ENABLE_MONTHLY_COMMIT5_DRAFT
++/* COMMIT5 is an experimental, unused transaction format. The pending
++ * allocation is excluded while previously committed jobs are advanced to
++ * the allocation boundary, then it joins their common accounting clock. */
++static int _commit5_validate(mq_active_record_t *pending, const mq_time_t *at)
++{
++    mq_active_record_t *other;
++    mq_reserve1_t *reservation;
++    uint32_t month;
++    bool found = false;
+@@ -1036,0 +1048,34 @@
++    if (!pending || !at || pending->committed || !pending->identity_bound ||
++        !pending->reservation_bound || at->nsec >= MQ_NSEC_PER_SEC ||
++        _time_cmp(at, &pending->anchor) < 0 || _month_key(at, &month))
++        return -1;
++    reservation = _reserve1_find(pending->uid, pending->marker_id);
++    if (!reservation || reservation->job_id != pending->job_id ||
++        reservation->generation != pending->generation || reservation->month != month)
++        return -1;
++    for (other = mq_active; other; other = other->next) {
++        if (other == pending) { found = true; continue; }
++        if (!other->committed || _time_cmp(&other->anchor, &pending->anchor))
++            return -1;
++    }
++    return found ? 0 : -1;
++}
++
++static int _commit5_apply(mq_active_record_t *pending, const mq_time_t *at)
++{
++    mq_active_record_t **link;
++    int rc;
++
++    if (_commit5_validate(pending, at)) return -1;
++    for (link = &mq_active; *link != pending; link = &(*link)->next) { }
++    *link = pending->next;
++    rc = mq_active ? _replay_selectable_advance(at) : 0;
++    pending->next = *link;
++    *link = pending;
++    if (rc) return -1;
++    pending->anchor = *at;
++    pending->committed = true;
++    return 0;
++}
++#endif
++
+@@ -1194,0 +1240,9 @@
++	}
++#if defined(TIME_ENABLE_MONTHLY_COMMIT5_DRAFT) && TIME_ENABLE_MONTHLY_COMMIT5_DRAFT
++	if (mq_selectable_replay && !strcmp(event, "COMMIT5")) {
++		if (field_count != 7 || _parse_u32(fields[3], &job_id) ||
++		    _parse_u64(fields[4], &generation) || _parse_u64(fields[5], &to.sec) ||
++		    _parse_u32(fields[6], &to.nsec) || to.nsec >= MQ_NSEC_PER_SEC)
++			return -1;
++		active = _find_active(job_id, generation);
++		return _commit5_apply(active, &to);
+@@ -1195,0 +1250 @@
++#endif
+@@ -2321 +2376,2 @@
+-int monthly_quota_commit(struct job_record *job_ptr)
++static int _monthly_quota_commit(struct job_record *job_ptr,
++				 const mq_time_t *allocation_start)
+@@ -2365,0 +2422,22 @@
++#if defined(TIME_ENABLE_MONTHLY_COMMIT5_DRAFT) && TIME_ENABLE_MONTHLY_COMMIT5_DRAFT
++		if (allocation_start) {
++			if (_now(&commit_time) || _time_cmp(allocation_start, &commit_time) > 0 ||
++			    _commit5_validate(active, allocation_start) ||
++			    _append_event("COMMIT5|%u|%" PRIu64 "|%" PRIu64 "|%u",
++					  active->job_id, active->generation,
++					  allocation_start->sec, allocation_start->nsec) ||
++			    _commit5_apply(active, allocation_start)) {
++				_mark_unhealthy("COMMIT5 validation or durable update failed");
++				pthread_mutex_unlock(&mq_lock);
++				return -1;
++			}
++			pthread_mutex_unlock(&mq_lock);
++			return 0;
++		}
++#else
++		if (allocation_start) {
++			_mark_unhealthy("COMMIT5 is not available in this build");
++			pthread_mutex_unlock(&mq_lock);
++			return -1;
++		}
++#endif
+@@ -2390,0 +2469,5 @@
++int monthly_quota_commit(struct job_record *job_ptr)
++{
++	return _monthly_quota_commit(job_ptr, NULL);
++}
++
+@@ -2489,0 +2573,16 @@
++}
++
++#if defined(TIME_ENABLE_MONTHLY_COMMIT5_DRAFT) && TIME_ENABLE_MONTHLY_COMMIT5_DRAFT
++int monthly_quota_intent_commit_at(struct job_record *job_ptr,
++				   const monthly_quota_intent_t *intent,
++				   uint64_t sec, uint32_t nsec)
++{
++	mq_time_t allocation_start = { .sec = sec, .nsec = nsec };
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || !mq_reconciled || !mq_selectable_replay ||
++	    !_intent_matches(job_ptr, intent)) {
++		_mark_unhealthy("allocation intent cannot be committed");
++		pthread_mutex_unlock(&mq_lock);
++		return -1;
++	}
++	return _monthly_quota_commit(job_ptr, &allocation_start);
+@@ -2490,0 +2590 @@
++#endif
+--- a/src/slurmctld/monthly_quota.h
++++ b/src/slurmctld/monthly_quota.h
+@@ -114,0 +115,7 @@
++#if defined(TIME_ENABLE_MONTHLY_COMMIT5_DRAFT) && TIME_ENABLE_MONTHLY_COMMIT5_DRAFT
++/* The caller supplies a trusted allocation-boundary timestamp; no RPC or
++ * user-provided timestamp may be passed through to this experimental API. */
++extern int monthly_quota_intent_commit_at(struct job_record *job_ptr,
++					  const monthly_quota_intent_t *intent,
++					  uint64_t sec, uint32_t nsec);
++#endif
