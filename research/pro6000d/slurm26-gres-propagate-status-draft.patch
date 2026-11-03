@@ -1,0 +1,24 @@
+--- a/src/plugins/select/cons_tres/job_resources.c
++++ b/src/plugins/select/cons_tres/job_resources.c
+@@ -273,0 +274,3 @@
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	int gres_alloc_status = SLURM_SUCCESS;
++#endif
+@@ -312,0 +316,9 @@
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++				if (gres_stepmgr_job_alloc(
++					job_ptr->gres_list_req,
++					&job_ptr->gres_list_alloc,
++					node_gres_list, job->nhosts,
++					i, n, job_ptr->job_id,
++					node_ptr->name, core_bitmap, new_alloc) != SLURM_SUCCESS)
++					gres_alloc_status = SLURM_ERROR;
++#else
+@@ -318,0 +331 @@
++#endif
+@@ -408,0 +422,3 @@
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	return gres_alloc_status;
++#else
+@@ -409,0 +426 @@
++#endif
