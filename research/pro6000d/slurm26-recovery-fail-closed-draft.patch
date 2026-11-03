@@ -1,0 +1,34 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -2797,0 +2798,6 @@
++		/* A PREPARE alone does not prove when or whether a GPU was
++		 * allocated. Recovery must not manufacture a COMMIT event. */
++		if (!active->committed) {
++			bad = true;
++			continue;
++		}
+@@ -2807 +2813,5 @@
+-			if (time_parse_job_marker(job_ptr->comment, marker_id, &selected) ||
++			if (!active->identity_bound || !job_ptr->details ||
++			    job_ptr->details->submit_time <= 0 ||
++			    (uint64_t)job_ptr->details->submit_time != active->submit_sec ||
++			    job_ptr->restart_cnt != active->restart_count ||
++			    time_parse_job_marker(job_ptr->comment, marker_id, &selected) ||
+@@ -2820,3 +2830,2 @@
+-			/* GRES may already be gone; a PREPARE cannot be proven here. */
+-			if (!active->committed)
+-				bad = true;
++			/* GRES may already be gone and cleanup has not been proven. */
++			bad = true;
+@@ -2857,11 +2865,0 @@
+-	for (active = mq_active; active; active = active->next) {
+-		if (active->committed)
+-			continue;
+-		if (_append_event("COMMIT|%u|%" PRIu64, active->job_id,
+-				  active->generation)) {
+-			_mark_unhealthy("recovery COMMIT could not be durably recorded");
+-			pthread_mutex_unlock(&mq_lock);
+-			return -1;
+-		}
+-		active->committed = true;
+-	}
