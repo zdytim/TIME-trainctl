@@ -1,0 +1,15 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -3186,3 +3186,4 @@
+-	if (entry->job_id || _append_event("CANCEL1|%u|%s", (uint32_t)uid, request)) {
+-		if (entry->job_id) _mark_unhealthy("bound reservation cancellation refused");
+-		else _mark_unhealthy("CANCEL1 persistence failed");
++	if (entry->job_id) {
++#if !defined(TIME_ENABLE_MONTHLY_TOMBSTONES_DRAFT) || !TIME_ENABLE_MONTHLY_TOMBSTONES_DRAFT
++		_mark_unhealthy("bound reservation cancellation refused");
++#endif
+@@ -3190,0 +3192,4 @@
++	if (_append_event("CANCEL1|%u|%s", (uint32_t)uid, request)) {
++		_mark_unhealthy("CANCEL1 persistence failed");
++		goto out;
++	}

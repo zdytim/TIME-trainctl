@@ -240,3 +240,22 @@ class ControllerBridge:
                 "original_gpu_nanoseconds": amount, "hold_active": state < 4, "scheduler_id": job or None,
                 "generation": generation or None, "sluid": sluid or None,
                 "state": ("unbound", "bound", "prepared", "active", "cancelled", "released")[state]}
+
+    def cancel_unbound_reservation(self, uid, request_id):
+        """Cancel only an observed unbound hold; reconcile every unknown result.
+
+        The controller rechecks binding atomically. The caller must separately
+        prove that no scheduler submission is in flight before invoking this.
+        """
+        uid, request_id = self._reservation_request(uid, request_id)
+        current = self.reservation_status(uid, request_id)
+        if not current["present"]:
+            raise ControllerOutcomeUnknown("reservation absent; prior submission outcome is not established")
+        if current["state"] == "cancelled":
+            return {"request_id": request_id, "cancelled": True}
+        if current["state"] != "unbound":
+            raise ControllerUnavailable("only an unbound reservation may be cancelled")
+        line = self._exchange("CANCEL1 %d %s" % (uid, request_id), mutation=True)
+        if line != "OK":
+            raise ControllerOutcomeUnknown("unexpected cancellation reply; reconcile the same request ID")
+        return {"request_id": request_id, "cancelled": True}
