@@ -1,0 +1,12 @@
+--- a/src/stepmgr/gres_stepmgr.c
++++ b/src/stepmgr/gres_stepmgr.c
+@@ -1074,0 +1075,3 @@
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	int rc = SLURM_SUCCESS, rc2;
++#else
+@@ -1075,0 +1079 @@
++#endif
+@@ -1097,0 +1102,3 @@
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++			rc = SLURM_ERROR;
++#endif
