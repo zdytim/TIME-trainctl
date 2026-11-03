@@ -1,0 +1,33 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -95,0 +96 @@
++	bool reservation_bound; /* PREPARE4 linked this generation to RESERVE1 */
+@@ -1137,0 +1139 @@
++		new_active->reservation_bound = bound != NULL;
+@@ -1250,0 +1253 @@
++			mq_reserve1_t *reservation = NULL;
+@@ -1252,0 +1256,7 @@
++			if (active->reservation_bound) {
++				reservation = _reserve1_find(active->uid, active->marker_id);
++				if (!reservation || reservation->job_id != active->job_id ||
++				    reservation->generation != active->generation)
++					return -1;
++				reservation->generation = 0;
++			}
+@@ -2253,0 +2264 @@
++	active->reservation_bound = bound != NULL;
+@@ -2363,0 +2375 @@
++	mq_reserve1_t *reservation = NULL;
+@@ -2371,0 +2384,9 @@
++	if (active->reservation_bound) {
++		reservation = _reserve1_find(active->uid, active->marker_id);
++		if (!reservation || reservation->job_id != active->job_id ||
++		    reservation->generation != active->generation) {
++			_mark_unhealthy("abort reservation identity mismatch");
++			pthread_mutex_unlock(&mq_lock);
++			return;
++		}
++	}
+@@ -2378,0 +2400,2 @@
++	if (reservation)
++		reservation->generation = 0;
