@@ -1,0 +1,19 @@
+--- a/src/slurmctld/node_scheduler.c
++++ b/src/slurmctld/node_scheduler.c
+@@ -2601 +2601 @@
+-	bool monthly_selector_called = false;
++	bool monthly_gres_plugin_called = false;
+@@ -2803,4 +2802,0 @@
+-#if TIME_TRANSACTION_PROTOTYPE
+-		if (monthly_prepared)
+-			monthly_selector_called = true;
+-#endif
+@@ -3175,0 +3172,2 @@
++	if (monthly_prepared)
++		monthly_gres_plugin_called = true;
+@@ -3289,2 +3287,3 @@
+-		/* Selector or plugin failures do not prove resource rollback. */
+-		if (monthly_selector_called)
++		/* Before the cons_tres GRES plugin call, the selector constructs
++		 * job-local candidates; an existing allocation is still ambiguous. */
++		if (monthly_gres_plugin_called || job_ptr->gres_list_alloc)
