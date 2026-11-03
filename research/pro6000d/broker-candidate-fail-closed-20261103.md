@@ -1,0 +1,7 @@
+# Reservation candidate: defensive draft changes
+
+`broker-candidate-fail-closed.patch` applies with `git apply --unidiff-zero` on top of the collected broker candidate from `j-b35bf592d1ce4705a09f` attempt 2, not the production tree. The candidate and this patch remain disabled and must not be deployed.
+
+The patch moves the balance read and reservation insert inside one SQLite `BEGIN IMMEDIATE` transaction, checks an existing request's owner, amount and state before an idempotent return, and prevents reuse of terminal reservation records. This serializes competing writers to the same database; it does not make this broker the authoritative Slurm allocation gate. It also refuses to treat an absent Slurm job as proof of physical GPU release, and hard-disables the candidate's configuration-based `enforcement_ready` claim. With readiness disabled the existing interim submission path remains ordinary Slurm scheduling, not quota enforcement.
+
+The candidate still aggregates reservations without selected-tier or month identity, lacks a trustworthy resource-release event, and has no atomic integration with the Slurm 26 selector, accounting, or recovery. It does not implement the requested monthly policy and is not a release candidate. The modifications were checked only by Python AST parsing and a reverse patch applicability check; no tests were run and neither u20 nor pro6000d was changed.

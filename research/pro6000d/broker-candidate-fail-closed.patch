@@ -1,0 +1,37 @@
+--- a/pro6000d-live-platform/backend/monthly_quota.py
++++ b/pro6000d-live-platform/backend/monthly_quota.py
+@@ -124 +124,3 @@
+-        return self.enabled and self.status == 'ok' and bool(self.config.get('enforcement_ready', False)) and not self.error
++        # The Slurm pre-allocation transaction is not connected. A local
++        # configuration value cannot establish scheduler enforcement.
++        return False
+@@ -132,3 +133,0 @@
+-        current = self.summary(uid)
+-        if current['remaining_gpu_seconds'] is None or current['remaining_gpu_seconds'] < amount:
+-            raise ValueError('月度余额不足以覆盖本次任务的 GPU 数和最长时限')
+@@ -138,2 +137,4 @@
+-            row = self.db.execute('SELECT status FROM monthly_reservations WHERE job_id=?', (job_id,)).fetchone()
+-            if row and row['status'] not in ('REJECTED', 'RETURNED'):
++            row = self.db.execute('SELECT uid,reserved_gpu_seconds,status FROM monthly_reservations WHERE job_id=?', (job_id,)).fetchone()
++            if row:
++                if row['uid'] != uid or row['reserved_gpu_seconds'] != amount or row['status'] not in ('HELD', 'ACTIVE'):
++                    raise ValueError('existing reservation conflicts with request')
+@@ -142 +143,4 @@
+-            self.db.execute("INSERT INTO monthly_reservations(job_id,uid,reserved_gpu_seconds,status,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET uid=excluded.uid,reserved_gpu_seconds=excluded.reserved_gpu_seconds,status='HELD',updated_at=excluded.updated_at,release_evidence=NULL", (job_id, uid, amount, 'HELD', now, now))
++            current = self.summary(uid)
++            if current['remaining_gpu_seconds'] is None or current['remaining_gpu_seconds'] < amount:
++                raise ValueError('月度余额不足以覆盖本次任务的 GPU 数和最长时限')
++            self.db.execute("INSERT INTO monthly_reservations(job_id,uid,reserved_gpu_seconds,status,created_at,updated_at) VALUES(?,?,?,?,?,?)", (job_id, uid, amount, 'HELD', now, now))
+@@ -160,9 +164,3 @@
+-        if self.config.get('release_evidence') != 'scontrol_job_absent_v1':
+-            return False
+-        try:
+-            process = subprocess.run(['scontrol', 'show', 'job', str(scheduler_id), '-o'], stdout=subprocess.PIPE,
+-                                     stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace', timeout=8,
+-                                     env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin', 'LANG':'C'})
+-        except (OSError, subprocess.TimeoutExpired):
+-            return False
+-        return process.returncode != 0 and 'invalid job id' in (process.stdout + '\n' + process.stderr).lower()
++        # Controller job disappearance does not prove node/GRES cleanup.
++        # Until generation-bound release evidence exists, keep the reservation.
++        return False
