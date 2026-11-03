@@ -1,0 +1,11 @@
+--- a/src/slurmctld/controller.c
++++ b/src/slurmctld/controller.c
+@@ -678,0 +679,8 @@
++#if defined(TIME_ENABLE_MONTHLY_LIFECYCLE_DRAFT) && TIME_ENABLE_MONTHLY_LIFECYCLE_DRAFT && \
++    defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++		int quota_fd = slurmscriptd_mode ? -1 : monthly_quota_inherited_witness_fd();
++		if (quota_fd >= 0) {
++			int keep[] = { quota_fd, -1 };
++			closeall_except(STDERR_FILENO + 1, keep);
++		} else
++#endif
