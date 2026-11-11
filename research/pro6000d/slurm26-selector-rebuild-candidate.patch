@@ -1,0 +1,782 @@
+--- a/src/interfaces/select.c
++++ b/src/interfaces/select.c
+@@ -76,6 +76,9 @@
+ 	int		(*nodeinfo_set_all)	(void);
+ 	int		(*nodeinfo_set)		(job_record_t *job_ptr);
+ 	int		(*reconfigure)		(void);
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	int (*quota_recovery_verify)(job_record_t *, node_record_t *, uint64_t);
++#endif
+ } slurm_select_ops_t;
+ 
+ static const char *node_select_syms[] = {
+@@ -93,6 +96,9 @@
+ 	"select_p_select_nodeinfo_set_all",
+ 	"select_p_select_nodeinfo_set",
+ 	"select_p_reconfigure",
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	"select_p_quota_recovery_verify",
++#endif
+ };
+ 
+ static slurm_select_ops_t ops;
+@@ -394,3 +400,9 @@
+ {
+ 	return (*(ops.reconfigure))();
+ }
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++extern int select_g_quota_recovery_verify(job_record_t *job, node_record_t *node, uint64_t gpu)
++{
++	return (*(ops.quota_recovery_verify))(job, node, gpu);
++}
++#endif
+--- a/src/interfaces/select.h
++++ b/src/interfaces/select.h
+@@ -40,6 +40,9 @@
+ #ifndef _INTERFACES_SELECT_H
+ #define _INTERFACES_SELECT_H
+ 
++/* Selector failed, but its pre-launch GPU mutation was fully restored. */
++#define TIME_QUOTA_SELECTOR_ROLLBACK_OK 0x5155
++
+ #include "slurm/slurm.h"
+ #include "slurm/slurm_errno.h"
+ #include "src/common/list.h"
+@@ -104,6 +107,10 @@
+ 
+ /* Note reconfiguration or change in partition configuration */
+ extern int select_g_reconfigure(void);
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++/* Read-only proof of the current process's rebuilt cons_tres allocation. */
++extern int select_g_quota_recovery_verify(job_record_t *job, node_record_t *node, uint64_t gpu);
++#endif
+ 
+ /**************************\
+  * NODE SPECIFIC FUNCTIONS *
+--- a/src/plugins/select/linear/select_linear.c
++++ b/src/plugins/select/linear/select_linear.c
+@@ -2522,7 +2522,15 @@
+ 	slurm_mutex_unlock(&cr_mutex);
+ 
+ 	return SLURM_SUCCESS;
++}
++
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++extern int select_p_quota_recovery_verify(job_record_t *job, node_record_t *node, uint64_t gpu)
++{
++	(void) job; (void) node; (void) gpu;
++	return SLURM_ERROR;
+ }
++#endif
+ 
+ extern int select_p_reconfigure(void)
+ {
+--- a/src/plugins/select/cons_tres/select_cons_tres.c
++++ b/src/plugins/select/cons_tres/select_cons_tres.c
+@@ -41,6 +41,7 @@
+ 
+ #include <inttypes.h>
+ #include <string.h>
++#include <strings.h>
+ 
+ #include "src/common/slurm_xlator.h"
+ #include "src/common/assoc_mgr.h"
+@@ -948,8 +949,242 @@
+ 	gres_job_state_log(job_ptr->gres_list_alloc, job_ptr->job_id);
+ 
+ 	return rc;
++}
++
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++/* Never issue a recovery proof for a partially rebuilt selector. */
++static bool quota_rebuild_trusted;
++extern bool quota_rebuild_in_progress;
++static bool _quota_config_enabled(void)
++{
++	const char *cursor = slurm_conf.slurmctld_params, *start;
++	if (!cursor) return false;
++	while (*cursor) {
++		while (*cursor == ',' || *cursor == ' ' || *cursor == '\t') cursor++;
++		start = cursor;
++		while (*cursor && *cursor != ',' && *cursor != ' ' && *cursor != '\t') cursor++;
++		if ((size_t)(cursor - start) == strlen("MonthlyGpuQuota") &&
++		    !strncasecmp(start, "MonthlyGpuQuota", cursor - start)) return true;
++	}
++	return false;
++}
++#endif
++
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++/* A selector removal can rebuild a whole partition row. Verify that each
++ * row entry names exactly one current running job and that the per-node
++ * bitmap is exactly the union of its members, with no overlap in one row. */
++static bool _quota_row_consistent(part_res_record_t *part, part_row_data_t *row)
++{
++	list_itr_t *it = NULL;
++	job_record_t *job, *found;
++	bitstr_t *union_bits = NULL, *cores = NULL;
++	bool valid = false;
++	if (row->num_jobs > row->job_list_size || (row->num_jobs && !row->job_list))
++		return false;
++	/* Validate row membership once; the following pass checks every node. */
++	for (unsigned j = 0; j < row->num_jobs; j++) {
++		job_resources_t *res = row->job_list[j];
++		int matches = 0;
++		if (!res || !res->node_bitmap || !res->core_bitmap ||
++		    bit_size(res->node_bitmap) != node_record_count ||
++		    bit_set_count(res->node_bitmap) != res->nhosts) goto done;
++		for (unsigned k = 0; k < j; k++) if (row->job_list[k] == res) goto done;
++		found = NULL;
++		it = list_iterator_create(job_list);
++		while ((job = list_next(it))) {
++			if (job->job_resrcs != res) continue;
++			matches++; found = job;
++		}
++		list_iterator_destroy(it); it = NULL;
++		if (matches != 1 || !found || !IS_JOB_RUNNING(found) ||
++		    found->part_ptr != part->part_ptr) goto done;
++	}
++	for (int node_index = 0; node_index < node_record_count; node_index++) {
++		bitstr_t *actual = row->row_bitmap ? row->row_bitmap[node_index] : NULL;
++		if (actual) union_bits = bit_alloc(bit_size(actual));
++		for (unsigned j = 0; j < row->num_jobs; j++) {
++			job_resources_t *res = row->job_list[j];
++			int offset = 0;
++			if (!bit_test(res->node_bitmap, node_index)) continue;
++			if (!actual || !union_bits) goto done;
++			for (int n = 0; n < node_index; n++) if (bit_test(res->node_bitmap, n)) offset++;
++			if (offset >= res->nhosts) goto done;
++			if (res->whole_node == 1) {
++				cores = bit_alloc(bit_size(union_bits));
++				bit_set_all(cores);
++			} else
++				cores = copy_job_resources_node(res, offset);
++			if (!cores || !bit_set_count(cores) || bit_size(cores) != bit_size(union_bits) ||
++			    bit_overlap_any(cores, union_bits)) goto done;
++			bit_or(union_bits, cores);
++			FREE_NULL_BITMAP(cores);
++		}
++		if (actual && !bit_equal(actual, union_bits)) goto done;
++		FREE_NULL_BITMAP(union_bits);
++	}
++	valid = true;
++done:
++	if (it) list_iterator_destroy(it);
++	FREE_NULL_BITMAP(cores);
++	FREE_NULL_BITMAP(union_bits);
++	return valid;
+ }
+ 
++static bool _quota_row_contains(job_record_t *job, part_res_record_t **checked,
++				unsigned *checked_count, unsigned checked_limit)
++{
++	part_res_record_t *part;
++	unsigned hits = 0;
++	for (part = select_part_record; part; part = part->next) {
++		bool already_checked = false;
++		if (part->part_ptr != job->part_ptr || !part->row) continue;
++		for (unsigned n = 0; n < *checked_count; n++)
++			if (checked[n] == part) already_checked = true;
++		for (int i = 0; i < part->num_rows; i++) {
++			part_row_data_t *row = &part->row[i];
++			if (!already_checked && !_quota_row_consistent(part, row)) return false;
++			for (unsigned j = 0; j < row->num_jobs; j++)
++				if (row->job_list[j] == job->job_resrcs) hits++;
++		}
++		if (!already_checked) {
++			if (*checked_count >= checked_limit) return false;
++			checked[(*checked_count)++] = part;
++		}
++	}
++	return hits == 1;
++}
++
++/* Verify the complete current node ledger before a recovered allocation is
++ * touched. No counters or bitmaps are modified by this function. */
++extern int select_p_quota_recovery_verify(job_record_t *target, node_record_t *node,
++					  uint64_t expected_gpu)
++{
++	gres_state_t *state;
++	gres_node_state_t *node_gpu = NULL;
++	gres_job_state_t *job_gpu;
++	job_record_t *job;
++	list_itr_t *it = NULL, *git = NULL, *nit = NULL;
++	bitstr_t *all_gpu = NULL;
++	uint64_t memory = 0, gpu_total = 0, node_state = 0;
++	unsigned node_hits, running_count = 0, checked_count = 0, checked_limit;
++	part_res_record_t **checked = NULL;
++	void *member;
++	int rc = SLURM_ERROR, idx, offset, seen_target = 0;
++
++	if (!quota_rebuild_trusted || !target || !node || !expected_gpu ||
++	    !IS_JOB_RUNNING(target) || IS_JOB_COMPLETING(target) ||
++	    !target->part_ptr || !target->details || !target->job_resrcs ||
++	    !target->job_resrcs->core_bitmap || !target->job_resrcs->node_bitmap ||
++	    bit_size(target->job_resrcs->node_bitmap) != node_record_count ||
++	    target->job_resrcs->nhosts != 1 ||
++	    bit_set_count(target->job_resrcs->node_bitmap) != 1 ||
++	    !bit_test(target->job_resrcs->node_bitmap, node->index) ||
++	    !select_node_usage || !select_node_usage[node->index].jobs)
++		return SLURM_ERROR;
++	if (!part_list || !job_list || list_count(job_list) > 4096 ||
++	    list_count(part_list) > 4096 || node_record_count > 4096)
++		return SLURM_ERROR;
++	checked_limit = list_count(part_list) + 1;
++	checked = xcalloc(checked_limit, sizeof(*checked));
++	if (!_quota_row_contains(target, checked, &checked_count, checked_limit) || !node->gres_list)
++		goto done;
++	git = list_iterator_create(select_node_usage[node->index].gres_list ?
++		select_node_usage[node->index].gres_list : node->gres_list);
++	while ((state = list_next(git))) {
++		if (!state->gres_name || !state->gres_data ||
++		    state->state_type != GRES_STATE_TYPE_NODE ||
++		    !strcmp(state->gres_name, "mps") || !strcmp(state->gres_name, "shard"))
++			goto done;
++		if (state->plugin_id != gres_get_gpu_plugin_id())
++			continue;
++		if (node_gpu || strcmp(state->gres_name, "gpu") ||
++		    (state->config_flags & GRES_CONF_SHARED))
++			goto done;
++		node_gpu = state->gres_data;
++	}
++	list_iterator_destroy(git); git = NULL;
++	if (!node_gpu || node_gpu->no_consume || !node_gpu->gres_bit_alloc)
++		goto done;
++	all_gpu = bit_alloc(bit_size(node_gpu->gres_bit_alloc));
++	it = list_iterator_create(job_list);
++	while ((job = list_next(it))) {
++		job_resources_t *res = job->job_resrcs;
++		if (!IS_JOB_RUNNING(job) && !IS_JOB_SUSPENDED(job))
++			continue;
++		if (!res || !res->node_bitmap || bit_size(res->node_bitmap) != node_record_count)
++			goto done;
++		if (!bit_test(res->node_bitmap, node->index))
++			continue;
++		if (IS_JOB_SUSPENDED(job))
++			goto done; /* suspended-resource accounting differs */
++		if (!res->cpus || !res->memory_allocated ||
++		    bit_set_count(res->node_bitmap) != res->nhosts)
++			goto done;
++		offset = 0;
++		for (idx = 0; idx < node->index; idx++)
++			if (bit_test(res->node_bitmap, idx)) offset++;
++		if (offset >= res->nhosts || !res->cpus[offset] ||
++		    UINT64_MAX - memory < res->memory_allocated[offset])
++			goto done;
++		memory += res->memory_allocated[offset];
++		if (UINT16_MAX - node_state < res->node_req ||
++		    !job->part_ptr || !_quota_row_contains(job, checked, &checked_count, checked_limit))
++			goto done;
++		node_state += res->node_req;
++		running_count++;
++		node_hits = 0;
++		nit = list_iterator_create(select_node_usage[node->index].jobs);
++		while ((member = list_next(nit)))
++			if (member == job) node_hits++;
++		list_iterator_destroy(nit); nit = NULL;
++		if (node_hits != 1) goto done;
++		job_gpu = NULL;
++		if (job->gres_list_alloc) {
++			git = list_iterator_create(job->gres_list_alloc);
++			while ((state = list_next(git))) {
++				if (!state->gres_name || !state->gres_data ||
++				    state->state_type != GRES_STATE_TYPE_JOB ||
++				    !strcmp(state->gres_name, "mps") || !strcmp(state->gres_name, "shard"))
++					goto done;
++				if (state->plugin_id != gres_get_gpu_plugin_id()) continue;
++				if (job_gpu || strcmp(state->gres_name, "gpu") ||
++				    (state->config_flags & GRES_CONF_SHARED)) goto done;
++				job_gpu = state->gres_data;
++			}
++			list_iterator_destroy(git); git = NULL;
++		}
++		if (job_gpu) {
++			bitstr_t *bits;
++			uint64_t count;
++			if ((job == target && job_gpu->type_name) || (job_gpu->flags & GRES_CONF_SHARED) ||
++			    job_gpu->node_cnt != res->nhosts || !job_gpu->gres_bit_alloc ||
++			    !job_gpu->gres_cnt_node_alloc || !(bits = job_gpu->gres_bit_alloc[offset]) ||
++			    bit_size(bits) != bit_size(all_gpu)) goto done;
++			count = job_gpu->gres_cnt_node_alloc[offset];
++			if (count != bit_set_count(bits) || bit_overlap_any(all_gpu, bits) ||
++			    UINT64_MAX - gpu_total < count) goto done;
++			gpu_total += count; bit_or(all_gpu, bits);
++			if (job == target && count != expected_gpu) goto done;
++		} else if (job == target) goto done;
++		if (job == target) seen_target++;
++	}
++	if (seen_target != 1 || list_count(select_node_usage[node->index].jobs) != running_count ||
++	    memory != select_node_usage[node->index].alloc_memory || memory > node->real_memory ||
++	    node_state != select_node_usage[node->index].node_state ||
++	    gpu_total != node_gpu->gres_cnt_alloc || !bit_equal(all_gpu, node_gpu->gres_bit_alloc))
++		goto done;
++	rc = SLURM_SUCCESS;
++done:
++	if (it) list_iterator_destroy(it);
++	if (git) list_iterator_destroy(git);
++	if (nit) list_iterator_destroy(nit);
++	FREE_NULL_BITMAP(all_gpu);
++	xfree(checked);
++	return rc;
++}
++#endif
++
+ extern int select_p_reconfigure(void)
+ {
+ 	list_itr_t *job_iterator;
+@@ -958,6 +1193,9 @@
+ 	int rc = SLURM_SUCCESS;
+ 
+ 	info("%s: reconfigure", plugin_type);
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	quota_rebuild_trusted = false;
++#endif
+ 
+ 	def_cpu_per_gpu = 0;
+ 	def_mem_per_gpu = 0;
+@@ -976,19 +1214,31 @@
+ 		node_ptr->node_state &= (~NODE_STATE_BLOCKED);
+ 
+ 	/* reload job data */
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	quota_rebuild_in_progress = _quota_config_enabled();
++#endif
+ 	job_iterator = list_iterator_create(job_list);
+ 	while ((job_ptr = list_next(job_iterator))) {
+ 		if (IS_JOB_RUNNING(job_ptr)) {
+ 			/* add the job */
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++			if (job_res_add_job(job_ptr, JOB_RES_ACTION_NORMAL) != SLURM_SUCCESS)
++				rc = SLURM_ERROR;
++#else
+ 			job_res_add_job(job_ptr, JOB_RES_ACTION_NORMAL);
++#endif
+ 		} else if (IS_JOB_SUSPENDED(job_ptr)) {
+ 			/* add the job in a suspended state */
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++			if (job_res_add_job(job_ptr, job_ptr->priority == 0 ?
++					    JOB_RES_ACTION_SUSPEND : JOB_RES_ACTION_NORMAL) != SLURM_SUCCESS)
++				rc = SLURM_ERROR;
++#else
+ 			if (job_ptr->priority == 0)
+-				(void) job_res_add_job(job_ptr,
+-						       JOB_RES_ACTION_SUSPEND);
+-			else	/* Gang schedule suspend */
+-				(void) job_res_add_job(job_ptr,
+-						       JOB_RES_ACTION_NORMAL);
++				(void) job_res_add_job(job_ptr, JOB_RES_ACTION_SUSPEND);
++			else
++				(void) job_res_add_job(job_ptr, JOB_RES_ACTION_NORMAL);
++#endif
+ 		}
+ 
+ 		if ((IS_JOB_RUNNING(job_ptr) || IS_JOB_SUSPENDED(job_ptr)) &&
+@@ -998,6 +1248,11 @@
+ 	}
+ 	list_iterator_destroy(job_iterator);
+ 	select_state_initializing = false;
+-
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	quota_rebuild_in_progress = false;
++	quota_rebuild_trusted = (rc == SLURM_SUCCESS);
++	return rc;
++#else
+ 	return SLURM_SUCCESS;
++#endif
+ }
+--- a/src/plugins/select/cons_tres/job_resources.c
++++ b/src/plugins/select/cons_tres/job_resources.c
+@@ -43,7 +43,62 @@
+ #include "src/stepmgr/gres_stepmgr.h"
+ 
+ bool select_state_initializing = true;
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++bool quota_rebuild_in_progress;
++#endif
+ 
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++/* GRES replay otherwise silently ignores already allocated or truncated bits.
++ * Refuse ambiguous GPU reconstruction before touching that node. */
++static int _quota_check_rebuild_gpu(list_t *job_req, list_t *job_gres, list_t *node_gres, int offset)
++{
++	list_itr_t *ji = NULL, *ni = NULL, *ri = NULL;
++	gres_state_t *j, *n;
++	gres_job_state_t *jg = NULL;
++	gres_node_state_t *ng = NULL;
++	int rc = -1, requested_gpu = 0;
++	if (job_req) {
++		ri = list_iterator_create(job_req);
++		while ((j = list_next(ri))) {
++			if (j->plugin_id != gres_get_gpu_plugin_id()) continue;
++			if (requested_gpu++ || j->state_type != GRES_STATE_TYPE_JOB || !j->gres_data ||
++			    !j->gres_name || strcmp(j->gres_name, "gpu") || (j->config_flags & GRES_CONF_SHARED)) goto done;
++		}
++	}
++	if (!job_gres) { rc = requested_gpu ? -1 : 0; goto done; }
++	ji = list_iterator_create(job_gres);
++	while ((j = list_next(ji))) {
++		if (j->plugin_id != gres_get_gpu_plugin_id()) continue;
++		if (jg || j->state_type != GRES_STATE_TYPE_JOB || !j->gres_data ||
++		    !j->gres_name || strcmp(j->gres_name, "gpu") || (j->config_flags & GRES_CONF_SHARED)) goto done;
++		jg = j->gres_data;
++	}
++	if (!jg) { rc = requested_gpu ? -1 : 0; goto done; }
++	if (!requested_gpu) goto done;
++	if ((jg->flags & GRES_CONF_SHARED) || offset < 0 ||
++	    offset >= jg->node_cnt || !jg->gres_bit_alloc || !jg->gres_cnt_node_alloc ||
++	    !jg->gres_bit_alloc[offset] || jg->gres_cnt_node_alloc[offset] != bit_set_count(jg->gres_bit_alloc[offset]) ||
++	    !node_gres) goto done;
++	ni = list_iterator_create(node_gres);
++	while ((n = list_next(ni))) {
++		if (n->plugin_id != gres_get_gpu_plugin_id()) continue;
++		if (ng || n->state_type != GRES_STATE_TYPE_NODE || !n->gres_data ||
++		    !n->gres_name || strcmp(n->gres_name, "gpu") || (n->config_flags & GRES_CONF_SHARED)) goto done;
++		ng = n->gres_data;
++	}
++	if (!ng || ng->no_consume || bit_size(jg->gres_bit_alloc[offset]) != ng->gres_cnt_avail ||
++	    (ng->gres_bit_alloc &&
++	     (bit_size(ng->gres_bit_alloc) != bit_size(jg->gres_bit_alloc[offset]) ||
++	      bit_overlap_any(ng->gres_bit_alloc, jg->gres_bit_alloc[offset])))) goto done;
++	rc = 0;
++done:
++	if (ji) list_iterator_destroy(ji);
++	if (ni) list_iterator_destroy(ni);
++	if (ri) list_iterator_destroy(ri);
++	return rc;
++}
++#endif
++
+ typedef enum {
+ 	HANDLE_JOB_RES_ADD,
+ 	HANDLE_JOB_RES_REM,
+@@ -248,8 +303,186 @@
+ 
+ 	return _handle_job_res(job_resrcs_ptr, r_ptr,
+ 			       HANDLE_JOB_RES_TEST);
++}
++
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++/* A new monthly allocation is limited by the controller to a single,
++ * untyped, non-shared GPU request on one node. Save just the node fields
++ * that _job_alloc can change for this shape. Never replace the node GRES
++ * object itself: other selector structures can hold its address. */
++typedef struct {
++	gres_node_state_t *node_gpu;
++	gres_state_t *node_state;
++	uint64_t count, expected;
++
++	bitstr_t *bits;
++	uint64_t *topo, *type;
++	uint16_t topo_count, type_count;
++	bool had_topo;
++	char *used;
++} quota_gres_snapshot_t;
++
++static void _quota_gres_snapshot_free(quota_gres_snapshot_t *snap)
++{
++	FREE_NULL_BITMAP(snap->bits);
++	xfree(snap->topo); xfree(snap->type); xfree(snap->used);
++}
++
++static void _quota_gres_restore(quota_gres_snapshot_t *snap)
++{
++	gres_node_state_t *g = snap->node_gpu;
++	/* Untyped allocation cannot add a type or change topology dimensions. */
++	if (!g || g->topo_cnt != snap->topo_count || g->type_cnt != snap->type_count ||
++	    (snap->type_count && !g->type_cnt_alloc) ||
++	    (snap->had_topo && !g->topo_gres_cnt_alloc))
++		fatal("monthly quota: GPU state changed during selector transaction");
++	g->gres_cnt_alloc = snap->count;
++	FREE_NULL_BITMAP(g->gres_bit_alloc); g->gres_bit_alloc = snap->bits; snap->bits = NULL;
++	if (!snap->had_topo) xfree(g->topo_gres_cnt_alloc);
++	else if (snap->topo_count)
++		memcpy(g->topo_gres_cnt_alloc, snap->topo, snap->topo_count * sizeof(uint64_t));
++	if (snap->type_count)
++		memcpy(g->type_cnt_alloc, snap->type, snap->type_count * sizeof(uint64_t));
++	xfree(g->gres_used); g->gres_used = snap->used; snap->used = NULL;
+ }
+ 
++/* Returns 0 for an unrelated selector call, 1 after a complete snapshot,
++ * -1 if a monthly GPU transaction cannot be proven safe before mutation. */
++static int _quota_gres_snapshot(job_record_t *job_ptr, bool new_alloc,
++				job_res_job_action_t action, quota_gres_snapshot_t *snap)
++{
++	job_resources_t *job = job_ptr->job_resrcs;
++	gres_state_t *req, *node_state;
++	gres_job_state_t *jg;
++	gres_node_state_t *ng;
++	list_itr_t *iter;
++	list_t *node_gres;
++	node_record_t *node;
++	part_res_record_t *part;
++	int index = 0, fit = 0;
++	if (!new_alloc || action != JOB_RES_ACTION_NORMAL || quota_rebuild_in_progress ||
++	    !slurm_conf.slurmctld_params || !xstrcasestr(slurm_conf.slurmctld_params, "MonthlyGpuQuota") ||
++	    (job_ptr->bit_flags & JOB_WAS_RUNNING) || !job_ptr->gres_list_req)
++		return 0;
++	iter = list_iterator_create(job_ptr->gres_list_req);
++	req = list_next(iter);
++	if (!req || req->plugin_id != gres_get_gpu_plugin_id()) { list_iterator_destroy(iter); return 0; }
++	list_iterator_destroy(iter);
++	if (list_count(job_ptr->gres_list_req) != 1 || !req->gres_data || !req->gres_name ||
++	    strcmp(req->gres_name, "gpu") || req->state_type != GRES_STATE_TYPE_JOB ||
++	    (req->config_flags & GRES_CONF_SHARED) || !job_ptr->details ||
++	    (job_ptr->details->whole_node & WHOLE_NODE_REQUIRED) || !job || !job->node_bitmap ||
++	    !job->cpus || !job->memory_allocated || job->nhosts != 1 ||
++	    bit_set_count(job->node_bitmap) != 1 || !job->cpus[0] || !job->memory_allocated[0]) {
++		error("quota transaction preflight: unsupported job resources whole=%u", job_ptr->details ? job_ptr->details->whole_node : 255);
++		return -1;
++	}
++	jg = req->gres_data;
++	if (jg->type_name || (jg->flags & GRES_CONF_SHARED)) return -1;
++	node = next_node_bitmap(job->node_bitmap, &index);
++	if (!node || !select_node_usage || !node->gres_list) return -1;
++	node_gres = select_node_usage[index].gres_list ? select_node_usage[index].gres_list : node->gres_list;
++	node_state = list_find_first(node_gres, gres_find_id, &req->plugin_id);
++	if (!node_state || !node_state->gres_data || !node_state->gres_name ||
++	    strcmp(node_state->gres_name, "gpu") || node_state->state_type != GRES_STATE_TYPE_NODE ||
++	    (node_state->config_flags & GRES_CONF_SHARED)) return -1;
++	ng = node_state->gres_data;
++	if (ng->no_consume || ng->alt_gres || !ng->gres_bit_alloc ||
++	    (ng->topo_cnt && !ng->topo_gres_cnt_alloc) ||
++	    (ng->type_cnt && !ng->type_cnt_alloc) ||
++	    !jg->gres_cnt_node_select || index >= jg->total_node_cnt ||
++	    (jg->gres_bit_select && jg->gres_bit_select[index] &&
++	     (bit_size(jg->gres_bit_select[index]) != bit_size(ng->gres_bit_alloc) ||
++	      bit_overlap_any(jg->gres_bit_select[index], ng->gres_bit_alloc) ||
++	      bit_set_count(jg->gres_bit_select[index]) != jg->gres_cnt_node_select[index])) ||
++	    (uint64_t)bit_set_count(ng->gres_bit_alloc) != ng->gres_cnt_alloc ||
++	    !jg->gres_cnt_node_select[index] || ng->gres_cnt_alloc > ng->gres_cnt_avail ||
++	    jg->gres_cnt_node_select[index] > ng->gres_cnt_avail - ng->gres_cnt_alloc ||
++	    select_node_usage[index].alloc_memory > node->real_memory ||
++	    job->memory_allocated[0] > node->real_memory - select_node_usage[index].alloc_memory) {
++		error("quota transaction preflight: GPU/selection state: no_consume=%u alt=%u bitmap=%u topo=%u topoalloc=%u type=%u typealloc=%u selected=%u count=%u totalnodes=%u", ng->no_consume, !!ng->alt_gres, !!ng->gres_bit_alloc, ng->topo_cnt, !!ng->topo_gres_cnt_alloc, ng->type_cnt, !!ng->type_cnt_alloc, !!jg->gres_bit_select, !!jg->gres_cnt_node_select, jg->total_node_cnt);
++		return -1;
++	}
++	/* Validate the only later error exit before touching GPU or memory. */
++	for (part = select_part_record; part && part->part_ptr != job_ptr->part_ptr; part = part->next) {}
++	if (!part || !part->num_rows) return -1;
++	if (part->rebuild_rows) part_data_build_row_bitmaps(part, NULL);
++	if (!part->row) fit = 1;
++	else for (int i = 0; i < part->num_rows; i++) if (job_res_fit_in_row(job, &part->row[i])) { fit = 1; break; }
++	if (!fit) return -1;
++	snap->node_gpu = ng; snap->node_state = node_state; snap->count = ng->gres_cnt_alloc;
++	snap->expected = jg->gres_cnt_node_select[index];
++	snap->bits = bit_copy(ng->gres_bit_alloc);
++	snap->topo_count = ng->topo_cnt; snap->type_count = ng->type_cnt;
++	snap->had_topo = ng->topo_gres_cnt_alloc != NULL;
++	if (snap->topo_count) {
++		snap->topo = xcalloc(snap->topo_count, sizeof(uint64_t));
++		memcpy(snap->topo, ng->topo_gres_cnt_alloc, snap->topo_count * sizeof(uint64_t));
++	}
++	if (snap->type_count) {
++		snap->type = xcalloc(snap->type_count, sizeof(uint64_t));
++		memcpy(snap->type, ng->type_cnt_alloc, snap->type_count * sizeof(uint64_t));
++	}
++	snap->used = xstrdup(ng->gres_used);
++	return 1;
++}
++
++/* Slurm sometimes logs malformed or overlapping bitmaps yet returns success.
++ * The snapshot is retained until the actual delta is proved exact. */
++static bool _quota_gres_delta_valid(job_record_t *job_ptr, quota_gres_snapshot_t *snap)
++{
++	gres_state_t *state;
++	gres_job_state_t *job_gpu;
++	gres_node_state_t *ng = snap->node_gpu;
++	list_itr_t *iter;
++	bitstr_t *merged = NULL, *bits;
++	bool valid = false, busy;
++	if (!job_ptr->gres_list_alloc || list_count(job_ptr->gres_list_alloc) != 1 ||
++	    !ng || ng->type_cnt != snap->type_count || ng->topo_cnt != snap->topo_count ||
++	    !ng->gres_bit_alloc || UINT64_MAX - snap->count < snap->expected ||
++	    ng->gres_cnt_alloc != snap->count + snap->expected) return false;
++	iter = list_iterator_create(job_ptr->gres_list_alloc);
++	state = list_next(iter);
++	if (!state || state->plugin_id != gres_get_gpu_plugin_id() ||
++	    state->state_type != GRES_STATE_TYPE_JOB || !state->gres_name ||
++	    strcmp(state->gres_name, "gpu") || !state->gres_data || (state->config_flags & GRES_CONF_SHARED)) {
++		list_iterator_destroy(iter); return false;
++	}
++	job_gpu = state->gres_data;
++	list_iterator_destroy(iter);
++	if (job_gpu->type_name || (job_gpu->flags & GRES_CONF_SHARED) || job_gpu->node_cnt != 1 ||
++	    !job_gpu->gres_cnt_node_alloc || !job_gpu->gres_bit_alloc || !(bits = job_gpu->gres_bit_alloc[0]) ||
++	    bit_size(bits) != bit_size(snap->bits) || bit_size(bits) != bit_size(ng->gres_bit_alloc) ||
++	    job_gpu->gres_cnt_node_alloc[0] != snap->expected || bit_set_count(bits) != snap->expected ||
++	    bit_overlap_any(bits, snap->bits)) return false;
++	merged = bit_copy(snap->bits); bit_or(merged, bits);
++	if (!bit_equal(merged, ng->gres_bit_alloc)) goto done;
++	busy = gres_use_busy_dev(snap->node_state, 0);
++	for (int i = 0; i < snap->topo_count; i++) {
++		uint64_t delta;
++		if (!snap->topo || !ng->topo_gres_cnt_alloc || !ng->topo_gres_bitmap ||
++		    !ng->topo_gres_bitmap[i] || bit_size(ng->topo_gres_bitmap[i]) != bit_size(bits)) goto done;
++		delta = (busy && snap->topo[i] == 0) ? 0 : bit_overlap(bits, ng->topo_gres_bitmap[i]);
++		if (UINT64_MAX - snap->topo[i] < delta || ng->topo_gres_cnt_alloc[i] != snap->topo[i] + delta) goto done;
++	}
++	for (int j = 0; j < snap->type_count; j++) {
++		uint64_t delta = 0;
++		if (!snap->type || !ng->type_cnt_alloc) goto done;
++		for (int i = 0; i < snap->topo_count; i++) {
++			if (!ng->topo_type_name || !ng->topo_type_id || !ng->type_name || !ng->type_id ||
++			    !ng->topo_type_name[i] || !ng->type_name[j]) continue;
++			if (ng->topo_type_id[i] == ng->type_id[j] && !(busy && snap->topo[i] == 0))
++				delta += bit_overlap(bits, ng->topo_gres_bitmap[i]);
++		}
++		if (UINT64_MAX - snap->type[j] < delta || ng->type_cnt_alloc[j] != snap->type[j] + delta) goto done;
++	}
++	valid = true;
++done:
++	FREE_NULL_BITMAP(merged);
++	return valid;
++}
++#endif
++
+ /*
+  * allocate resources to the given job
+  * - add 'struct job_resources' resources to 'part_res_record_t'
+@@ -272,8 +505,12 @@
+ 	list_t *node_gres_list;
+ 	int i, n;
+ #if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
+-	int gres_alloc_status = SLURM_SUCCESS;
++	int gres_alloc_status = SLURM_SUCCESS, quota_state = 0;
++	quota_gres_snapshot_t quota_snap = {0};
++#if defined(TIME_ENABLE_MONTHLY_TEST_FIXTURE) && TIME_ENABLE_MONTHLY_TEST_FIXTURE
++	bool test_full_failure = false;
+ #endif
++#endif
+ 	bitstr_t *core_bitmap;
+ 	bool new_alloc = true;
+ 
+@@ -291,6 +528,10 @@
+ 
+ 	if (job_ptr->gres_list_alloc)
+ 		new_alloc = false;
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	quota_state = _quota_gres_snapshot(job_ptr, new_alloc, action, &quota_snap);
++	if (quota_state < 0) return TIME_QUOTA_SELECTOR_ROLLBACK_OK;
++#endif
+ 	for (i = 0, n = -1; (node_ptr = next_node_bitmap(job->node_bitmap, &i));
+ 	     i++) {
+ 		n++;
+@@ -302,17 +543,31 @@
+ 				node_gres_list = select_node_usage[i].gres_list;
+ 			else
+ 				node_gres_list = node_ptr->gres_list;
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++			if (quota_rebuild_in_progress &&
++			    _quota_check_rebuild_gpu(job_ptr->gres_list_req, job_ptr->gres_list_alloc, node_gres_list, n)) {
++				error("ambiguous restored GPU allocation for %pJ on %s", job_ptr, node_ptr->name);
++				return SLURM_ERROR;
++			}
++#endif
+ 			core_bitmap = copy_job_resources_node(job, n);
+ 			if (job_ptr->details &&
+ 			    (job_ptr->details->whole_node &
+-			     WHOLE_NODE_REQUIRED))
++			     WHOLE_NODE_REQUIRED)) {
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++				if (gres_stepmgr_job_alloc_whole_node(
++					job_ptr->gres_list_req, &job_ptr->gres_list_alloc,
++					node_gres_list, job->nhosts, i, n, job_ptr->job_id,
++					node_ptr->name, core_bitmap, new_alloc) != SLURM_SUCCESS &&
++				    quota_rebuild_in_progress)
++					gres_alloc_status = SLURM_ERROR;
++#else
+ 				gres_stepmgr_job_alloc_whole_node(
+-					job_ptr->gres_list_req,
+-					&job_ptr->gres_list_alloc,
+-					node_gres_list, job->nhosts,
+-					i, n, job_ptr->job_id,
++					job_ptr->gres_list_req, &job_ptr->gres_list_alloc,
++					node_gres_list, job->nhosts, i, n, job_ptr->job_id,
+ 					node_ptr->name, core_bitmap, new_alloc);
+-			else
++#endif
++			} else
+ #if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
+ 				if (gres_stepmgr_job_alloc(
+ 					job_ptr->gres_list_req,
+@@ -330,15 +585,67 @@
+ 					node_ptr->name, core_bitmap, new_alloc);
+ #endif
+ 
++#if defined(TIME_ENABLE_MONTHLY_TEST_FIXTURE) && TIME_ENABLE_MONTHLY_TEST_FIXTURE
++			/* Exercise failure after the real GPU ledger changed, only in the
++			 * GPU-free Colima validation build. */
++			{
++				const char *trigger = getenv("TIME26_TEST_SELECTOR_FAIL_FILE");
++				char host[64];
++				if (new_alloc && trigger && !strncmp(trigger, "/tmp/time26-gpu-probe-", 22) &&
++				    !gethostname(host, sizeof(host)) && !strcmp(host, "colima") &&
++				    access("/dev/nvidiactl", F_OK) && !access(trigger, F_OK)) {
++					error("test-only injected selector failure after GRES mutation");
++					if (getenv("TIME26_TEST_SELECTOR_SILENT")) {
++						gres_state_t *state = (quota_state == 1 && job_ptr->gres_list_alloc) ?
++							list_find_first(job_ptr->gres_list_alloc, gres_find_id,
++									&quota_snap.node_state->plugin_id) : NULL;
++						gres_job_state_t *jg = state ? state->gres_data : NULL;
++						int bit = (jg && jg->gres_bit_alloc && jg->gres_bit_alloc[0]) ?
++							bit_ffs(jg->gres_bit_alloc[0]) : -1;
++						if (quota_state == 1 && bit >= 0)
++							bit_clear(quota_snap.node_gpu->gres_bit_alloc, bit);
++						else
++							gres_alloc_status = SLURM_ERROR;
++					} else if (getenv("TIME26_TEST_SELECTOR_PARTIAL"))
++						gres_alloc_status = SLURM_ERROR;
++					else
++						test_full_failure = true;
++				}
++			}
++#endif
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++			if (quota_state == 1 && (gres_alloc_status != SLURM_SUCCESS ||
++			                         !_quota_gres_delta_valid(job_ptr, &quota_snap))) {
++				_quota_gres_restore(&quota_snap);
++				_quota_gres_snapshot_free(&quota_snap);
++				gres_stepmgr_job_clear_alloc(job_ptr->gres_list_req);
++				gres_stepmgr_job_clear_alloc(job_ptr->gres_list_req_accum);
++				FREE_NULL_LIST(job_ptr->gres_list_alloc);
++				FREE_NULL_BITMAP(core_bitmap);
++				return TIME_QUOTA_SELECTOR_ROLLBACK_OK;
++			}
++			if (quota_state == 1) _quota_gres_snapshot_free(&quota_snap);
++#if defined(TIME_ENABLE_MONTHLY_TEST_FIXTURE) && TIME_ENABLE_MONTHLY_TEST_FIXTURE
++			if (test_full_failure) gres_alloc_status = SLURM_ERROR;
++#endif
++#endif
+ 			gres_node_state_log(node_gres_list, node_ptr->name);
+ 			FREE_NULL_BITMAP(core_bitmap);
+ 
+ 			if (job->memory_allocated[n] == 0)
+ 				continue;	/* node lost by job resizing */
+-			select_node_usage[i].alloc_memory +=
+-				job->memory_allocated[n];
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++			if (quota_rebuild_in_progress && UINT64_MAX - select_node_usage[i].alloc_memory < job->memory_allocated[n]) {
++				gres_alloc_status = SLURM_ERROR;
++			} else
++#endif
++				select_node_usage[i].alloc_memory += job->memory_allocated[n];
+ 			if ((select_node_usage[i].alloc_memory >
+ 			     node_ptr->real_memory)) {
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++				if (quota_rebuild_in_progress)
++					gres_alloc_status = SLURM_ERROR;
++#endif
+ 				error("node %s memory is "
+ 				      "overallocated (%"PRIu64") for %pJ",
+ 				      node_ptr->name,
+@@ -401,6 +708,10 @@
+ 			      "could not find idle resources for %pJ",
+ 			      job_ptr);
+ 			/* No row available to record this job */
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++			if (quota_rebuild_in_progress)
++				gres_alloc_status = SLURM_ERROR;
++#endif
+ 		}
+ 		/* update the node state */
+ 		for (i = 0, n = -1; next_node_bitmap(job->node_bitmap, &i);

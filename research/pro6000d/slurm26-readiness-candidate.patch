@@ -1,0 +1,56 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -3468,7 +3468,27 @@
+ 	pthread_mutex_unlock(&mq_lock);
+ 	return rc;
+ }
++#endif
++
++bool monthly_quota_selectable_ready(void)
++{
++	bool ready = false;
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD && \
++    defined(TIME_ENABLE_MONTHLY_LIFECYCLE_DRAFT) && TIME_ENABLE_MONTHLY_LIFECYCLE_DRAFT && \
++    defined(TIME_ENABLE_SELECTABLE_V2) && TIME_ENABLE_SELECTABLE_V2 && \
++    defined(TIME_ENABLE_MONTHLY_COMMIT5_DRAFT) && TIME_ENABLE_MONTHLY_COMMIT5_DRAFT && \
++    defined(TIME_ENABLE_MONTHLY_TRANSACTION_DRAFT) && TIME_ENABLE_MONTHLY_TRANSACTION_DRAFT && \
++    defined(TIME_ENABLE_MONTHLY_SLUID_DRAFT) && TIME_ENABLE_MONTHLY_SLUID_DRAFT && \
++    defined(TIME_ENABLE_MONTHLY_QUERY2_DRAFT) && TIME_ENABLE_MONTHLY_QUERY2_DRAFT && \
++    defined(TIME_ENABLE_MONTHLY_TOMBSTONES_DRAFT) && TIME_ENABLE_MONTHLY_TOMBSTONES_DRAFT && \
++    defined(TIME_ENABLE_MONTHLY_PRIORITY_DRAFT) && TIME_ENABLE_MONTHLY_PRIORITY_DRAFT
++	pthread_mutex_lock(&mq_lock);
++	ready = mq_enabled && mq_healthy && mq_reconciled && mq_selectable_replay &&
++		mq_fd >= 0 && mq_checkpoint_fd >= 0 && mq_witness_fd >= 0;
++	pthread_mutex_unlock(&mq_lock);
+ #endif
++	return ready;
++}
+ 
+ bool monthly_quota_control_recovery_ready(void)
+ {
+--- a/src/slurmctld/monthly_quota.h
++++ b/src/slurmctld/monthly_quota.h
+@@ -156,6 +156,7 @@
+ /* Called after job/select/GRES state has been restored, before scheduling. */
+ extern int monthly_quota_reconcile(list_t *job_list);
+ extern int monthly_quota_reconcile_readonly(list_t *job_list);
++extern bool monthly_quota_selectable_ready(void);
+ extern int monthly_quota_control_start(void);
+ extern void monthly_quota_control_stop(void);
+ extern void monthly_quota_fini(void);
+--- a/src/slurmctld/monthly_quota_control.c
++++ b/src/slurmctld/monthly_quota_control.c
+@@ -155,6 +155,13 @@
+ 				 view.active_gpu_count, view.active_allocation_count,
+ 				 view.observed_sec, view.observed_nsec, view.wal_sequence);
+ 		}
++	} else if (count == 2 && uid == 0 && !strcmp(part[0], "READY1")) {
++		lock_slurmctld(config_lock);
++		if (monthly_quota_selectable_ready()) {
++			rc = 0;
++			snprintf(reply, sizeof(reply), "OK TIME26_SELECTABLE_ENDING1_ROLL1_RANK1\n");
++		}
++		unlock_slurmctld(config_lock);
+ 	} else if (count == 2 && !strcmp(part[0], "SNAP2")) {
+ 		lock_slurmctld(config_lock);
+ 		rc = monthly_quota_snapshot2((uid_t)uid, &view2);

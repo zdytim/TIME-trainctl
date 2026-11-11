@@ -1,0 +1,161 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -1051,6 +1051,11 @@
+             xfree(jobs);
+         }
+         cursor = next;
++        /* Every natural month restores a running job's originally selected
++         * starting tier; each month's usage itself remains independent. */
++        if (!_time_cmp(&cursor, &boundary))
++            for (a = mq_active; a; a = a->next)
++                a->current_tier = a->selected_tier;
+     }
+     for (a = mq_active; a; a = a->next) a->anchor = *end;
+     return 0;
+@@ -1124,6 +1129,19 @@
+ 		    !(entry = _reserve1_find(uid, fields[4])) || entry->terminal || entry->job_id)
+ 			return -1;
+ 		_reserve1_finish(entry, 1, 0);
++		return 0;
++	}
++	if (mq_selectable_replay && !strcmp(event, "ROLL1")) {
++		mq_reserve1_t *entry;
++		uint32_t previous, next;
++		if (field_count != 7 || _parse_u32(fields[3], &uid) ||
++		    !_reserve1_request_valid(fields[4]) || _parse_u32(fields[5], &previous) ||
++		    _parse_u32(fields[6], &next) || next <= previous ||
++		    next / 100 < 1970 || next / 100 > 9999 || next % 100 < 1 || next % 100 > 12 ||
++		    !(entry = _reserve1_find(uid, fields[4])) || entry->terminal ||
++		    entry->generation || entry->month != previous)
++			return -1;
++		entry->month = next;
+ 		return 0;
+ 	}
+ 	if (mq_selectable_replay && !strcmp(event, "BIND1")) {
+@@ -1882,6 +1900,13 @@
+ 		else if (time_tier_import_legacy(&balance, 0, 0)) goto out;
+ 		if (time_tier_advance(&balance, jobs, count, nanos)) goto out;
+ 		cursor = next;
++		if (!_time_cmp(&cursor, &boundary)) {
++			for (i = 0; i < count; i++) {
++				a = _find_active(jobs[i].job_id, jobs[i].generation);
++				if (!a) goto out;
++				jobs[i].current = a->selected_tier;
++			}
++		}
+ 		/* A boundary belongs to the following month. */
+ 		if (_time_cmp(&cursor, now) == 0 && _time_cmp(&cursor, &boundary) != 0) {
+ 			*out = balance; rc = 0; goto out;
+@@ -2118,9 +2143,21 @@
+ 		 * this user's balance and must not hold their queue indefinitely. */
+ 		if (entry->uid != uid || entry->terminal)
+ 			continue;
+-		if (entry->month != month)
++		uint32_t held_tier = entry->tier;
++		if (entry->month > month)
+ 			return -1;
+-		if (entry->tier == tier) {
++		if (entry->month < month) {
++			/* Old unstarted holds do not consume a new month's quota.
++			 * Active jobs continue charging; conservatively reserve their
++			 * remaining runtime against their current accounting tier. */
++			if (!entry->generation)
++				continue;
++			active = _find_active(entry->job_id, entry->generation);
++			if (!active || !active->committed || active->uid != uid)
++				return -1;
++			held_tier = active->current_tier;
++		}
++		if (held_tier == tier) {
+ 			uint64_t held = entry->amount;
+ #if defined(TIME_ENABLE_MONTHLY_COMMIT5_DRAFT) && TIME_ENABLE_MONTHLY_COMMIT5_DRAFT
+ 			if (entry->generation) {
+@@ -2191,6 +2228,7 @@
+ 		enum time_tier selected;
+ 		char marker_id[33];
+ 		uint64_t remaining;
++		mq_reserve1_t *bound;
+ 		/* Final admission, before GPU allocation, settles the common
+ 		 * timeline and checks this selected tier under the same lock.
+ 		 * Early scheduler checks are advisory and never reserve GPUs. */
+@@ -2198,7 +2236,11 @@
+ 			_set_pending_reason(job_ptr, "selected monthly tier missing or invalid");
+ 			return -1;
+ 		}
+-		if (_reserve1_available(job_ptr->user_id, month, selected, &now, &remaining) || !remaining) {
++		bound = _reserve1_find(job_ptr->user_id, marker_id);
++		if (!bound || bound->terminal || bound->job_id != job_ptr->job_id ||
++		    bound->generation || bound->month != month || bound->tier != selected ||
++		    _reserve1_available(job_ptr->user_id, month, selected, &now, &remaining) ||
++		    UINT64_MAX - remaining < bound->amount || !(remaining + bound->amount)) {
+ 			_set_pending_reason(job_ptr, "reserved or running quota unavailable");
+ 			return -1;
+ 		}
+@@ -3242,6 +3284,42 @@
+ 	}
+ 	created->next = mq_reserves; mq_reserves = created;
+ 	*amount = required;
++	rc = 0;
++out:
++	pthread_mutex_unlock(&mq_lock);
++	return rc;
++}
++
++/* Renew a held, unstarted request into the current month atomically. */
++int monthly_quota_roll1(uid_t uid, const char *request)
++{
++	mq_reserve1_t *entry;
++	struct job_record *job;
++	mq_time_t now;
++	uint32_t month;
++	uint64_t available;
++	int rc = -1;
++	if ((uid_t)(uint32_t)uid != uid || !_reserve1_request_valid(request)) return -1;
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || !mq_reconciled || !mq_selectable_replay ||
++	    _now(&now) || _month_key(&now, &month) ||
++	    !(entry = _reserve1_find((uint32_t)uid, request)) || entry->terminal || entry->generation)
++		goto out;
++	if (entry->job_id) {
++		job = find_job_record(entry->job_id);
++		if (!job || job->user_id != uid || !IS_JOB_PENDING(job) || IS_JOB_COMPLETING(job))
++			goto out;
++	}
++	if (entry->month == month) { rc = 0; goto out; }
++	if (entry->month > month || _settle_all(&now) ||
++	    _reserve1_available(uid, month, entry->tier, &now, &available))
++		goto out;
++	if (entry->amount > available) { rc = -2; goto out; }
++	if (_append_event("ROLL1|%u|%s|%u|%u", (uint32_t)uid, request, entry->month, month)) {
++		_mark_unhealthy("reservation rollover persistence failed");
++		goto out;
++	}
++	entry->month = month;
+ 	rc = 0;
+ out:
+ 	pthread_mutex_unlock(&mq_lock);
+--- a/src/slurmctld/monthly_quota.h
++++ b/src/slurmctld/monthly_quota.h
+@@ -20,6 +20,7 @@
+ extern int monthly_quota_reserve1(uid_t uid, const char *request, uint32_t tier,
+ 				  uint32_t gpu, uint32_t minutes, uint64_t *amount);
+ extern int monthly_quota_cancel1(uid_t uid, const char *request);
++extern int monthly_quota_roll1(uid_t uid, const char *request);
+ extern int monthly_quota_reserve1_lookup(uid_t uid, const char *request,
+ 					 uint32_t *month, uint32_t *tier,
+ 					 uint32_t *gpu, uint32_t *minutes,
+--- a/src/slurmctld/monthly_quota_control.c
++++ b/src/slurmctld/monthly_quota_control.c
+@@ -108,6 +108,12 @@
+ 			snprintf(reply, sizeof(reply), "DENIED capacity\n");
+ 			rc = 0;
+ 		}
++	} else if (count == 3 && !strcmp(part[0], "ROLL1")) {
++		lock_slurmctld(grant_lock);
++		rc = monthly_quota_roll1((uid_t)uid, part[2]);
++		unlock_slurmctld(grant_lock);
++		if (!rc) snprintf(reply, sizeof(reply), "OK\n");
++		else if (rc == -2) { snprintf(reply, sizeof(reply), "DENIED capacity\n"); rc = 0; }
+ 	} else if (count == 3 && !strcmp(part[0], "RESERVE1_GET")) {
+ 		lock_slurmctld(config_lock);
+ 		rc = monthly_quota_reserve1_lookup((uid_t)uid, part[2], &result_month,

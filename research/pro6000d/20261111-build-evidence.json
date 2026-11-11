@@ -1,0 +1,174 @@
+{
+  "version": 1,
+  "slurm_version": "26.05.5",
+  "official_archive_sha256": "4680cafc82b0689865c885eb703441e7ebf764896c40fd03a50f2fcb60664f68",
+  "patches": [
+    {
+      "name": "slurm26-reservation-draft.patch",
+      "sha256": "f10db95bad8d42702b0ef16c4bb60ad60e0e4e2c04a1f9c243276eb9ce85d3c5"
+    },
+    {
+      "name": "slurm26-aborted-reservation-draft.patch",
+      "sha256": "eca57b6b44b25f88bb76f0410082be66168ee23a42e6d1e78b71722519c1a374"
+    },
+    {
+      "name": "slurm26-recovery-fail-closed-draft.patch",
+      "sha256": "8f80ef3340030b1947b6ec8e03e05b2affefac7471096368bf2005716a5bbacd"
+    },
+    {
+      "name": "slurm26-controller-lifecycle-draft.patch",
+      "sha256": "31f23b85108ad80c69654a3521b12aa296328402f77706202eb1975bc7990f01"
+    },
+    {
+      "name": "slurm26-preserve-witness-fd-draft.patch",
+      "sha256": "57d24daf54628865b2fb3937f752cab35fef0bb9fd15b0cc479bddcc253e754c"
+    },
+    {
+      "name": "slurm26-reservation-owner-scope-draft.patch",
+      "sha256": "48f254a8b4f75b826708b3ed723b3b25a8d80d63489f3ca5e6ebb82634d16d55"
+    },
+    {
+      "name": "slurm26-other-user-reservation-draft.patch",
+      "sha256": "646664830765f7a67e8c1f874245c7c46e8e79152d3d6af5a26027aac89cff66"
+    },
+    {
+      "name": "slurm26-reservation-release-draft.patch",
+      "sha256": "ac030356449c5652d189ea8e5e30536d17851e3b36368b06821fd143579113d8"
+    },
+    {
+      "name": "slurm26-gres-alloc-status-draft.patch",
+      "sha256": "3fca4e9510d3bd55bfc7e3d8bac18427bc18b5601b93cb4595fd382cf20c05ae"
+    },
+    {
+      "name": "slurm26-gres-propagate-status-draft.patch",
+      "sha256": "c2951ab375c9d2b0342c8581e7b0d04503998674c01d266e104113f9672b99f5"
+    },
+    {
+      "name": "slurm26-concurrent-commit-draft.patch",
+      "sha256": "09f700fffc7985dd2d390c5480d8863fe123cc027eb2c5b76c718e141c5adc67"
+    },
+    {
+      "name": "slurm26-allocation-transaction-draft.patch",
+      "sha256": "714b36b8a724d6cfdd69a7c47234ee911f1c7c46830264af1b49deaa2c045937"
+    },
+    {
+      "name": "slurm26-preplugin-abort-draft.patch",
+      "sha256": "302fbb01a723fcd9f63bb1bcb35aaae65d4c286b7750922b9025f8536660c384"
+    },
+    {
+      "name": "slurm26-same-user-reservation-draft.patch",
+      "sha256": "067432fa2d69e279f69122a01bb874b0d46872900da8e195ff640617bc9ec0cc"
+    },
+    {
+      "name": "slurm26-sluid-identity-draft.patch",
+      "sha256": "2b2c6ab272265fb7d599a7104e0639c74e50c0b65f194d66866336edf8fecff0"
+    },
+    {
+      "name": "slurm26-reservation-status-draft.patch",
+      "sha256": "09b0f38fd964bb4b4221613c33da589fb8a97f3f102b1820a77d465bc6c1287f"
+    },
+    {
+      "name": "slurm26-request-tombstones-draft.patch",
+      "sha256": "5f2f3db7d4bde137b352217a1e0aa9887371c196ac0eacb4a5f501d5ab76ec1e"
+    },
+    {
+      "name": "slurm26-reservation-cancel-race-draft.patch",
+      "sha256": "6d48a8a10287043484f480ff06e5b611b78bf8c57d1bba6472f4973522e0bc1e"
+    },
+    {
+      "name": "slurm26-capacity-denial.patch",
+      "sha256": "5714ac4b906e752e0a1644c1ff16745e54a91e73f57210ad1cd086d5623f3fdf"
+    },
+    {
+      "name": "slurm26-request-shape-fix.patch",
+      "sha256": "31937968e98738bc5b62ceba115088e52b2e3403a3909f7f828fe37c8651cddf"
+    },
+    {
+      "name": "slurm26-disabled-gate-fix.patch",
+      "sha256": "0b9e68450f53a5bb99a2a4101524d836dabc155c5fcc929f467f39431be4c8c1"
+    },
+    {
+      "name": "slurm26-cpu-only-fix.patch",
+      "sha256": "2211de51ee419be0b57b502f95e7281d97920124e9202f464a81aa876d7c2832"
+    },
+    {
+      "name": "slurm26-node-settlement-candidate.patch",
+      "sha256": "755ce59106896e195dbb5668905afd117d3f64a64d7a8bdfc7f3bb2dc7b13394"
+    },
+    {
+      "name": "slurm26-month-rollover-candidate.patch",
+      "sha256": "a9322054db3475e88e5d20088a0352dd29ab1f62341ea2300771d19338447313"
+    },
+    {
+      "name": "slurm26-readiness-candidate.patch",
+      "sha256": "059240470adcd6b9580968ac9b90e89c7ada58eff2ee7645c0c51f543542c358"
+    },
+    {
+      "name": "slurm26-priority-candidate.patch",
+      "sha256": "e81553940f3a1bce4fa21340cffb352a8f50343f5cfc4f461e698af4a094d3ae"
+    },
+    {
+      "name": "slurm26-cancel-bound-candidate.patch",
+      "sha256": "d37145ddf6aa05ce0b516bb766a5fe47c430219013744b353e238923ccc4d4b2"
+    },
+    {
+      "name": "slurm26-autocancel-candidate.patch",
+      "sha256": "c2c2f104c6b5a5feb14bf44242618f63b4ed2b8285db0cdcb8d46951da6d910a"
+    },
+    {
+      "name": "slurm26-cancel-recovery-candidate.patch",
+      "sha256": "9e90fd943985e0ed60e4c07efff2cd212343633370a5b296bd1cdd5597be943c"
+    },
+    {
+      "name": "slurm26-ending-metadata-candidate.patch",
+      "sha256": "56c6344f46d85c089659b2bdd1db224ca796a1ec137ae8745ec0f4093c09d638"
+    },
+    {
+      "name": "slurm26-node-proof-candidate.patch",
+      "sha256": "8430f391d63629b9b92ab1ec5bf46dc9511e423f0c836d7e506509af1b46d680"
+    },
+    {
+      "name": "slurm26-selector-evidence-candidate.patch",
+      "sha256": "cfee86b173109eac3b4e2d0168a4137f63e0b9f8a4dc2a1126158eaf31e6c2ea"
+    },
+    {
+      "name": "slurm26-recovery-defer-candidate.patch",
+      "sha256": "56550d8e69f2cedc878fbc6e768ce2e97dd234d247ceafe9f4ad2288881c04e7"
+    },
+    {
+      "name": "slurm26-selector-rebuild-candidate.patch",
+      "sha256": "99f656d07ca67361e6bfa2f37cc299229cce4934057dbe92497c32e788620f30"
+    }
+  ],
+  "base_source_sha256": "d25618767b8ac0b7f2cbdafc631cceb8d26081717316ee06af3e78943cfd0897",
+  "overlay_sha256": "40365ea4ad6b156ed682e72767e675857a08b9e41215e377fbaaac4615fd257a",
+  "installed_tree_sha256": "5a94031ebfce302dc1b53e514f0b5751b08d231fe9eed652e571ea76a2062b62",
+  "source_files": {
+    "src/slurmctld/monthly_quota.h": "4665885ceff330b855613aacbedef3bebc575948060f32349ba4107014d1336f",
+    "src/slurmctld/monthly_quota.c": "7c2338f44d6ce0f643d258a6e515e41103d98f1e7e959928054cb816ad8d1bb1",
+    "src/slurmctld/read_config.c": "f7117509f849e9c4e922ac3d049a2283b767435c251b0521f186f7b49a346461",
+    "src/slurmctld/proc_req.c": "49af5a68d86319fb7564cbeb90eb83b93941cf77dda1e7adc191e39ca43c20af",
+    "src/slurmctld/job_mgr.c": "d1976f6af09e7aecb696e9e028adbcf5d127f6822ea43e490b224d1bbcc8fd27",
+    "src/slurmctld/agent.c": "55f04ec2347fbe19e110917fe17b771871538778771766ee911249e5ebacb630",
+    "src/slurmctld/controller.c": "7553658b7f316176fef40e03e46b96aa089dedaa767e8859b5fcf5ac0ab9c764",
+    "src/slurmctld/node_scheduler.c": "5c0ab337a8628d7847ccd0800e8dec76957933890fe1f2c6506aae72e0aaa500",
+    "src/slurmctld/monthly_quota_control.c": "8fb55f633d230934b4739ae865e915174d9d57ef1f68cd7bdc128d2df08d040a",
+    "src/slurmctld/locks.c": "e9a1ac40ab65aad6d1a040443fc69f5e9074b29ad671cfe1c3f890ab8f012274",
+    "src/slurmctld/locks.h": "0dd441ba71b45012dab70949e201190af7f45ec5be7456381fd0b308e464b95c",
+    "src/slurmd/slurmd/req.c": "a36c6b93260f52829d103d38b300de4c4758976b7aaa88c44c401b0691b62d49",
+    "src/slurmd/slurmd/slurmd.c": "0713a3caff2ebf7dc7fb25839b1bb582b614aa1edef1666c0e427761417e2d9e",
+    "src/interfaces/select.c": "70d7a4a098a93bd502077871bdcabc64e25dcabe5b39b80be268572e69180a8a",
+    "src/interfaces/select.h": "79278ce325b41d931a241e8fff9d855491483f6f0648dd4abbf07bd3cd5b9528",
+    "src/plugins/select/linear/select_linear.c": "4ae8f638cc6d63ac69094acd12c83a4947b007d5a9335ecf3b04855241f67e06",
+    "src/plugins/select/cons_tres/select_cons_tres.c": "5ee0ab534b887b2424f20443058fb58e5769d33e2913f2cc6b390f44fb1b9136",
+    "src/plugins/select/cons_tres/job_resources.c": "6b78666fc4459b68f299ec71866a1853094e5b708ccd128cc94d4b7d186ef647"
+  },
+  "artifacts": {
+    "sbin/slurmctld": "bbb8d94b2ad3dbc256350a159050e1ef76819b55639d9a4690cc78cd936ec0ae",
+    "sbin/slurmd": "5e1b5fc34c02953d55474ad3f7c35fcd14631b59352a884643aba2d5cd503932",
+    "lib/slurm/job_submit_pro6000d.so": "ed4305c5e64cd5a96fe92671f5e164bea920626e96d0d71046daf83b9fdddf29",
+    "lib/slurm/cgroup_v2.so": "d60af69bc8a2e54c3fcf9b3af0d1ac27667ff61c50ef32e2ca5cc5e8bebe9d9d",
+    "lib/slurm/select_cons_tres.so": "887ffc95a9adcf3e2754fb97225f08fcb692035afda9cba1a67ee8a76310f41a",
+    "lib/slurm/sched_backfill.so": "2eadb4899021276e039a97ffcbbaf4fb6b06cb953f1715574a25684aa379500c"
+  }
+}

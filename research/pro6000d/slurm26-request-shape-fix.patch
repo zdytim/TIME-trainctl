@@ -1,0 +1,40 @@
+--- a/src/slurmctld/node_scheduler.c
++++ b/src/slurmctld/node_scheduler.c
+@@ -2526,3 +2526,2 @@
+-	    job->details->share_res != 1 || !job->part_ptr->max_share ||
+-	    job->part_ptr->max_share == NO_VAL16 ||
+-	    (job->gres_list_req_accum && list_count(job->gres_list_req_accum)))
++	    (job->details->share_res != 1 && job->details->share_res != NO_VAL8) ||
++	    !job->part_ptr->max_share || job->part_ptr->max_share == NO_VAL16)
+@@ -2556,0 +2556,31 @@
++	/* cons_tres creates this accumulated cache while evaluating a job.
++	 * It may be stale after an update: accept it only if it represents
++	 * the same one untyped GPU request, never just because it exists. */
++	if (job->gres_list_req_accum) {
++		list_itr_t *cache_iter;
++		gres_state_t *cache;
++		gres_job_state_t *cached_gpu;
++		bool matches = false;
++		if (list_count(job->gres_list_req_accum) != 1)
++			goto done;
++		cache_iter = list_iterator_create(job->gres_list_req_accum);
++		cache = list_next(cache_iter);
++		if (cache && cache->plugin_id == state->plugin_id &&
++		    cache->state_type == GRES_STATE_TYPE_JOB && cache->gres_data &&
++		    !(cache->config_flags & GRES_CONF_SHARED)) {
++			cached_gpu = cache->gres_data;
++			matches = !cached_gpu->type_name &&
++				!(cached_gpu->flags & GRES_CONF_SHARED) &&
++				cached_gpu->gres_per_node == gpu->gres_per_node &&
++				cached_gpu->gres_per_job == gpu->gres_per_job &&
++				cached_gpu->gres_per_job_segment == gpu->gres_per_job_segment &&
++				cached_gpu->gres_per_socket == gpu->gres_per_socket &&
++				cached_gpu->gres_per_task == gpu->gres_per_task &&
++				cached_gpu->total_gres == gpu->total_gres &&
++				cached_gpu->cpus_per_gres == gpu->cpus_per_gres &&
++				cached_gpu->mem_per_gres == gpu->mem_per_gres;
++		}
++		list_iterator_destroy(cache_iter);
++		if (!matches)
++			goto done;
++	}

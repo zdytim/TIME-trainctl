@@ -1,0 +1,7 @@
+--- a/src/slurmctld/node_scheduler.c
++++ b/src/slurmctld/node_scheduler.c
+@@ -2640 +2640,3 @@
+-	if (!test_only) {
++	/* Building the guard alone must not change scheduling when the feature
++	 * is disabled. An enabled but unhealthy ledger still fails closed. */
++	if (!test_only && monthly_quota_enabled()) {

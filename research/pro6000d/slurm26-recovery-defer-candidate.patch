@@ -1,0 +1,2094 @@
+--- a/src/slurmctld/monthly_quota.h
++++ b/src/slurmctld/monthly_quota.h
+@@ -20,6 +20,7 @@
+ extern int monthly_quota_reserve1(uid_t uid, const char *request, uint32_t tier,
+ 				  uint32_t gpu, uint32_t minutes, uint64_t *amount);
+ extern int monthly_quota_cancel1(uid_t uid, const char *request);
++extern int monthly_quota_cancel_request1(uid_t uid, const char *request, uint32_t tier, uint32_t gpu, uint32_t minutes);
+ extern int monthly_quota_cancel_bound1(uid_t uid, const char *request, uint32_t job_id);
+ extern int monthly_quota_roll1(uid_t uid, const char *request);
+ extern int monthly_quota_reserve1_lookup(uid_t uid, const char *request,
+@@ -79,6 +80,7 @@
+  * Returns -1 and leaves output unchanged when disabled/unhealthy/unknown. */
+ extern int monthly_quota_inherited_witness_fd(void);
+ extern int monthly_quota_inherited_nodeproof_fd(void);
++extern int monthly_quota_inherited_nodepid_fd(void);
+ extern int monthly_quota_snapshot(uid_t uid, monthly_quota_snapshot_t *out);
+ 
+ /* Atomic read-only snapshot at a supplied realtime value. Failure leaves
+@@ -156,6 +158,29 @@
+ 						bool resize_request);
+ 
+ /* Called after job/select/GRES state has been restored, before scheduling. */
++/* During startup, do not replay Slurm's normal termination path for a
++ * managed COMPLETING job until its durable quota state has been examined. */
++extern void monthly_quota_quarantine_restored(list_t *jobs);
++extern bool monthly_quota_defer_recovered_completing(struct job_record *job_ptr);
++extern bool monthly_quota_completion_is_deferred(struct job_record *job_ptr);
++/* Settle proven ended allocations in chronological order while admission
++ * remains closed. Returns settled count or -1 for corrupt evidence. */
++typedef struct {
++	uint32_t job_id, uid, final_state, final_exit, final_derived, final_reason, final_requid;
++	uint32_t restart_count;
++	uint64_t sluid, generation, submit_sec, start_sec, end_sec, gpu_count;
++	char node[128], gpu_bits[129];
++} monthly_quota_repair_t;
++/* Caller holds config/job/node/federation locks and has authenticated the
++ * complete durable release identity. A positive return means mutated. */
++extern int monthly_quota_restore_released(struct job_record *job_ptr,
++					 const monthly_quota_repair_t *repair);
++extern int monthly_quota_recovery_settle(void);
++extern int monthly_quota_recovery_repair_one(monthly_quota_repair_t *out);
++extern int monthly_quota_recovery_ack_saved(const monthly_quota_repair_t *repair);
++extern int monthly_quota_selector_audit(struct job_record *job_ptr);
++extern int monthly_quota_recovery_worker_start(void);
++extern void monthly_quota_recovery_worker_stop(void);
+ extern int monthly_quota_reconcile(list_t *job_list);
+ extern int monthly_quota_reconcile_cancelled(list_t *job_list);
+ extern int monthly_quota_reconcile_readonly(list_t *job_list);
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -11,10 +11,13 @@
+ #define _GNU_SOURCE
+ 
+ #include <errno.h>
++#include <ctype.h>
++#include <glob.h>
+ #include <fcntl.h>
+ #include <inttypes.h>
+ #include <limits.h>
+ #include <pthread.h>
++#include <poll.h>
+ #include <signal.h>
+ #include <openssl/sha.h>
+ #include <stdarg.h>
+@@ -25,14 +28,17 @@
+ #include <string.h>
+ #include <sys/file.h>
+ #include <sys/stat.h>
++#include <sys/sysmacros.h>
+ #include <sys/types.h>
+ #include <time.h>
+ #include <unistd.h>
+ 
+ #include "src/common/assoc_mgr.h"
+ #include "src/interfaces/gres.h"
++#include "src/interfaces/select.h"
+ #include "src/common/job_resources.h"
+ #include "src/common/macros.h"
++#include "src/common/read_config.h"
+ #include "src/common/xassert.h"
+ #include "src/common/xmalloc.h"
+ #include "src/common/xstring.h"
+@@ -55,6 +61,7 @@
+ #define MQ_SHANGHAI_OFFSET             (8LL * 60LL * 60LL)
+ #define MQ_CAPACITY_GPU_SECONDS        ((uint64_t)605 * 60 * 60)
+ #define MQ_MAX_FIELD                   128
++#define MQ_GPU_MAP_MAX                 128
+ 
+ typedef struct {
+ 	uint64_t sec;
+@@ -105,9 +112,11 @@
+ 	bool committed;
+ 	/* In-memory only: restart during cleanup fails closed. */
+ 	bool selector_released;
++	bool recovery_verified; /* in-process, checked before recovery waiting */
+ 	bool release_started; /* persisted before selector deallocation */
+ 	bool proof_seen;
+ 	mq_time_t proof_at;
++	char gpu_node[MQ_MAX_FIELD], gpu_bits[MQ_GPU_MAP_MAX + 1], gpu_conf[65], gpu_inventory[65];
+ 	uint32_t final_state, final_exit, final_derived, final_reason, final_requid;
+ 	uint64_t final_start, final_end;
+ 	char final_node[MQ_MAX_FIELD];
+@@ -118,13 +127,18 @@
+ static int mq_fd = -1;
+ static int mq_checkpoint_fd = -1;
+ static int mq_witness_fd = -1;
+-static int mq_nodeproof_fd = -1;
++static int mq_nodeproof_fd = -1, mq_nodepid_fd = -1;
+ static off_t mq_nodeproof_offset;
++static char mq_gres_digest[65], mq_gpu_inventory_digest[65];
++static unsigned mq_gpu_inventory_count;
++static bool mq_test_inventory;
+ static bool mq_initialized;
+ static bool mq_enabled;
+ static bool mq_healthy;
+ /* WAL opening alone is not proof it matches restored Slurm jobs. */
+ static bool mq_reconciled;
++/* Healthy ledger, but unfinished cleanup keeps GPU admission closed. */
++static bool mq_recovery_pending;
+ /* Never enable selectable scheduling until the V2 writer and recovery exist. */
+ static bool mq_selectable_replay;
+ static uint64_t mq_seq;
+@@ -134,6 +148,35 @@
+ static mq_month_record_t *mq_months;
+ static mq_grant_record_t *mq_grants;
+ static mq_active_record_t *mq_active;
++/* In-process reconstruction quarantine, not a durable completion claim. */
++typedef struct mq_deferred_job {
++	uint32_t job_id;
++	uint64_t sluid;
++	struct mq_deferred_job *next;
++} mq_deferred_job_t;
++static mq_deferred_job_t *mq_deferred_jobs;
++
++static bool _deferred_job_matches(const struct job_record *job_ptr)
++{
++	mq_deferred_job_t *entry;
++	for (entry = mq_deferred_jobs; entry; entry = entry->next)
++		if (entry->job_id == job_ptr->job_id && entry->sluid == job_ptr->step_id.sluid)
++			return true;
++	return false;
++}
++
++static void _defer_job_locked(const struct job_record *job_ptr)
++{
++	mq_deferred_job_t *created;
++	if (_deferred_job_matches(job_ptr))
++		return;
++	created = xcalloc(1, sizeof(*created));
++	created->job_id = job_ptr->job_id;
++	created->sluid = job_ptr->step_id.sluid;
++	created->next = mq_deferred_jobs;
++	mq_deferred_jobs = created;
++}
++
+ typedef struct mq_reserve1 {
+ 	uint32_t uid, month, tier, gpu, minutes, job_id;
+ 	uint64_t amount, generation;
+@@ -141,6 +184,7 @@
+ 	uint64_t final_submit, final_start, final_end;
+ 	uint32_t final_restart, final_state, final_exit, final_derived, final_reason, final_requid;
+ 	char final_node[MQ_MAX_FIELD];
++	char gpu_node[MQ_MAX_FIELD], gpu_bits[MQ_GPU_MAP_MAX + 1], gpu_conf[65], gpu_inventory[65];
+ 	uint32_t terminal; /* 0 live; 1 cancelled; 2 released; 3 cancelled after bind */
+ 	char request[33];
+ 	struct mq_reserve1 *next;
+@@ -195,6 +239,10 @@
+ 	entry->final_derived = active->final_derived; entry->final_reason = active->final_reason;
+ 	entry->final_requid = active->final_requid;
+ 	memcpy(entry->final_node, active->final_node, sizeof(entry->final_node));
++	memcpy(entry->gpu_node, active->gpu_node, sizeof(entry->gpu_node));
++	memcpy(entry->gpu_bits, active->gpu_bits, sizeof(entry->gpu_bits));
++	memcpy(entry->gpu_conf, active->gpu_conf, sizeof(entry->gpu_conf));
++	memcpy(entry->gpu_inventory, active->gpu_inventory, sizeof(entry->gpu_inventory));
+ }
+ 
+ static int _time_cmp(const mq_time_t *a, const mq_time_t *b)
+@@ -415,8 +463,200 @@
+ 			return false;
+ 	}
+ 	return true;
++}
++
++/* Pin the allocation's device-index interpretation to the same root-owned
++ * GRES configuration across controller and node restarts. */
++static int _hash_gres_config(char hex[65])
++{
++	char *path = get_extra_conf_path("gres.conf");
++	unsigned char digest[SHA256_DIGEST_LENGTH];
++	char *buffer = NULL, *cursor, *line;
++	static const char digits[] = "0123456789abcdef";
++	struct stat before, after;
++	SHA256_CTX ctx;
++	ssize_t n;
++	size_t used = 0;
++	int fd, rc = -1;
++	if (!path) return -1;
++	fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
++	xfree(path);
++	if (fd < 0) return -1;
++	if (fstat(fd, &before) || !S_ISREG(before.st_mode) || before.st_uid != 0 ||
++	    (before.st_mode & 0022) || before.st_nlink != 1 || before.st_size <= 0 ||
++	    before.st_size > 1024 * 1024 || SHA256_Init(&ctx) != 1) goto done;
++	buffer = xmalloc((size_t)before.st_size + 1);
++	while (used < (size_t)before.st_size) {
++		n = read(fd, buffer + used, (size_t)before.st_size - used);
++		if (n < 0 && errno == EINTR) continue;
++		if (n <= 0) goto done;
++		used += n;
++	}
++	if (memchr(buffer, '\0', used) || SHA256_Update(&ctx, buffer, used) != 1) goto done;
++	buffer[used] = '\0'; cursor = buffer;
++	while ((line = strsep(&cursor, "\n"))) {
++		while (*line && isspace((unsigned char)*line)) line++;
++		if (!strncasecmp(line, "include", 7) &&
++		    (line[7] == '=' || isspace((unsigned char)line[7]))) goto done;
++	}
++	if (fstat(fd, &after) || before.st_dev != after.st_dev ||
++	    before.st_ino != after.st_ino || before.st_size != after.st_size ||
++	    before.st_mtim.tv_sec != after.st_mtim.tv_sec || before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
++	    SHA256_Final(digest, &ctx) != 1) goto done;
++	for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
++		hex[2*i] = digits[digest[i] >> 4]; hex[2*i+1] = digits[digest[i] & 15];
++	}
++	hex[64] = '\0'; rc = 0;
++done:
++	xfree(buffer);
++	close(fd);
++	return rc;
++}
++
++typedef struct { unsigned minor; char uuid[41], bus[32]; } mq_gpu_device_t;
++static int _compare_gpu_device(const void *a, const void *b)
++{
++	const mq_gpu_device_t *left = a, *right = b;
++	return (left->minor > right->minor) - (left->minor < right->minor);
++}
++/* Proc information binds NVIDIA device minors to stable hardware UUIDs. */
++static int _hash_gpu_inventory(char hex[65])
++{
++	const char *root = "/proc/driver/nvidia/gpus";
++	char *pattern = NULL;
++	glob_t paths = {0};
++	mq_gpu_device_t devices[MQ_GPU_MAP_MAX];
++	unsigned count = 0;
++	unsigned char digest[SHA256_DIGEST_LENGTH];
++	static const char digits[] = "0123456789abcdef";
++	SHA256_CTX ctx;
++	int rc = -1;
++#if defined(TIME_ENABLE_MONTHLY_TEST_FIXTURE) && TIME_ENABLE_MONTHLY_TEST_FIXTURE
++	const char *fixture = getenv("TIME26_TEST_GPU_INFO_DIR");
++	if (fixture) {
++		char hostname[64];
++		if (gethostname(hostname, sizeof(hostname)) || strcmp(hostname, "colima") ||
++		    access("/dev/nvidiactl", F_OK) == 0 ||
++		    (strncmp(fixture, "/tmp/time26-gpu-probe-", strlen("/tmp/time26-gpu-probe-")) &&
++		     strncmp(fixture, "/tmp/time26-controller-probe-", strlen("/tmp/time26-controller-probe-")))) return -1;
++		root = fixture;
++		mq_test_inventory = true;
++	}
++#endif
++	pattern = xstrdup_printf("%s/*/information", root);
++	if (glob(pattern, 0, NULL, &paths) || !paths.gl_pathc || paths.gl_pathc > MQ_GPU_MAP_MAX)
++		goto done;
++	for (size_t i = 0; i < paths.gl_pathc; i++) {
++		char line[512], uuid[64] = "", bus[64] = "";
++		unsigned minor = UINT_MAX;
++		int fd = open(paths.gl_pathv[i], O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
++		FILE *stream;
++		if (fd < 0) goto done;
++		stream = fdopen(fd, "r");
++		if (!stream) { close(fd); goto done; }
++		while (fgets(line, sizeof(line), stream)) {
++			(void) sscanf(line, "GPU UUID: %63s", uuid);
++			(void) sscanf(line, "Bus Location: %63s", bus);
++			(void) sscanf(line, "Device Minor: %u", &minor);
++		}
++		if (ferror(stream)) { fclose(stream); goto done; }
++		if (fclose(stream)) goto done;
++		if (strlen(uuid) != 40 || strncmp(uuid, "GPU-", 4) ||
++		    strspn(uuid + 4, "0123456789abcdefABCDEF-") != 36 ||
++		    !bus[0] || strlen(bus) >= sizeof(devices[0].bus) ||
++		    strspn(bus, "0123456789abcdefABCDEF:.") != strlen(bus) ||
++		    minor >= MQ_GPU_MAP_MAX) goto done;
++		for (unsigned j = 0; j < count; j++)
++			if (devices[j].minor == minor || !strcmp(devices[j].uuid, uuid) || !strcmp(devices[j].bus, bus)) goto done;
++		devices[count].minor = minor;
++		memcpy(devices[count].uuid, uuid, 41);
++		memcpy(devices[count].bus, bus, strlen(bus) + 1);
++		count++;
++	}
++	qsort(devices, count, sizeof(devices[0]), _compare_gpu_device);
++	for (unsigned i = 0; i < count; i++) {
++		char device_path[64];
++		struct stat st;
++		/* The supported File=/dev/nvidia[0-N] mapping is contiguous. */
++		if (devices[i].minor != i) goto done;
++		if (!mq_test_inventory) {
++			if (snprintf(device_path, sizeof(device_path), "/dev/nvidia%u", i) >= sizeof(device_path) ||
++			    lstat(device_path, &st) || !S_ISCHR(st.st_mode) || st.st_uid != 0 ||
++			    major(st.st_rdev) != 195 || minor(st.st_rdev) != i) goto done;
++		}
++	}
++	mq_gpu_inventory_count = count;
++	if (SHA256_Init(&ctx) != 1) goto done;
++	for (unsigned i = 0; i < count; i++) {
++		char item[128];
++		int len = snprintf(item, sizeof(item), "%u|%s|%s\n", devices[i].minor, devices[i].uuid, devices[i].bus);
++		if (len <= 0 || (size_t)len >= sizeof(item) || SHA256_Update(&ctx, item, len) != 1) goto done;
++	}
++	if (SHA256_Final(digest, &ctx) != 1) goto done;
++	for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
++		hex[2*i] = digits[digest[i] >> 4]; hex[2*i+1] = digits[digest[i] & 15];
++	}
++	hex[64] = '\0'; rc = 0;
++done:
++	xfree(pattern); globfree(&paths); return rc;
+ }
+ 
++/* For this single-node release, only a deterministic, contiguous File
++ * mapping is supported. Arbitrary paths/symlinks cannot be tied to UUIDs. */
++static bool _supported_gres_device_order(void)
++{
++	char expected[80], *path, line[8192];
++	FILE *stream;
++	unsigned gpu_lines = 0, autodetect_lines = 0;
++	bool ok = true;
++	node_record_t *local, *other;
++	int index = 0;
++	char hostname[256];
++	if (mq_test_inventory) return true;
++	local = next_node(&index); other = next_node(&index);
++	if (!local || other || !local->node_hostname || gethostname(hostname, sizeof(hostname))) return false;
++	hostname[sizeof(hostname) - 1] = '\0';
++	if (strcmp(local->node_hostname, hostname)) return false;
++	if (!mq_gpu_inventory_count || mq_gpu_inventory_count > MQ_GPU_MAP_MAX) return false;
++	if (mq_gpu_inventory_count == 1)
++		snprintf(expected, sizeof(expected), "/dev/nvidia0");
++	else
++		snprintf(expected, sizeof(expected), "/dev/nvidia[0-%u]", mq_gpu_inventory_count - 1);
++	path = get_extra_conf_path("gres.conf");
++	if (!path) return false;
++	stream = fopen(path, "r"); xfree(path);
++	if (!stream) return false;
++	while (fgets(line, sizeof(line), stream)) {
++		char *save = NULL, *token, *hash = strchr(line, '#');
++		bool gpu = false;
++		const char *file = NULL, *node_name = NULL;
++		if (!strchr(line, '\n') && !feof(stream)) { ok = false; break; }
++		if (hash) *hash = '\0';
++		for (token = strtok_r(line, " \t\r\n", &save); token;
++		     token = strtok_r(NULL, " \t\r\n", &save)) {
++			if (!strcasecmp(token, "Name=gpu")) gpu = true;
++			if (!strncasecmp(token, "NodeName=", 9)) {
++				if (node_name) { ok = false; break; }
++				node_name = token + 9;
++			}
++			if (!strncasecmp(token, "AutoDetect=", 11)) {
++				if (++autodetect_lines != 1 ||
++				    (strcasecmp(token + 11, "nvml") && strcasecmp(token + 11, "off"))) { ok = false; break; }
++			}
++			if (!strncasecmp(token, "File=", 5)) {
++				if (file) { ok = false; break; }
++				file = token + 5;
++			}
++		}
++		if (!ok) break;
++		if (gpu && (++gpu_lines != 1 || !file || strcmp(file, expected) ||
++		    (node_name && strcmp(node_name, local->name)))) { ok = false; break; }
++	}
++	if (ferror(stream)) ok = false;
++	if (fclose(stream)) ok = false;
++	return ok && gpu_lines == 1;
++}
++
+ static int _write_all(const char *buf, size_t len)
+ {
+ 	size_t offset = 0;
+@@ -693,6 +933,7 @@
+ 		error("monthly quota ledger entering fail-closed state: %s", why);
+ 	mq_healthy = false;
+ 	mq_reconciled = false;
++	mq_recovery_pending = false;
+ }
+ 
+ static int _settle_active(mq_active_record_t *active, const mq_time_t *to,
+@@ -923,6 +1164,37 @@
+ 		return -1;
+ 	}
+ 	return 1;
++}
++
++/* The inventory fingerprint is local; do not apply it to a remote node. */
++static bool _quota_node_is_local(node_record_t *node)
++{
++	char hostname[256];
++	if (!node || !node->node_hostname || gethostname(hostname, sizeof(hostname))) return false;
++	hostname[sizeof(hostname) - 1] = '\0';
++	return !strcmp(node->node_hostname, hostname);
++}
++
++/* Compare a restored controller bitmap to the immutable allocation map
++ * recorded before COMMIT5. The node's GRES configuration is separately
++ * pinned by the reviewed release manifest. */
++static bool _gpu_map_matches(job_record_t *job, const char *node_name, const char *bits)
++{
++	gres_job_state_t *gpu;
++	node_record_t *node;
++	int n = 0, size;
++	if (!job || !_field_safe(node_name) || !bits || !bits[0] ||
++	    !job->job_resrcs || !job->job_resrcs->node_bitmap ||
++	    bit_set_count(job->job_resrcs->node_bitmap) != 1 ||
++	    !(node = next_node_bitmap(job->job_resrcs->node_bitmap, &n)) ||
++	    !_quota_node_is_local(node) || strcmp(node->name, node_name) ||
++	    _quota_gpu_shape(job->gres_list_alloc, &gpu) != 1 || gpu->node_cnt != 1 ||
++	    !gpu->gres_bit_alloc || !gpu->gres_bit_alloc[0]) return false;
++	size = bit_size(gpu->gres_bit_alloc[0]);
++	if (size <= 0 || size > MQ_GPU_MAP_MAX || strlen(bits) != (size_t)size) return false;
++	for (int i = 0; i < size; i++)
++		if (bits[i] != (bit_test(gpu->gres_bit_alloc[0], i) ? '1' : '0')) return false;
++	return true;
+ }
+ 
+ static bool _token_enabled(void)
+@@ -1096,7 +1368,8 @@
+     bool found = false;
+ 
+     if (!pending || !at || pending->committed || !pending->identity_bound ||
+-        !pending->reservation_bound || at->nsec >= MQ_NSEC_PER_SEC ||
++        !pending->reservation_bound || !pending->gpu_node[0] || !pending->gpu_bits[0] || !pending->gpu_conf[0] || !pending->gpu_inventory[0] ||
++        at->nsec >= MQ_NSEC_PER_SEC ||
+         _time_cmp(at, &pending->anchor) < 0 || _month_key(at, &month))
+         return -1;
+ #if defined(TIME_ENABLE_MONTHLY_SLUID_DRAFT) && TIME_ENABLE_MONTHLY_SLUID_DRAFT
+@@ -1203,7 +1476,7 @@
+ 		return 0;
+ 	}
+ #endif
+-	if (mq_selectable_replay && !strcmp(event, "RESERVE1")) {
++	if (mq_selectable_replay && (!strcmp(event, "RESERVE1") || !strcmp(event, "CANCEL_EMPTY1"))) {
+ 		mq_reserve1_t *entry;
+ 		uint32_t tier, gpu, minutes;
+ 		uint64_t amount;
+@@ -1224,6 +1497,7 @@
+ 		entry->gpu = gpu; entry->minutes = minutes; entry->amount = amount;
+ 		memcpy(entry->request, fields[4], sizeof(entry->request));
+ 		entry->next = mq_reserves; mq_reserves = entry;
++		if (!strcmp(event, "CANCEL_EMPTY1")) _reserve1_finish(entry, 1, 0);
+ 		return 0;
+ 	}
+ 	if (!strcmp(event, "CUTOVER2_RESET_USAGE"))
+@@ -1285,6 +1559,25 @@
+ 			return -1;
+ 		return _replay_selectable_advance(&to);
+ 	}
++	if (mq_selectable_replay && !strcmp(event, "GPU_MAP1")) {
++		uint64_t sluid;
++		size_t len, ones = 0;
++		if (field_count != 10 || _parse_u32(fields[3], &job_id) ||
++		    _parse_u64(fields[4], &generation) || _parse_u64(fields[5], &sluid) ||
++		    !sluid || !_field_safe(fields[6]) || !(len = strlen(fields[7])) ||
++		    len > MQ_GPU_MAP_MAX || strspn(fields[7], "01") != len ||
++		    strlen(fields[8]) != 64 || strspn(fields[8], "0123456789abcdef") != 64 ||
++		    strlen(fields[9]) != 64 || strspn(fields[9], "0123456789abcdef") != 64 ||
++		    !(active = _find_active(job_id, generation)) || active->committed ||
++		    active->sluid != sluid || active->gpu_bits[0]) return -1;
++		for (size_t i = 0; i < len; i++) if (fields[7][i] == '1') ones++;
++		if (ones != active->planned_gpu) return -1;
++		memcpy(active->gpu_node, fields[6], strlen(fields[6]) + 1);
++		memcpy(active->gpu_bits, fields[7], len + 1);
++		memcpy(active->gpu_conf, fields[8], 65);
++		memcpy(active->gpu_inventory, fields[9], 65);
++		return 0;
++	}
+ 	if (mq_selectable_replay && !strcmp(event, "ENDING2")) {
+ 		uint64_t sluid, submit, start, end;
+ 		uint32_t restart, state, exit_code, derived, reason, requid;
+@@ -1298,7 +1591,8 @@
+ 		    !_field_safe(fields[16]) || !start || end < start || !sluid ||
+ 		    !(active = _find_active(job_id, generation)) || !active->committed ||
+ 		    active->release_started || active->sluid != sluid || active->uid != uid ||
+-		    active->submit_sec != submit || active->restart_count != restart)
++		    active->submit_sec != submit || active->restart_count != restart ||
++		    !active->gpu_bits[0] || strcmp(active->gpu_node, fields[16]))
+ 			return -1;
+ 		active->final_state = state; active->final_exit = exit_code;
+ 		active->final_derived = derived; active->final_reason = reason;
+@@ -1544,8 +1838,10 @@
+ 	size_t length;
+ 	int read_rc, result = 0, duplicate;
+ 	off_t next_offset;
+-	if (mq_nodeproof_fd < 0 || _now(&now) || flock(mq_nodeproof_fd, LOCK_SH)) return -1;
+-	if (fstat(mq_nodeproof_fd, &st) || st.st_size <= 0 || st.st_size < mq_nodeproof_offset ||
++	if (mq_nodeproof_fd < 0 || flock(mq_nodeproof_fd, LOCK_SH)) return -1;
++	/* Capture now only after the writer lock is released. A writer may
++	 * timestamp its proof while we are blocked acquiring this lock. */
++	if (_now(&now) || fstat(mq_nodeproof_fd, &st) || st.st_size <= 0 || st.st_size < mq_nodeproof_offset ||
+ 	    lseek(mq_nodeproof_fd, mq_nodeproof_offset, SEEK_SET) < 0) {
+ 		flock(mq_nodeproof_fd, LOCK_UN); return -1;
+ 	}
+@@ -1736,6 +2032,35 @@
+ }
+ 
+ /* Opened by the root wrapper; this read-only descriptor never escapes exec. */
++/* The privileged wrapper pins the verified slurmd process with a pidfd.
++ * A dead/replaced node daemon cannot authorize further GPU allocations. */
++int monthly_quota_inherited_nodepid_fd(void)
++{
++	const char *text = getenv("TIME_QUOTA_NODE_PIDFD");
++	char *end, path[64], target[64];
++	unsigned long raw;
++	ssize_t n;
++	struct pollfd pfd;
++	if (!text || !text[0]) return -1;
++	for (size_t i = 0; text[i]; i++) if (text[i] < '0' || text[i] > '9') return -1;
++	errno = 0; raw = strtoul(text, &end, 10);
++	if (errno || *end || raw < 3 || raw > INT_MAX) return -1;
++	snprintf(path, sizeof(path), "/proc/self/fd/%lu", raw);
++	n = readlink(path, target, sizeof(target) - 1);
++	if (n < 0 || n >= sizeof(target) - 1) return -1;
++	target[n] = '\0';
++	if (strcmp(target, "anon_inode:[pidfd]") || fcntl((int)raw, F_SETFD, FD_CLOEXEC)) return -1;
++	pfd = (struct pollfd){ .fd = (int)raw, .events = POLLIN };
++	if (poll(&pfd, 1, 0) != 0) return -1;
++	return (int)raw;
++}
++
++static bool _quota_node_process_alive(void)
++{
++	struct pollfd pfd = { .fd = mq_nodepid_fd, .events = POLLIN };
++	return mq_nodepid_fd >= 0 && poll(&pfd, 1, 0) == 0;
++}
++
+ int monthly_quota_inherited_nodeproof_fd(void)
+ {
+ 	const char *text = getenv("TIME_QUOTA_NODE_PROOF_FD");
+@@ -1853,9 +2178,14 @@
+ 	    checkpoint_seq != mq_seq || _open_witness(mq_seq, digest))
+ 		goto fail;
+ 	mq_nodeproof_fd = monthly_quota_inherited_nodeproof_fd();
+-	if (mq_nodeproof_fd < 0 || mq_nodeproof_fd == mq_witness_fd || _find_node_proof(NULL) < 0) goto fail;
++	mq_nodepid_fd = monthly_quota_inherited_nodepid_fd();
++	if (mq_nodeproof_fd < 0 || mq_nodepid_fd < 0 || mq_nodeproof_fd == mq_witness_fd ||
++	    mq_nodepid_fd == mq_witness_fd || mq_nodepid_fd == mq_nodeproof_fd || _find_node_proof(NULL) < 0 ||
++	    _hash_gres_config(mq_gres_digest) || _hash_gpu_inventory(mq_gpu_inventory_digest) ||
++	    !_supported_gres_device_order()) goto fail;
+ 	return 0;
+ fail:
++	if (mq_nodepid_fd >= 0) { close(mq_nodepid_fd); mq_nodepid_fd = -1; }
+ 	if (mq_nodeproof_fd >= 0) { close(mq_nodeproof_fd); mq_nodeproof_fd = -1; }
+ 	if (mq_checkpoint_fd >= 0) {
+ 		close(mq_checkpoint_fd);
+@@ -2367,8 +2697,8 @@
+ 				    "preemption path is not transactionally supported");
+ 		return -1;
+ 	}
+-	if (!mq_healthy || !mq_reconciled) {
+-		_set_pending_reason(job_ptr, "ledger recovering or unavailable");
++	if (!mq_healthy || !mq_reconciled || !_quota_node_process_alive()) {
++		_set_pending_reason(job_ptr, "ledger recovering or verified node unavailable");
+ 		return -1;
+ 	}
+ 	if (mq_selectable_replay) {
+@@ -2490,7 +2820,7 @@
+ 		pthread_mutex_unlock(&mq_lock);
+ 		return preselect ? -1 : 0;
+ 	}
+-	if (preselect && (!TIME_ENABLE_SELECTABLE_V2 || !mq_selectable_replay ||
++	if (preselect && (!_quota_node_process_alive() || !TIME_ENABLE_SELECTABLE_V2 || !mq_selectable_replay ||
+ 			  !mq_healthy || !mq_reconciled || mq_fd < 0 ||
+ 			  mq_checkpoint_fd < 0 || mq_witness_fd < 0)) {
+ 		_set_pending_reason(job_ptr, "selectable ledger recovering or unavailable");
+@@ -2503,6 +2833,17 @@
+ 		pthread_mutex_unlock(&mq_lock);
+ 		return (why || preselect) ? -1 : 0;
+ 	}
++	if (preselect) {
++		char conf_digest[65], inventory_digest[65];
++		if (_hash_gres_config(conf_digest) || strcmp(conf_digest, mq_gres_digest) ||
++		    _hash_gpu_inventory(inventory_digest) || strcmp(inventory_digest, mq_gpu_inventory_digest) ||
++		    !_supported_gres_device_order()) {
++			_mark_unhealthy("GPU device identity changed before selection");
++			_set_pending_reason(job_ptr, "GPU device identity unavailable");
++			pthread_mutex_unlock(&mq_lock);
++			return -1;
++		}
++	}
+ 	if (preselect && (!expected_gpu || gpu_count != expected_gpu)) {
+ 		_set_pending_reason(job_ptr, "preselected GPU count changed");
+ 		pthread_mutex_unlock(&mq_lock);
+@@ -2681,8 +3022,22 @@
+ 
+ 	if (!mq_enabled)
+ 		return 0;
++#if defined(TIME_ENABLE_MONTHLY_TEST_FIXTURE) && TIME_ENABLE_MONTHLY_TEST_FIXTURE
++	/* Isolated Colima fault injection, excluded from every release build. */
++	{
++		const char *trigger = getenv("TIME26_TEST_ABORT_COMMIT_FILE");
++		char host[64];
++		if (trigger && !strncmp(trigger, "/tmp/time26-gpu-probe-", 22) &&
++		    !gethostname(host, sizeof(host)) && !strcmp(host, "colima") &&
++		    access("/dev/nvidiactl", F_OK) && !access(trigger, F_OK)) {
++			_mark_unhealthy("test-only injected commit failure");
++			pthread_mutex_unlock(&mq_lock);
++			return -1;
++		}
++	}
++#endif
+ 	active = _find_active_job(job_ptr->job_id);
+-	if (!active || active->uid != job_ptr->user_id ||
++	if (!_quota_node_process_alive() || !active || active->uid != job_ptr->user_id ||
+ 	    (active->identity_bound &&
+ 	     (!job_ptr->details || job_ptr->details->submit_time <= 0 ||
+ 	      (uint64_t)job_ptr->details->submit_time != active->submit_sec ||
+@@ -2714,6 +3069,30 @@
+ 	if (mq_selectable_replay) {
+ #if defined(TIME_ENABLE_MONTHLY_COMMIT5_DRAFT) && TIME_ENABLE_MONTHLY_COMMIT5_DRAFT
+ 		if (allocation_start) {
++			node_record_t *node;
++			char bits[MQ_GPU_MAP_MAX + 1], conf_digest[65], inventory_digest[65];
++			int n = 0, bitsize = bit_size(gpu_state->gres_bit_alloc[0]);
++			node = next_node_bitmap(job_ptr->job_resrcs->node_bitmap, &n);
++			if (!node || !_quota_node_is_local(node) || !_field_safe(node->name) || bitsize <= 0 || bitsize > MQ_GPU_MAP_MAX || active->gpu_bits[0] ||
++			    _hash_gres_config(conf_digest) || strcmp(conf_digest, mq_gres_digest) ||
++			    _hash_gpu_inventory(inventory_digest) || strcmp(inventory_digest, mq_gpu_inventory_digest) ||
++			    !_supported_gres_device_order() || bitsize != mq_gpu_inventory_count) {
++				_mark_unhealthy("allocated GPU device identity unavailable");
++				pthread_mutex_unlock(&mq_lock);
++				return -1;
++			}
++			for (int i = 0; i < bitsize; i++) bits[i] = bit_test(gpu_state->gres_bit_alloc[0], i) ? '1' : '0';
++			bits[bitsize] = '\0';
++			if (_append_event("GPU_MAP1|%u|%" PRIu64 "|%" PRIu64 "|%s|%s|%s|%s",
++					  active->job_id, active->generation, active->sluid, node->name, bits, conf_digest, inventory_digest)) {
++				_mark_unhealthy("GPU device identity could not be persisted");
++				pthread_mutex_unlock(&mq_lock);
++				return -1;
++			}
++			memcpy(active->gpu_node, node->name, strlen(node->name) + 1);
++			memcpy(active->gpu_bits, bits, bitsize + 1);
++			memcpy(active->gpu_conf, conf_digest, sizeof(active->gpu_conf));
++			memcpy(active->gpu_inventory, inventory_digest, sizeof(active->gpu_inventory));
+ 			if (_now(&commit_time) || _time_cmp(allocation_start, &commit_time) > 0 ||
+ 			    _commit5_validate(active, allocation_start) ||
+ 			    _append_event("COMMIT5|%u|%" PRIu64 "|%" PRIu64 "|%u",
+@@ -2922,13 +3301,15 @@
+ 	if (mq_enabled && active) {
+ 		if (job_ptr->node_bitmap && bit_set_count(job_ptr->node_bitmap) == 1)
+ 			node = next_node_bitmap(job_ptr->node_bitmap, &node_index);
+-		if (!mq_healthy || !mq_reconciled || !mq_selectable_replay ||
++		if (!mq_healthy || (!mq_reconciled &&
++		    !(mq_recovery_pending && active->recovery_verified)) || !mq_selectable_replay ||
+ 		    !active->committed || active->release_started || !active->sluid ||
+ 		    active->sluid != job_ptr->step_id.sluid || active->uid != job_ptr->user_id ||
+ 		    !job_ptr->details || job_ptr->details->submit_time <= 0 ||
+ 		    active->submit_sec != (uint64_t)job_ptr->details->submit_time ||
+ 		    active->restart_count != job_ptr->restart_cnt || job_ptr->start_time <= 0 ||
+ 		    job_ptr->end_time < job_ptr->start_time || !node || !_field_safe(node->name) ||
++		    !active->gpu_bits[0] || strcmp(active->gpu_node, node->name) ||
+ 		    _append_event("ENDING2|%u|%" PRIu64 "|%" PRIu64 "|%u|%" PRIu64
+ 				  "|%u|%u|%u|%u|%" PRIu64 "|%" PRIu64 "|%u|%u|%s",
+ 				  active->job_id, active->generation, active->sluid, active->uid,
+@@ -2956,7 +3337,7 @@
+ 	pthread_mutex_lock(&mq_lock);
+ 	active = _find_active_job(job_ptr->job_id);
+ 	if (mq_enabled && active) {
+-		if (!success || !active->committed || !active->release_started || !active->sluid ||
++		if (!mq_healthy || !success || !active->committed || !active->release_started || !active->sluid ||
+ 		    active->sluid != job_ptr->step_id.sluid ||
+ 		    active->uid != job_ptr->user_id)
+ 			_mark_unhealthy("selector release failed or identity mismatch");
+@@ -2983,8 +3364,10 @@
+ 		if (!proven || !active->selector_released || !active->sluid ||
+ 		    active->sluid != job_ptr->step_id.sluid || _find_node_proof(active) != 1)
+ 			_mark_unhealthy("node cleanup not proven for allocation");
+-		else
++		else if (!mq_recovery_pending)
+ 			can_release = true;
++		/* During recovery preserve the durable proof and defer settlement;
++		 * advancing all active anchors to now would overcharge earlier ends. */
+ 	}
+ 	pthread_mutex_unlock(&mq_lock);
+ 	if (can_release)
+@@ -3291,14 +3674,334 @@
+ 	pthread_mutex_unlock(&mq_lock);
+ 	return result;
+ }
++
++/* Before configuration sync can rewrite or fail a restored job, quarantine
++ * any run whose durable ledger says termination has begun or completed. */
++void monthly_quota_quarantine_restored(list_t *jobs)
++{
++	list_itr_t *iterator;
++	job_record_t *job_ptr;
++	mq_active_record_t *active;
++	mq_reserve1_t *entry;
++	char marker[33];
++	enum time_tier selected;
+ 
++	if (!jobs)
++		return;
++	pthread_mutex_lock(&mq_lock);
++	(void) _ensure_module_locked();
++	if (!mq_enabled || (mq_healthy && mq_reconciled))
++		goto done;
++	iterator = list_iterator_create(jobs);
++	while ((job_ptr = list_next(iterator))) {
++		bool quarantine = false;
++		if (!IS_JOB_RUNNING(job_ptr) && !IS_JOB_SUSPENDED(job_ptr) &&
++		    !IS_JOB_COMPLETING(job_ptr))
++			continue;
++		active = _find_active_job(job_ptr->job_id);
++		if (active && (!active->committed || active->release_started))
++			quarantine = true;
++		for (entry = mq_reserves; !quarantine && entry; entry = entry->next)
++			if (entry->job_id == job_ptr->job_id && entry->terminal == 2)
++				quarantine = true;
++		if ((!mq_healthy || mq_fd < 0) &&
++		    (!time_parse_job_marker(job_ptr->comment, marker, &selected) ||
++		     job_ptr->gres_list_req || job_ptr->gres_list_alloc))
++			quarantine = true;
++		if (quarantine)
++			_defer_job_locked(job_ptr);
++	}
++	list_iterator_destroy(iterator);
++done:
++	pthread_mutex_unlock(&mq_lock);
++}
++
++/* During startup preserve managed COMPLETING jobs for explicit recovery.
++ * The normal path would repeat ENDING and send another node termination.
++ * An unavailable ledger cannot prove a GRES job safe to deallocate. */
++bool monthly_quota_defer_recovered_completing(struct job_record *job_ptr)
++{
++	bool defer = false;
++	mq_reserve1_t *entry;
++	char marker[33];
++	enum time_tier selected;
++
++	if (!job_ptr || !IS_JOB_COMPLETING(job_ptr))
++		return false;
++	pthread_mutex_lock(&mq_lock);
++	(void) _ensure_module_locked();
++	if (!mq_enabled)
++		goto done;
++	/* Reconfiguration can also revisit COMPLETING.  A live managed
++	 * allocation must never be sent through deallocation twice. */
++	if (_find_active_job(job_ptr->job_id)) {
++		defer = true;
++		goto done;
++	}
++	if (mq_reconciled && mq_healthy)
++		goto done;
++	/* With no trustworthy ledger, preserve managed and GRES-bearing jobs;
++	 * unrelated CPU-only completions retain Slurm's normal cleanup. */
++	if (!time_parse_job_marker(job_ptr->comment, marker, &selected) ||
++	    ((!mq_healthy || mq_fd < 0) &&
++	     (job_ptr->gres_list_req || job_ptr->gres_list_alloc))) {
++		defer = true;
++		goto done;
++	}
++	for (entry = mq_reserves; entry; entry = entry->next) {
++		if (entry->job_id == job_ptr->job_id && entry->terminal) {
++			defer = true;
++			break;
++		}
++	}
++done:
++	/* Only startup's reconstructed allocation needs the epilog RPC held.
++	 * A live reconfiguration has already executed normal deallocation. */
++	if (defer && !mq_reconciled)
++		_defer_job_locked(job_ptr);
++	pthread_mutex_unlock(&mq_lock);
++	return defer;
++}
++
++bool monthly_quota_completion_is_deferred(struct job_record *job_ptr)
++{
++	bool result;
++	if (!job_ptr)
++		return false;
++	pthread_mutex_lock(&mq_lock);
++	result = _deferred_job_matches(job_ptr);
++	pthread_mutex_unlock(&mq_lock);
++	return result;
++}
++
++/* Caller holds Slurm config/job/node locks. This read-only audit is also
++ * useful to verify a live allocation before invoking any recovery mutation. */
++int monthly_quota_selector_audit(struct job_record *job_ptr)
++{
++	mq_active_record_t *active;
++	uint64_t gpu = 0;
++	node_record_t *node;
++	int node_index = 0;
++	char marker[33];
++	enum time_tier tier;
++
++	if (!job_ptr || !job_ptr->node_bitmap || bit_set_count(job_ptr->node_bitmap) != 1)
++		return -1;
++	node = next_node_bitmap(job_ptr->node_bitmap, &node_index);
++	if (!node)
++		return -1;
++	pthread_mutex_lock(&mq_lock);
++	active = _find_active_job(job_ptr->job_id);
++	if (mq_healthy && active && active->committed && active->identity_bound &&
++	    active->sluid && active->sluid == job_ptr->step_id.sluid &&
++	    active->uid == job_ptr->user_id && job_ptr->details &&
++	    job_ptr->details->submit_time > 0 &&
++	    active->submit_sec == (uint64_t)job_ptr->details->submit_time &&
++	    active->restart_count == job_ptr->restart_cnt &&
++	    !time_parse_job_marker(job_ptr->comment, marker, &tier) &&
++	    !strcmp(marker, active->marker_id) && tier == active->selected_tier)
++		gpu = active->gpu_count;
++	pthread_mutex_unlock(&mq_lock);
++	if (!gpu || !running_cons_tres())
++		return -1;
++	return select_g_quota_recovery_verify(job_ptr, node, gpu) == SLURM_SUCCESS ? 0 : -1;
++}
++
++/* The caller holds Slurm job/node write locks. Copy durable tombstones
++ * under mq_lock, then release mq_lock before invoking Slurm cleanup hooks. */
++int monthly_quota_recovery_repair_one(monthly_quota_repair_t *out)
++{
++	mq_deferred_job_t *deferred;
++	mq_reserve1_t *entry;
++	monthly_quota_repair_t *items = NULL;
++	job_record_t *job;
++	char marker[33];
++	enum time_tier tier;
++	unsigned count = 0, index = 0;
++	int rc = 0;
++	if (!out) return -1;
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_healthy || !mq_recovery_pending || mq_reconciled) goto done_locked;
++	{
++		char conf[65], inventory[65];
++		if (_hash_gres_config(conf) || strcmp(conf, mq_gres_digest) ||
++		    _hash_gpu_inventory(inventory) || strcmp(inventory, mq_gpu_inventory_digest) || !_supported_gres_device_order()) {
++			_mark_unhealthy("device mapping changed before recovery repair"); rc = -1; goto done_locked;
++		}
++	}
++	for (deferred = mq_deferred_jobs; deferred; deferred = deferred->next)
++		if (++count > 4096) { _mark_unhealthy("too many recovery records"); rc = -1; goto done_locked; }
++	if (!count) goto done_locked;
++	items = xcalloc(count, sizeof(*items));
++	for (deferred = mq_deferred_jobs; deferred; deferred = deferred->next) {
++		job = find_job_record(deferred->job_id);
++		if (!job || job->step_id.sluid != deferred->sluid) {
++			_mark_unhealthy("quarantined job identity disappeared"); rc = -1; goto done_locked;
++		}
++		if (_find_active_job(job->job_id)) continue;
++		if (time_parse_job_marker(job->comment, marker, &tier) ||
++		    !(entry = _reserve1_find(job->user_id, marker)) || entry->terminal != 2 ||
++		    entry->job_id != job->job_id || entry->tier != tier || !entry->generation ||
++		    !entry->final_sluid || entry->final_sluid != job->step_id.sluid ||
++		    !job->details || job->details->submit_time <= 0 ||
++		    entry->final_submit != (uint64_t)job->details->submit_time ||
++		    entry->final_restart != job->restart_cnt || !entry->final_start ||
++		    entry->final_end < entry->final_start || !_field_safe(entry->final_node) ||
++		    !entry->gpu_bits[0] || strcmp(entry->gpu_conf, mq_gres_digest) ||
++		    strcmp(entry->gpu_inventory, mq_gpu_inventory_digest) ||
++		    strcmp(entry->gpu_node, entry->final_node) ||
++		    (IS_JOB_RUNNING(job) && !_gpu_map_matches(job, entry->gpu_node, entry->gpu_bits))) {
++			_mark_unhealthy("released recovery identity mismatch"); rc = -1; goto done_locked;
++		}
++		items[index] = (monthly_quota_repair_t) {
++			.job_id = entry->job_id, .uid = entry->uid, .sluid = entry->final_sluid,
++			.generation = entry->generation, .submit_sec = entry->final_submit,
++			.restart_count = entry->final_restart, .gpu_count = entry->gpu,
++			.start_sec = entry->final_start, .end_sec = entry->final_end,
++			.final_state = entry->final_state, .final_exit = entry->final_exit,
++			.final_derived = entry->final_derived, .final_reason = entry->final_reason,
++			.final_requid = entry->final_requid
++		};
++		memcpy(items[index].node, entry->final_node, sizeof(items[index].node));
++		memcpy(items[index].gpu_bits, entry->gpu_bits, sizeof(items[index].gpu_bits));
++		index++;
++	}
++done_locked:
++	pthread_mutex_unlock(&mq_lock);
++	if (rc < 0 || !items) { xfree(items); return rc; }
++	for (unsigned i = 0; i < index; i++) {
++		job = find_job_record(items[i].job_id);
++		rc = monthly_quota_restore_released(job, &items[i]);
++		if (rc) { if (rc > 0) *out = items[i]; break; }
++	}
++	xfree(items);
++	return rc;
++}
++
++/* Call only after the serialized job checkpoint and directory fsync succeed. */
++int monthly_quota_recovery_ack_saved(const monthly_quota_repair_t *repair)
++{
++	mq_deferred_job_t **cursor, *item;
++	mq_reserve1_t *entry;
++	job_record_t *job;
++	int rc = -1;
++	if (!repair) return -1;
++	pthread_mutex_lock(&mq_lock);
++	job = find_job_record(repair->job_id);
++	for (entry = mq_reserves; entry; entry = entry->next)
++		if (entry->terminal == 2 && entry->uid == repair->uid &&
++		    entry->job_id == repair->job_id && entry->generation == repair->generation &&
++		    entry->final_sluid == repair->sluid) break;
++	if (!mq_healthy || !mq_recovery_pending || !entry || !job ||
++	    !IS_JOB_COMPLETED(job) || job->step_id.sluid != repair->sluid ||
++	    job->user_id != repair->uid || (job->job_state & JOB_STATE_BASE) != (repair->final_state & JOB_STATE_BASE) ||
++	    job->exit_code != repair->final_exit || job->derived_ec != repair->final_derived ||
++	    job->state_reason != repair->final_reason || job->requid != repair->final_requid ||
++	    !job->details || (uint64_t)job->details->submit_time != repair->submit_sec ||
++	    job->restart_cnt != repair->restart_count || (uint64_t)job->start_time != repair->start_sec ||
++	    (uint64_t)job->end_time != repair->end_sec)
++		goto done;
++	for (cursor = &mq_deferred_jobs; (item = *cursor); cursor = &item->next) {
++		if (item->job_id == repair->job_id && item->sluid == repair->sluid) {
++			*cursor = item->next; xfree(item); rc = 0; break;
++		}
++	}
++done:
++	if (rc) _mark_unhealthy("repaired job checkpoint could not be acknowledged");
++	pthread_mutex_unlock(&mq_lock);
++	return rc;
++}
++
++/* Recovery advances shared balances only to the earliest verified cleanup
++ * instant. Every unfinished ENDING must have proof before any advance: a
++ * later-arriving older proof cannot be safely applied after other balances
++ * crossed tier or month boundaries. The WAL records each advance/release
++ * independently, so a crash between them replays at the same anchor. */
++int monthly_quota_recovery_settle(void)
++{
++	mq_active_record_t *active, *earliest, *other;
++	mq_reserve1_t *reservation;
++	int settled = 0, proof;
++
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || !mq_recovery_pending ||
++	    mq_reconciled || !mq_selectable_replay)
++		goto done;
++	{
++		char conf[65], inventory[65];
++		if (_hash_gres_config(conf) || strcmp(conf, mq_gres_digest) ||
++		    _hash_gpu_inventory(inventory) || strcmp(inventory, mq_gpu_inventory_digest) || !_supported_gres_device_order()) {
++			_mark_unhealthy("device mapping changed during recovery"); settled = -1; goto done;
++		}
++	}
++	for (;;) {
++		if (_find_node_proof(NULL) < 0) {
++			_mark_unhealthy("recovery node proof journal is invalid");
++			settled = -1;
++			goto done;
++		}
++		earliest = NULL;
++		for (active = mq_active; active; active = active->next) {
++			if (!active->committed) {
++				_mark_unhealthy("recovery found unresolved allocation intent");
++				settled = -1;
++				goto done;
++			}
++			if (!active->release_started)
++				continue;
++			proof = active->proof_seen ? 1 : 0;
++			if (!active->selector_released || !proof)
++				goto done; /* wait for every ending before advancing */
++			reservation = _reserve1_find(active->uid, active->marker_id);
++			if (!active->identity_bound || !active->reservation_bound ||
++			    !active->sluid || !reservation || reservation->terminal ||
++			    reservation->job_id != active->job_id ||
++			    reservation->generation != active->generation ||
++			    reservation->tier != active->selected_tier ||
++			    _time_cmp(&active->proof_at, &active->anchor) < 0) {
++				_mark_unhealthy("recovery proof or reservation identity mismatch");
++				settled = -1;
++				goto done;
++			}
++			if (!earliest || _time_cmp(&active->proof_at, &earliest->proof_at) < 0 ||
++			    (!_time_cmp(&active->proof_at, &earliest->proof_at) &&
++			     active->generation < earliest->generation))
++				earliest = active;
++		}
++		if (!earliest)
++			goto done;
++		for (other = mq_active; other; other = other->next)
++			if (_time_cmp(&other->anchor, &earliest->proof_at) > 0) {
++				_mark_unhealthy("cleanup proof predates settled allocation anchor");
++				settled = -1;
++				goto done;
++			}
++		reservation = _reserve1_find(earliest->uid, earliest->marker_id);
++		if (_settle_all(&earliest->proof_at) ||
++		    _append_event("RELEASE2|%u|%" PRIu64 "|%" PRIu64 "|%u",
++				  earliest->job_id, earliest->generation,
++				  earliest->proof_at.sec, earliest->proof_at.nsec)) {
++			_mark_unhealthy("recovery settlement could not be persisted");
++			settled = -1;
++			goto done;
++		}
++		_reserve1_copy_final(reservation, earliest);
++		_reserve1_finish(reservation, 2, earliest->sluid);
++		_remove_active(earliest);
++		settled++;
++	}
++done:
++	pthread_mutex_unlock(&mq_lock);
++	return settled;
++}
++
+ int monthly_quota_reconcile(list_t *jobs)
+ {
+ 	list_itr_t *iterator;
+ 	struct job_record *job_ptr;
+ 	mq_active_record_t *active;
+ 	mq_time_t now;
+-	bool bad = false;
++	bool bad = false, waiting = false;
+ 
+ 	pthread_mutex_lock(&mq_lock);
+ 	(void) _ensure_module_locked();
+@@ -3306,6 +4009,15 @@
+ 		pthread_mutex_unlock(&mq_lock);
+ 		return 0;
+ 	}
++	{
++		char current_gres[65], current_inventory[65];
++		if (_hash_gres_config(current_gres) || strcmp(current_gres, mq_gres_digest) ||
++		    _hash_gpu_inventory(current_inventory) || strcmp(current_inventory, mq_gpu_inventory_digest) || !_supported_gres_device_order()) {
++			_mark_unhealthy("GRES configuration changed during controller lifetime");
++			pthread_mutex_unlock(&mq_lock);
++			return -1;
++		}
++	}
+ 	if (!mq_healthy || mq_fd < 0 || !jobs || _now(&now)) {
+ 		_mark_unhealthy("startup/reconfiguration ledger recovery failed");
+ 		pthread_mutex_unlock(&mq_lock);
+@@ -3319,11 +4031,23 @@
+ 
+ 		/* A PREPARE alone does not prove when or whether a GPU was
+ 		 * allocated. Recovery must not manufacture a COMMIT event. */
+-		if (!active->committed || active->release_started) {
++		if (!active->committed) {
+ 			bad = true;
+ 			continue;
+ 		}
+ 		job_ptr = find_job_record(active->job_id);
++		if (!job_ptr && active->release_started && active->selector_released &&
++		    active->identity_bound && active->reservation_bound && active->sluid) {
++			mq_reserve1_t *entry = _reserve1_find(active->uid, active->marker_id);
++			/* A job may have completed and been purged while another
++			 * proof was pending. WAL retains its identity and outcome;
++			 * no missing job is treated as proof of node cleanup. */
++			if (entry && !entry->terminal && entry->job_id == active->job_id &&
++			    entry->generation == active->generation) {
++				waiting = true;
++				continue;
++			}
++		}
+ 		if (!job_ptr || job_ptr->user_id != active->uid) {
+ 			/* Missing job state does not prove a PREPARE was aborted. */
+ 			bad = true;
+@@ -3349,6 +4073,18 @@
+ 				continue;
+ 			}
+ 		}
++		if (strcmp(active->gpu_conf, mq_gres_digest) || strcmp(active->gpu_inventory, mq_gpu_inventory_digest) ||
++		    ((IS_JOB_RUNNING(job_ptr) || IS_JOB_SUSPENDED(job_ptr)) &&
++		     !_gpu_map_matches(job_ptr, active->gpu_node, active->gpu_bits))) {
++			bad = true;
++			continue;
++		}
++		if (active->release_started) {
++			/* ENDING2 is durable, but neither the final settlement nor
++			 * the restored Slurm allocation has been reconciled yet. */
++			waiting = true;
++			continue;
++		}
+ 		if (!IS_JOB_RUNNING(job_ptr) && !IS_JOB_SUSPENDED(job_ptr) &&
+ 		    !IS_JOB_COMPLETING(job_ptr)) {
+ 			bad = true;
+@@ -3373,6 +4109,24 @@
+ 		const char *why = NULL;
+ 		int shape;
+ 
++		if (_deferred_job_matches(job_ptr) && !_find_active_job(job_ptr->job_id)) {
++			mq_reserve1_t *entry;
++			char marker_id[33];
++			enum time_tier selected;
++			if (time_parse_job_marker(job_ptr->comment, marker_id, &selected) ||
++			    !(entry = _reserve1_find(job_ptr->user_id, marker_id)) ||
++			    entry->terminal != 2 || entry->job_id != job_ptr->job_id ||
++			    entry->tier != selected || !entry->final_sluid ||
++			    entry->final_sluid != job_ptr->step_id.sluid || !job_ptr->details ||
++			    job_ptr->details->submit_time <= 0 ||
++			    entry->final_submit != (uint64_t)job_ptr->details->submit_time ||
++			    entry->final_restart != job_ptr->restart_cnt) {
++				bad = true;
++			} else {
++				waiting = true;
++			}
++			continue;
++		}
+ 		if (IS_JOB_COMPLETING(job_ptr) && !_find_active_job(job_ptr->job_id)) {
+ 			bad = true;
+ 			continue;
+@@ -3391,6 +4145,17 @@
+ 		pthread_mutex_unlock(&mq_lock);
+ 		return -1;
+ 	}
++	if (waiting) {
++		/* No ADVANCE while any earlier cleanup proof is outstanding. */
++		for (active = mq_active; active; active = active->next)
++			if (!active->release_started)
++				active->recovery_verified = true;
++		mq_recovery_pending = true;
++		mq_reconciled = false;
++		pthread_mutex_unlock(&mq_lock);
++		return 1;
++	}
++	mq_recovery_pending = false;
+ 	if (_settle_all(&now)) {
+ 		_mark_unhealthy("recovered allocations could not be durably settled");
+ 		pthread_mutex_unlock(&mq_lock);
+@@ -3401,6 +4166,10 @@
+ 	return 0;
+ }
+ 
++#ifndef TIME_ENABLE_MONTHLY_TOMBSTONES_DRAFT
++#define TIME_ENABLE_MONTHLY_TOMBSTONES_DRAFT 0
++#endif
++
+ /* A stale control socket is recoverable only while this controller owns
+  * a healthy reconciled ledger and its exclusive WAL/checkpoint locks. */
+ int monthly_quota_reserve1(uid_t uid, const char *request, uint32_t tier,
+@@ -3528,6 +4297,53 @@
+ 	return rc;
+ }
+ 
++/* Fence an immutable request even if the broker crashed before RESERVE1.
++ * Both operations serialize under mq_lock, so a late reserve cannot create a
++ * hold after cancellation and a concurrent bind cannot be refunded. */
++int monthly_quota_cancel_request1(uid_t uid, const char *request, uint32_t tier,
++				  uint32_t gpu, uint32_t minutes)
++{
++	mq_reserve1_t *entry;
++	mq_time_t now;
++	uint32_t month;
++	uint64_t duration, amount;
++	int rc = -1;
++	if (!TIME_ENABLE_SELECTABLE_V2 || !TIME_ENABLE_MONTHLY_TOMBSTONES_DRAFT ||
++	    (uid_t)(uint32_t)uid != uid || !_reserve1_request_valid(request) ||
++	    tier >= TIME_TIER_COUNT || !gpu || !minutes ||
++	    (uint64_t)minutes > UINT64_MAX / (60ULL * MQ_NSEC_PER_SEC)) return -1;
++	duration = (uint64_t)minutes * 60ULL * MQ_NSEC_PER_SEC;
++	if (gpu > UINT64_MAX / duration) return -1;
++	amount = gpu * duration;
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || !mq_reconciled || !mq_selectable_replay ||
++	    _now(&now) || _month_key(&now, &month)) goto out;
++	entry = _reserve1_find((uint32_t)uid, request);
++	if (entry) {
++		if (entry->tier != tier || entry->gpu != gpu || entry->minutes != minutes ||
++		    entry->amount != amount || entry->job_id || entry->generation ||
++		    (entry->terminal && entry->terminal != 1)) goto out;
++		if (entry->terminal == 1) { rc = 0; goto out; }
++		if (_append_event("CANCEL1|%u|%s", (uint32_t)uid, request)) {
++			_mark_unhealthy("CANCEL1 persistence failed"); goto out;
++		}
++		_reserve1_finish(entry, 1, 0); rc = 0; goto out;
++	}
++	entry = xcalloc(1, sizeof(*entry));
++	entry->uid = uid; entry->month = month; entry->tier = tier;
++	entry->gpu = gpu; entry->minutes = minutes; entry->amount = amount;
++	memcpy(entry->request, request, sizeof(entry->request));
++	if (_append_event("CANCEL_EMPTY1|%u|%s|%u|%u|%u|%u|%" PRIu64,
++			  (uint32_t)uid, request, month, tier, gpu, minutes, amount)) {
++		xfree(entry); _mark_unhealthy("CANCEL_EMPTY1 persistence failed"); goto out;
++	}
++	entry->next = mq_reserves; mq_reserves = entry;
++	_reserve1_finish(entry, 1, 0); rc = 0;
++out:
++	pthread_mutex_unlock(&mq_lock);
++	return rc;
++}
++
+ /* Release only an identified scheduler job that never started. */
+ int monthly_quota_cancel_bound1(uid_t uid, const char *request, uint32_t job_id)
+ {
+@@ -3738,7 +4554,7 @@
+     defined(TIME_ENABLE_MONTHLY_PRIORITY_DRAFT) && TIME_ENABLE_MONTHLY_PRIORITY_DRAFT
+ 	pthread_mutex_lock(&mq_lock);
+ 	ready = mq_enabled && mq_healthy && mq_reconciled && mq_selectable_replay &&
+-		mq_fd >= 0 && mq_checkpoint_fd >= 0 && mq_witness_fd >= 0 && mq_nodeproof_fd >= 0;
++		_quota_node_process_alive() && mq_fd >= 0 && mq_checkpoint_fd >= 0 && mq_witness_fd >= 0 && mq_nodeproof_fd >= 0;
+ 	pthread_mutex_unlock(&mq_lock);
+ #endif
+ 	return ready;
+@@ -3783,7 +4599,19 @@
+ 		close(mq_nodeproof_fd);
+ 		mq_nodeproof_fd = -1;
+ 	}
++	if (mq_nodepid_fd >= 0) {
++		close(mq_nodepid_fd);
++		mq_nodepid_fd = -1;
++	}
+ 	mq_nodeproof_offset = 0;
++	memset(mq_gres_digest, 0, sizeof(mq_gres_digest));
++	memset(mq_gpu_inventory_digest, 0, sizeof(mq_gpu_inventory_digest));
++	mq_gpu_inventory_count = 0; mq_test_inventory = false;
++	while (mq_deferred_jobs) {
++		mq_deferred_job_t *entry = mq_deferred_jobs;
++		mq_deferred_jobs = entry->next;
++		xfree(entry);
++	}
+ 	_free_memory();
+ 	xfree(mq_path);
+ 	mq_path = NULL;
+@@ -3791,6 +4619,7 @@
+ 	mq_enabled = false;
+ 	mq_healthy = false;
+ 	mq_reconciled = false;
++	mq_recovery_pending = false;
+ 	mq_seq = 0;
+ 	mq_next_generation = 0;
+ 	pthread_mutex_unlock(&mq_lock);
+--- a/src/slurmctld/read_config.c
++++ b/src/slurmctld/read_config.c
+@@ -85,6 +85,7 @@
+ #include "src/slurmctld/job_scheduler.h"
+ #include "src/slurmctld/licenses.h"
+ #include "src/slurmctld/locks.h"
++#include "src/slurmctld/monthly_quota.h"
+ #include "src/slurmctld/node_scheduler.h"
+ #include "src/slurmctld/power_save.h"
+ #include "src/slurmctld/proc_req.h"
+@@ -1504,6 +1505,12 @@
+ 
+ 		if (job_fail) {
+ 			bool was_running = false;
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++			if (monthly_quota_completion_is_deferred(job_ptr)) {
++				error("%s: invalid configuration for quarantined %pJ; preserving terminal evidence", __func__, job_ptr);
++				continue;
++			}
++#endif
+ 			if (IS_JOB_PENDING(job_ptr)) {
+ 				job_ptr->start_time =
+ 					job_ptr->end_time = time(NULL);
+@@ -1779,6 +1786,9 @@
+ 	 */
+ 	config_power_mgr();
+ 
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	monthly_quota_quarantine_restored(job_list);
++#endif
+ 	_sync_jobs_to_conf();		/* must follow select_g_job_init() */
+ 
+ 	/*
+@@ -1902,7 +1912,15 @@
+ 
+ 	/* Sync select plugin with synchronized job/node/part data */
+ 	gres_reconfig();		/* Clear gres/mps counters */
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	/* A partially rebuilt selector can misallocate CPU as well as GPU.
++	 * Stop the controller before any scheduler starts; do not attempt a
++	 * guessed rollback of resources that belong to running jobs. */
++	if (select_g_reconfigure() != SLURM_SUCCESS && monthly_quota_enabled())
++		fatal("selector reconstruction failed; refusing to start scheduling");
++#else
+ 	select_g_reconfigure();
++#endif
+ 
+ 	_set_response_cluster_rec();
+ 
+@@ -2232,6 +2250,12 @@
+ 	job_iterator = list_iterator_create(job_list);
+ 	while ((job_ptr = list_next(job_iterator))) {
+ 		if ((job_ptr->node_bitmap) && IS_JOB_COMPLETING(job_ptr)) {
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++			if (monthly_quota_defer_recovered_completing(job_ptr)) {
++				info("%s: deferring quota recovery for %pJ", __func__, job_ptr);
++				continue;
++			}
++#endif
+ 
+ 			/* If the controller is reconfiguring
+ 			 * and the job is in completing state
+@@ -2319,6 +2343,12 @@
+ 		if ((job_ptr->details) && (job_ptr->details->share_res == 0))
+ 			node_ptr->no_share_job_cnt++;
+ 
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++		if (IS_NODE_DOWN(node_ptr) && monthly_quota_completion_is_deferred(job_ptr)) {
++			/* Preserve the job identity while still leaving the node DOWN. */
++			continue;
++		}
++#endif
+ 		if (IS_NODE_DOWN(node_ptr)              &&
+ 		    IS_JOB_RUNNING(job_ptr)             &&
+ 		    (job_ptr->kill_on_node_fail == 0)   &&
+--- a/src/slurmctld/proc_req.c
++++ b/src/slurmctld/proc_req.c
+@@ -2010,6 +2010,14 @@
+ 		error("%s: could not find %pI", __func__, &epilog_msg->step_id);
+ 	else {
+ #if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++		if (monthly_quota_completion_is_deferred(job_ptr)) {
++			/* The node's durable proof remains available to recovery.
++			 * Its reconstructed selector and counters are not released yet. */
++			info("%s: deferring epilog completion for quota recovery %pJ", __func__, job_ptr);
++			if (epilog_msg->return_code == TIME_MONTHLY_CLEANUP_OK)
++				epilog_msg->return_code = SLURM_SUCCESS;
++			goto epilog_done;
++		}
+ 		node_record_t *node = find_node_record(epilog_msg->node_name);
+ 		bool cleanup_marker = epilog_msg->return_code == TIME_MONTHLY_CLEANUP_OK;
+ 		bool proven = cleanup_marker &&
+@@ -2031,6 +2039,9 @@
+ 			run_scheduler = true;
+ 	}
+ 
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++epilog_done:
++#endif
+ 	if (epilog_msg->return_code)
+ 		error("%s: epilog error %pJ Node=%s Err=%s %s",
+ 		      __func__, job_ptr, epilog_msg->node_name,
+--- a/src/slurmctld/job_mgr.c
++++ b/src/slurmctld/job_mgr.c
+@@ -1067,6 +1067,11 @@
+  *	load_all_job_state().
+  * RET 0 or error code
+  */
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++/* Serialize snapshot and replacement together: an older asynchronous dump
++ * must not overwrite a synchronously repaired job-state checkpoint. */
++static pthread_mutex_t quota_job_dump_lock = PTHREAD_MUTEX_INITIALIZER;
++#endif
+ int dump_all_job_state(void)
+ {
+ 	/* Save high-water mark to avoid buffer growth with copies */
+@@ -1077,13 +1082,17 @@
+ 	/* Locks: Read config and job */
+ 	slurmctld_lock_t job_read_lock =
+ 		{ READ_LOCK, READ_LOCK, NO_LOCK, NO_LOCK, NO_LOCK };
+-	buf_t *buffer = init_buf(high_buffer_size);
+-	time_t now = time(NULL);
++	buf_t *buffer;
++	time_t now;
+ 	time_t last_state_file_time;
+ 	static time_t last_job_state_size_check = 0;
+ 	uint32_t jobs_start, jobs_end, jobs_count;
+ 	DEF_TIMERS;
+-
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	pthread_mutex_lock(&quota_job_dump_lock);
++#endif
++	buffer = init_buf(high_buffer_size);
++	now = time(NULL);
+ 	START_TIMER;
+ 	/*
+ 	 * Check that last state file was written at expected time.
+@@ -1169,12 +1178,25 @@
+ 	}
+ 
+ 	error_code = save_buf_to_state("job_state", buffer, &high_buffer_size);
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	if (!error_code && monthly_quota_enabled()) {
++		int state_dir = open(slurm_conf.state_save_location, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
++		if (state_dir < 0 || fsync(state_dir)) {
++			error("could not sync job-state directory: %m");
++			error_code = SLURM_ERROR;
++		}
++		if (state_dir >= 0) close(state_dir);
++	}
++#endif
+ 	if (!error_code)
+ 		last_file_write_time = now;
+ 
+ 	xfree(reg_file);
+ 	FREE_NULL_BUFFER(buffer);
+ 	END_TIMER2(__func__);
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	pthread_mutex_unlock(&quota_job_dump_lock);
++#endif
+ 	return error_code;
+ }
+ 
+@@ -3016,6 +3038,12 @@
+ 
+ 	if (!_het_job_on_node(job_ptr, node_ptr->index))
+ 		return 0; /* job not on this node */
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	/* The node still transitions DOWN, but recovery retains this job's
++	 * original identity and reconstructed allocation until reconciled. */
++	if (monthly_quota_completion_is_deferred(job_ptr))
++		return 0;
++#endif
+ 	if (IS_JOB_SUSPENDED(job_ptr)) {
+ 		uint32_t suspend_job_state = job_ptr->job_state;
+ 		/*
+@@ -5247,6 +5275,10 @@
+ 	time_t now = time(NULL);
+ 
+ 	log_flag(TRACE_JOBS, "%s: enter %pJ", __func__, job_ptr);
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	if (monthly_quota_completion_is_deferred(job_ptr))
++		return ESLURM_DISABLED;
++#endif
+ 
+ 	if (IS_JOB_STAGE_OUT(job_ptr) && (flags & KILL_HURRY)) {
+ 		job_ptr->bit_flags |= JOB_KILL_HURRY;
+@@ -6176,6 +6208,12 @@
+ 
+ 	xassert(verify_lock(JOB_LOCK, WRITE_LOCK));
+ 	xassert(verify_lock(FED_LOCK, READ_LOCK));
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	/* A stale checkpoint may receive a duplicate batch-completion RPC.
++	 * Its original outcome is already in ENDING2; do not log or end twice. */
++	if (monthly_quota_completion_is_deferred(job_ptr))
++		return SLURM_SUCCESS;
++#endif
+ 
+ 	if (IS_JOB_FINISHED(job_ptr)) {
+ 		if (job_ptr->exit_code == 0)
+@@ -6404,7 +6442,124 @@
+ 		foreach_complete_hetjob->rc = rc;
+ 
+ 	return 0;
++}
++
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++/* A conservative per-node accounting check. Other COMPLETING or suspended
++ * jobs are left to finish first, because their counters have different
++ * reconstruction histories. Running jobs are counted without touching them. */
++static bool _quota_node_counts_match(node_record_t *node, job_record_t *target)
++{
++	list_itr_t *it = list_iterator_create(job_list);
++	job_record_t *job;
++	uint32_t running = 0, no_share = 0, owners = 0;
++	bool ok = true;
++	while ((job = list_next(it))) {
++		bool on_node, owner;
++		bitstr_t *nodes;
++		if (!IS_JOB_RUNNING(job) && !IS_JOB_SUSPENDED(job) && !IS_JOB_COMPLETING(job))
++			continue;
++		nodes = IS_JOB_COMPLETING(job) && job->node_bitmap_cg ?
++			job->node_bitmap_cg : job->node_bitmap;
++		if (!nodes || bit_size(nodes) != node_record_count) { ok = false; break; }
++		on_node = bit_test(nodes, node->index);
++		if (!on_node) continue;
++		if (IS_JOB_SUSPENDED(job) ||
++		    (IS_JOB_COMPLETING(job) &&
++		     (!monthly_quota_completion_is_deferred(job) || job->epilog_running))) { ok = false; break; }
++		if (job == target && !IS_JOB_RUNNING(job) && !IS_JOB_COMPLETING(job)) { ok = false; break; }
++		if (!job->details || !job->part_ptr) { ok = false; break; }
++		running++;
++		if (job->details->share_res == 0) no_share++;
++		owner = (job->details->whole_node & WHOLE_NODE_USER) ||
++			(job->part_ptr->flags & PART_FLAG_EXCLUSIVE_USER);
++		if (owner) {
++			if (node->owner != job->user_id) { ok = false; break; }
++			owners++;
++		}
++	}
++	list_iterator_destroy(it);
++	return ok && running == node->run_job_cnt && no_share == node->no_share_job_cnt &&
++		owners == node->owner_job_cnt && !node->comp_job_cnt && !node->sus_job_cnt;
++}
++
++/* Restore only controller-side resources reconstructed from a stale saved
++ * job. ENDING2/RELEASE2 already contain the outcome; never repeat completion
++ * logging, node termination, or controller epilog. */
++extern int monthly_quota_restore_released(job_record_t *job_ptr,
++					  const monthly_quota_repair_t *repair)
++{
++	node_record_t *node;
++	uint32_t base;
++	int node_index = 0;
++	bool running;
++	if (!job_ptr || !repair || !monthly_quota_completion_is_deferred(job_ptr) ||
++	    job_ptr->job_id != repair->job_id || job_ptr->user_id != repair->uid ||
++	    job_ptr->step_id.sluid != repair->sluid || !repair->sluid ||
++	    !job_ptr->details || !job_ptr->part_ptr || job_ptr->het_job_id ||
++	    job_ptr->array_job_id || job_ptr->fed_details || job_ptr->epilog_running ||
++	    job_ptr->epilog_failed || slurm_conf.epilog_slurmctld_cnt ||
++	    slurm_conf.switch_type || IS_JOB_WHOLE_TOPO(job_ptr) ||
++	    job_ptr->details->submit_time <= 0 ||
++	    (uint64_t)job_ptr->details->submit_time != repair->submit_sec ||
++	    job_ptr->restart_cnt != repair->restart_count || job_ptr->start_time <= 0 ||
++	    (uint64_t)job_ptr->start_time != repair->start_sec ||
++	    repair->end_sec < repair->start_sec || repair->end_sec > (uint64_t)time(NULL) ||
++	    (uint64_t)(time_t)repair->end_sec != repair->end_sec ||
++	    !job_ptr->node_bitmap || bit_set_count(job_ptr->node_bitmap) != 1 ||
++	    job_ptr->node_cnt != 1 || !(node = next_node_bitmap(job_ptr->node_bitmap, &node_index)) ||
++	    strcmp(node->name, repair->node) || IS_NODE_DOWN(node) || IS_NODE_NO_RESPOND(node) ||
++	    IS_NODE_POWERED_DOWN(node) || IS_NODE_POWERING_UP(node) ||
++	    !_quota_node_counts_match(node, job_ptr))
++		return 0;
++	base = repair->final_state & JOB_STATE_BASE;
++	if ((repair->final_state & ~(JOB_STATE_BASE | JOB_COMPLETING)) ||
++	    (base != JOB_COMPLETE && base != JOB_FAILED && base != JOB_CANCELLED &&
++	     base != JOB_TIMEOUT && base != JOB_NODE_FAIL && base != JOB_OOM))
++		return 0;
++	running = IS_JOB_RUNNING(job_ptr) && !IS_JOB_COMPLETING(job_ptr);
++	if (!running && (!IS_JOB_COMPLETING(job_ptr) ||
++	    (job_ptr->job_state & JOB_STATE_BASE) != base ||
++	    job_ptr->exit_code != repair->final_exit ||
++	    job_ptr->derived_ec != repair->final_derived ||
++	    (uint64_t)job_ptr->end_time != repair->end_sec))
++		return 0;
++	if (job_ptr->node_bitmap_cg &&
++	    (bit_set_count(job_ptr->node_bitmap_cg) != 1 ||
++	     !bit_test(job_ptr->node_bitmap_cg, node->index)))
++		return 0;
++	if (running) {
++		if ((accounting_enforce & ACCOUNTING_ENFORCE_LIMITS) &&
++		    job_ptr->end_time_exp == (time_t)NO_VAL)
++			return 0;
++		if (!running_cons_tres() ||
++		    select_g_quota_recovery_verify(job_ptr, node, repair->gpu_count) != SLURM_SUCCESS)
++			return 0;
++		/* A selector error may have partially mutated shared state. Stop all
++		 * scheduling rather than guessing a rollback against other jobs. */
++		if (select_g_job_fini(job_ptr) != SLURM_SUCCESS)
++			fatal("quota recovery selector release failed; refusing further scheduling");
++		if (accounting_enforce & ACCOUNTING_ENFORCE_LIMITS) {
++			acct_policy_job_fini(job_ptr, false);
++			acct_policy_remove_job_submit(job_ptr, false);
++		}
++	}
++	job_state_set(job_ptr, base | JOB_COMPLETING);
++	job_ptr->exit_code = repair->final_exit;
++	job_ptr->derived_ec = repair->final_derived;
++	job_ptr->state_reason = repair->final_reason;
++	job_ptr->requid = repair->final_requid;
++	job_ptr->end_time = (time_t)repair->end_sec;
++	job_ptr->bit_flags &= ~JOB_WAS_RUNNING;
++	xfree(job_ptr->state_desc);
++	if (!job_ptr->node_bitmap_cg) build_cg_bitmap(job_ptr);
++	make_node_comp(node, job_ptr, false);
++	make_node_idle(node, job_ptr);
++	if (IS_JOB_COMPLETING(job_ptr) || job_ptr->node_cnt)
++		fatal("quota recovery node cleanup inconsistent; refusing further scheduling");
++	return 1;
+ }
++#endif
+ 
+ /*
+  * job_complete - note the normal termination the specified job
+@@ -10211,7 +10366,18 @@
+ 	if (job_ptr->het_job_id && (job_ptr->bit_flags & HETJOB_PURGE))
+ 		return 1;
+ 
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	/* A repaired record remains quarantined until a synchronous state save. */
++	if (monthly_quota_completion_is_deferred(job_ptr))
++		return 0;
++#endif
+ 	if (IS_JOB_COMPLETING(job_ptr) && !LOTS_OF_AGENTS) {
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++		/* Recovery owns this reconstructed allocation; retrying termination
++		 * can disturb the in-flight node cleanup or duplicate its epilog. */
++		if (monthly_quota_completion_is_deferred(job_ptr))
++			return 0;
++#endif
+ 		kill_age = now - (slurm_conf.kill_wait +
+ 		                  2 * slurm_conf.msg_timeout);
+ 		if (job_ptr->time_last_active < kill_age) {
+@@ -12692,6 +12858,10 @@
+ 		.user = READ_LOCK,
+ 	};
+ 
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	if (monthly_quota_completion_is_deferred(job_ptr))
++		return ESLURM_DISABLED;
++#endif
+ 	/*
+ 	 * Block scontrol updates of scrontab jobs.
+ 	 */
+@@ -16816,6 +16986,10 @@
+ 				uint32_t return_code)
+ {
+ 	node_record_t *node_ptr;
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	if (monthly_quota_completion_is_deferred(job_ptr))
++		return false;
++#endif
+ 
+ 	log_flag(TRACE_JOBS, "%s: enter %pJ", __func__, job_ptr);
+ 
+@@ -18029,6 +18203,10 @@
+ 	bool force_requeue = false;
+ 	time_t now = time(NULL);
+ 	uint32_t completing_flags = 0;
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	if (monthly_quota_completion_is_deferred(job_ptr))
++		return ESLURM_DISABLED;
++#endif
+ 
+ 	if (config_update != slurm_conf.last_update) {
+ 		requeue_nohold_prolog = (xstrcasestr(slurm_conf.sched_params,
+--- a/src/slurmctld/agent.c
++++ b/src/slurmctld/agent.c
+@@ -1153,7 +1153,8 @@
+ 			else {
+ #if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
+ 				/* A shortcut response is not node cleanup evidence. */
+-				monthly_quota_node_completion(job_ptr, false);
++				if (!monthly_quota_completion_is_deferred(job_ptr))
++					monthly_quota_node_completion(job_ptr, false);
+ #endif
+ 				if (job_epilog_complete(job_ptr, ret_data_info->node_name, rc))
+ 					run_scheduler = true;
+--- a/src/slurmctld/controller.c
++++ b/src/slurmctld/controller.c
+@@ -680,8 +680,10 @@
+     defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
+ 		int quota_fd = slurmscriptd_mode ? -1 : monthly_quota_inherited_witness_fd();
+ 		int proof_fd = slurmscriptd_mode ? -1 : monthly_quota_inherited_nodeproof_fd();
+-		if (quota_fd >= 0 && proof_fd >= 0 && quota_fd != proof_fd) {
+-			int keep[] = { quota_fd, proof_fd, -1 };
++		int nodepid_fd = slurmscriptd_mode ? -1 : monthly_quota_inherited_nodepid_fd();
++		if (quota_fd >= 0 && proof_fd >= 0 && nodepid_fd >= 0 &&
++		    quota_fd != proof_fd && quota_fd != nodepid_fd && proof_fd != nodepid_fd) {
++			int keep[] = { quota_fd, proof_fd, nodepid_fd, -1 };
+ 			closeall_except(STDERR_FILENO + 1, keep);
+ 		} else
+ #endif
+@@ -1129,7 +1131,11 @@
+ 				quota_recovery = monthly_quota_reconcile_cancelled(job_list);
+ 				unlock_slurmctld(cancel_locks);
+ 			}
+-			if (quota_recovery)
++			if (quota_recovery > 0) {
++				info("monthly quota recovery waiting for cleanup reconciliation; GPU admission remains closed");
++				if (monthly_quota_recovery_worker_start())
++					error("monthly quota recovery worker unavailable; GPU admission remains closed");
++			} else if (quota_recovery < 0)
+ 				error("monthly quota recovery failed; GPU admission remains closed");
+ 			else if (monthly_quota_control_start())
+ 				error("monthly quota control unavailable; reservations cannot be issued");
+@@ -1211,6 +1217,7 @@
+     defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
+ 		/* No Slurm locks held: control_stop joins the broker thread. */
+ 		monthly_quota_control_stop();
++		monthly_quota_recovery_worker_stop();
+ 		/* A reconfiguration repeats this loop in the same process. Keep
+ 		 * the held ledger descriptors and live accounting state intact. */
+ 		if (!reconfig)
+--- a/src/slurmctld/node_scheduler.c
++++ b/src/slurmctld/node_scheduler.c
+@@ -102,6 +102,23 @@
+ #include "src/stepmgr/gres_stepmgr.h"
+ #include "src/stepmgr/stepmgr.h"
+ 
++/* The start wrapper verifies this marker in a manifest-pinned controller.
++ * It is emitted only by a build containing all mandatory quota hooks. */
++#if TIME_TRANSACTION_PROTOTYPE && \
++    defined(TIME_ENABLE_SELECTABLE_V2) && TIME_ENABLE_SELECTABLE_V2 && \
++    defined(TIME_ENABLE_MONTHLY_LIFECYCLE_DRAFT) && TIME_ENABLE_MONTHLY_LIFECYCLE_DRAFT && \
++    defined(TIME_ENABLE_MONTHLY_SLUID_DRAFT) && TIME_ENABLE_MONTHLY_SLUID_DRAFT && \
++    defined(TIME_ENABLE_MONTHLY_QUERY2_DRAFT) && TIME_ENABLE_MONTHLY_QUERY2_DRAFT && \
++    defined(TIME_ENABLE_MONTHLY_TOMBSTONES_DRAFT) && TIME_ENABLE_MONTHLY_TOMBSTONES_DRAFT && \
++    defined(TIME_ENABLE_MONTHLY_PRIORITY_DRAFT) && TIME_ENABLE_MONTHLY_PRIORITY_DRAFT
++__attribute__((used)) static const char time_quota_build_guard[] =
++#if defined(TIME_ENABLE_MONTHLY_TEST_FIXTURE) && TIME_ENABLE_MONTHLY_TEST_FIXTURE
++	"PRO6000D_TEST_ONLY_GPU_ALLOCATION_GATE_BUILD_V1";
++#else
++	"PRO6000D_MANDATORY_GPU_ALLOCATION_GATE_BUILD_V1";
++#endif
++#endif
++
+ #define _DEBUG	0
+ #define MAX_FEATURES  64	/* max exclusive features "[fs1|fs2]"=2 */
+ 
+@@ -2671,6 +2688,13 @@
+ 		xassert(verify_lock(JOB_LOCK, WRITE_LOCK));
+ 		monthly_request_class = _monthly_preselect_classify(job_ptr,
+ 							    &monthly_gpu_count);
++		if (monthly_request_class > 0 && !monthly_quota_node_write_locked()) {
++			error("monthly quota refuses allocation without the node write lock");
++			job_ptr->state_reason = WAIT_ACCOUNT_POLICY;
++			xfree(job_ptr->state_desc);
++			job_ptr->state_desc = xstrdup("MonthlyGpuQuota: scheduler lock unavailable");
++			return ESLURM_ACCOUNTING_POLICY;
++		}
+ 		if (monthly_request_class < 0) {
+ 			job_ptr->state_reason = WAIT_ACCOUNT_POLICY;
+ 			xfree(job_ptr->state_desc);
+@@ -3232,10 +3256,33 @@
+ 	if (monthly_prepared)
+ 		monthly_gres_plugin_called = true;
+ #endif
+-	if (select_g_select_nodeinfo_set(job_ptr) != SLURM_SUCCESS) {
++	int select_result = select_g_select_nodeinfo_set(job_ptr);
++	if (select_result != SLURM_SUCCESS) {
+ 		error("select_g_select_nodeinfo_set(%pJ): %m", job_ptr);
+ #if TIME_TRANSACTION_PROTOTYPE
+ 		if (monthly_prepared) {
++			/* A selector may report failure after completing the resource
++			 * mutation.  Only undo it if the entire node ledger proves
++			 * that this job is fully present and disjoint from its peers. */
++			int node_index = 0;
++			node_record_t *node = job_ptr->node_bitmap ?
++				next_node_bitmap(job_ptr->node_bitmap, &node_index) : NULL;
++			bool rolled_back = (select_result == TIME_QUOTA_SELECTOR_ROLLBACK_OK);
++			if (!rolled_back && node && bit_set_count(job_ptr->node_bitmap) == 1 &&
++			    select_g_quota_recovery_verify(job_ptr, node, monthly_intent.gpu_count) == SLURM_SUCCESS) {
++				if (select_g_job_fini(job_ptr) != SLURM_SUCCESS)
++					fatal("monthly quota: partial selector rollback for %pJ", job_ptr);
++				rolled_back = true;
++			}
++			if (rolled_back) {
++				FREE_NULL_LIST(job_ptr->gres_list_alloc);
++				gres_stepmgr_job_clear_alloc(job_ptr->gres_list_req);
++				gres_stepmgr_job_clear_alloc(job_ptr->gres_list_req_accum);
++				free_job_resources(&job_ptr->job_resrcs);
++				xfree(job_ptr->nodes);
++				/* The selector rollback is proven and commit has not run. */
++				monthly_gres_plugin_called = false;
++			}
+ 			(void) bb_g_job_revoke_alloc(job_ptr);
+ 			error_code = ESLURM_NODES_BUSY;
+ 			job_ptr->start_time = job_ptr->time_last_active = job_ptr->end_time = 0;
+@@ -3272,6 +3319,19 @@
+ 					(uint32_t)monthly_boundary.tv_nsec);
+ 		assoc_mgr_unlock(&tres_lock);
+ 		if (committed != 0) {
++			/* No launch or node allocation has occurred yet.  Remove the
++			 * selector/GRES reservation only after verifying the complete
++			 * node ledger; uncertain partial mutation must stop scheduling. */
++			int node_index = 0;
++			node_record_t *node = job_ptr->node_bitmap ?
++				next_node_bitmap(job_ptr->node_bitmap, &node_index) : NULL;
++			if (!node || bit_set_count(job_ptr->node_bitmap) != 1 ||
++			    select_g_quota_recovery_verify(job_ptr, node, monthly_intent.gpu_count) != SLURM_SUCCESS ||
++			    select_g_job_fini(job_ptr) != SLURM_SUCCESS)
++				fatal("monthly quota: failed to safely roll back unlaunched allocation for %pJ", job_ptr);
++			FREE_NULL_LIST(job_ptr->gres_list_alloc);
++			free_job_resources(&job_ptr->job_resrcs);
++			xfree(job_ptr->nodes);
+ 			(void) bb_g_job_revoke_alloc(job_ptr);
+ 			error_code = ESLURM_ACCOUNTING_POLICY;
+ 			job_ptr->start_time = job_ptr->time_last_active = job_ptr->end_time = 0;
+--- a/src/slurmctld/monthly_quota_control.c
++++ b/src/slurmctld/monthly_quota_control.c
+@@ -26,6 +26,9 @@
+ static int listener = -1, wakepipe[2] = {-1, -1};
+ static pthread_t thread;
+ static bool started;
++static pthread_t recovery_thread;
++static int recovery_wake[2] = {-1, -1};
++static bool recovery_started;
+ static char socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
+ static dev_t socket_dev;
+ static ino_t socket_ino;
+@@ -86,6 +89,14 @@
+ 		rc = monthly_quota_cancel1((uid_t)uid, part[2]);
+ 		unlock_slurmctld(grant_lock);
+ 		if (!rc) snprintf(reply, sizeof(reply), "OK\n");
++	} else if (count == 6 && !strcmp(part[0], "CANCEL_REQUEST1") &&
++	    !number(part[3], &tier_num) && tier_num < 3 &&
++	    !number(part[4], &gpu_num) && gpu_num > 0 && gpu_num <= UINT32_MAX &&
++	    !number(part[5], &minutes_num) && minutes_num > 0 && minutes_num <= UINT32_MAX) {
++		lock_slurmctld(grant_lock);
++		rc = monthly_quota_cancel_request1((uid_t)uid, part[2], tier_num, gpu_num, minutes_num);
++		unlock_slurmctld(grant_lock);
++		if (!rc) snprintf(reply, sizeof(reply), "OK\n");
+ 	} else if (count == 4 && !strcmp(part[0], "CANCEL_BOUND1") &&
+ 	    !number(part[3], &bind_job) && bind_job > 0 && bind_job <= UINT32_MAX) {
+ 		lock_slurmctld(grant_lock);
+@@ -161,11 +172,20 @@
+ 				 view.active_gpu_count, view.active_allocation_count,
+ 				 view.observed_sec, view.observed_nsec, view.wal_sequence);
+ 		}
++	} else if (count == 3 && uid == 0 && !strcmp(part[0], "VERIFY_SELECTOR1") &&
++		   !number(part[2], &bind_job) && bind_job > 0 && bind_job <= UINT32_MAX) {
++		slurmctld_lock_t audit_lock = { .conf = READ_LOCK, .job = READ_LOCK, .node = READ_LOCK };
++		job_record_t *job;
++		lock_slurmctld(audit_lock);
++		job = find_job_record((uint32_t)bind_job);
++		rc = monthly_quota_selector_audit(job);
++		unlock_slurmctld(audit_lock);
++		if (!rc) snprintf(reply, sizeof(reply), "OK\n");
+ 	} else if (count == 2 && uid == 0 && !strcmp(part[0], "READY1")) {
+ 		lock_slurmctld(config_lock);
+ 		if (monthly_quota_selectable_ready()) {
+ 			rc = 0;
+-			snprintf(reply, sizeof(reply), "OK TIME26_SELECTABLE_ENDING2_ROLL1_RANK1_CANCEL_BOUND1_AUTOCANCEL1_RECONCILE1_NODEPROOF1_SELECT_DONE1\n");
++			snprintf(reply, sizeof(reply), "OK TIME26_SELECTABLE_ENDING2_ROLL1_RANK1_CANCEL_BOUND1_AUTOCANCEL1_RECONCILE1_NODEPROOF1_SELECT_DONE1_GPUMAP1_CANCEL_EMPTY1\n");
+ 		}
+ 		unlock_slurmctld(config_lock);
+ 	} else if (count == 2 && !strcmp(part[0], "SNAP2")) {
+@@ -257,9 +277,95 @@
+ 	    after.st_dev != before.st_dev || after.st_ino != before.st_ino) return -1;
+ 	if (unlink(socket_path)) return -1;
+ 	info("monthly quota: removed verified stale control socket");
++	return 0;
++}
++
++/* The proof journal can be completed after the controller has restarted,
++ * including when the node's final RPC was lost. Freeze job and node state before selecting a proof; the settlement
++ * function then serializes against the WAL writer. */
++static void *recovery_loop(void *unused)
++{
++	struct pollfd wake = { .fd = recovery_wake[0], .events = POLLIN };
++	slurmctld_lock_t recovery_locks = {
++		.conf = READ_LOCK, .job = WRITE_LOCK, .node = WRITE_LOCK, .fed = READ_LOCK
++	};
++	assoc_mgr_lock_t tres_lock = { .tres = READ_LOCK };
++	(void) unused;
++	for (;;) {
++		monthly_quota_repair_t repaired;
++		int rc, repair;
++		lock_slurmctld(recovery_locks);
++		rc = monthly_quota_recovery_settle();
++		repair = rc < 0 ? -1 : monthly_quota_recovery_repair_one(&repaired);
++		unlock_slurmctld(recovery_locks);
++		if (rc < 0 || repair < 0) {
++			error("monthly quota recovery failed; admission remains closed");
++			break;
++		}
++		if (rc > 0)
++			info("monthly quota settled %d verified recovered allocation(s)", rc);
++		if (repair > 0) {
++			/* The job remains quarantined during the unlocked save. All
++			 * job snapshots are serialized, including their rename+fsync. */
++			if (dump_all_job_state() != SLURM_SUCCESS)
++				fatal("quota recovery job checkpoint failed; refusing scheduling");
++			lock_slurmctld(recovery_locks);
++			rc = monthly_quota_recovery_ack_saved(&repaired);
++			unlock_slurmctld(recovery_locks);
++			if (rc) break;
++			info("monthly quota restored and checkpointed JobId=%u", repaired.job_id);
++		}
++		/* Recheck every job and allocation before reopening admission.
++		 * Job write lock also prevents scheduling between reconciliation,
++		 * terminal-cancellation recovery and control socket startup. */
++		lock_slurmctld(recovery_locks);
++		assoc_mgr_lock(&tres_lock);
++		rc = monthly_quota_reconcile(job_list);
++		assoc_mgr_unlock(&tres_lock);
++		if (!rc && monthly_quota_reconcile_cancelled(job_list))
++			fatal("quota recovery cancellation reconciliation failed; refusing scheduling");
++		if (!rc && monthly_quota_control_start())
++			fatal("quota recovery control socket unavailable; refusing scheduling");
++		unlock_slurmctld(recovery_locks);
++		if (rc < 0) break;
++		if (!rc) {
++			info("monthly quota recovery complete; admission is available");
++			break;
++		}
++		do { rc = poll(&wake, 1, 1000); } while (rc < 0 && errno == EINTR);
++		if (rc != 0)
++			break;
++	}
++	return NULL;
++}
++
++int monthly_quota_recovery_worker_start(void)
++{
++	if (recovery_started || pipe2(recovery_wake, O_CLOEXEC))
++		return -1;
++	if (pthread_create(&recovery_thread, NULL, recovery_loop, NULL)) {
++		close(recovery_wake[0]); close(recovery_wake[1]);
++		recovery_wake[0] = recovery_wake[1] = -1;
++		return -1;
++	}
++	recovery_started = true;
+ 	return 0;
+ }
+ 
++void monthly_quota_recovery_worker_stop(void)
++{
++	ssize_t sent;
++	if (!recovery_started)
++		return;
++	do { sent = write(recovery_wake[1], "x", 1); } while (sent < 0 && errno == EINTR);
++	if (sent != 1) { close(recovery_wake[1]); recovery_wake[1] = -1; }
++	pthread_join(recovery_thread, NULL);
++	close(recovery_wake[0]);
++	if (recovery_wake[1] >= 0) close(recovery_wake[1]);
++	recovery_wake[0] = recovery_wake[1] = -1;
++	recovery_started = false;
++}
++
+ int monthly_quota_control_start(void)
+ {
+ 	struct sockaddr_un addr = {0};
+--- a/src/slurmctld/locks.c
++++ b/src/slurmctld/locks.c
+@@ -54,6 +54,15 @@
+ 	PTHREAD_RWLOCK_INITIALIZER,
+ };
+ 
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++/* Production builds normally omit verify_lock. Keep a separate thread-local
++ * record so quota rollback cannot run without owning the node write lock. */
++static __thread lock_level_t quota_node_lock = NO_LOCK;
++extern bool monthly_quota_node_write_locked(void)
++{
++	return quota_node_lock == WRITE_LOCK;
++}
++#endif
+ #ifndef NDEBUG
+ /*
+  * Used to protect against double-locking within a single thread. Calling
+@@ -141,6 +150,9 @@
+ 		slurm_rwlock_rdlock(&slurmctld_locks[SELECT_NODE_LOCK]);
+ 	else if (lock_levels.select_node == WRITE_LOCK)
+ 		slurm_rwlock_wrlock(&slurmctld_locks[SELECT_NODE_LOCK]);
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	quota_node_lock = lock_levels.node;
++#endif
+ }
+ 
+ /* unlock_slurmctld - Issue the required unlock requests in a well
+@@ -148,6 +160,9 @@
+ extern void unlock_slurmctld(slurmctld_lock_t lock_levels)
+ {
+ 	xassert(_clear_locks(lock_levels));
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	quota_node_lock = NO_LOCK;
++#endif
+ 
+ 	if (lock_levels.select_node)
+ 		slurm_rwlock_unlock(&slurmctld_locks[SELECT_NODE_LOCK]);
+--- a/src/slurmctld/locks.h
++++ b/src/slurmctld/locks.h
+@@ -119,6 +119,9 @@
+ 	SELECT_NODE_LOCK,
+ }	lock_datatype_t;
+ 
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++extern bool monthly_quota_node_write_locked(void);
++#endif
+ #ifndef NDEBUG
+ extern bool verify_lock(lock_datatype_t datatype, lock_level_t level);
+ #endif
+--- a/src/slurmd/slurmd/req.c
++++ b/src/slurmd/slurmd/req.c
+@@ -4515,6 +4515,14 @@
+ #if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
+ /* Root-owned append-only node evidence survives a lost controller reply.
+  * The private file is provisioned separately; never recreate it on error. */
++/* The release wrapper requires this compile-time marker in the pinned node. */
++__attribute__((used)) static const char time_quota_node_build_guard[] =
++#if defined(TIME_ENABLE_MONTHLY_TEST_FIXTURE) && TIME_ENABLE_MONTHLY_TEST_FIXTURE
++	"PRO6000D_TEST_ONLY_NODE_CLEANUP_PROOF_BUILD_V1";
++#else
++	"PRO6000D_DURABLE_NODE_CLEANUP_PROOF_BUILD_V1";
++#endif
++
+ static int _monthly_write_node_proof(const kill_job_msg_t *req, bool reuse_only)
+ {
+ 	static const char header[] = "P6NP1|HEADER|1\n";
+--- a/src/slurmd/slurmd/slurmd.c
++++ b/src/slurmd/slurmd/slurmd.c
+@@ -62,6 +62,7 @@
+ #include <sys/resource.h>
+ #include <sys/socket.h>
+ #include <sys/stat.h>
++#include <sys/sysmacros.h>
+ #include <sys/time.h>
+ #include <sys/types.h>
+ #include <sys/utsname.h>
+@@ -779,8 +780,112 @@
+ 
+ 	_decrement_thd_count();
+ 	return NULL;
++}
++
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++/* Publish only after the in-process GRES mapping has been checked.  The
++ * root controller wrapper binds its pidfd to this exact boot/process. */
++static int _quota_write_node_ready(void)
++{
++	const char *path = getenv("TIME_QUOTA_NODE_READY_FILE");
++	char boot[64], statline[4096], *cursor, *field, *save;
++	char data[256], temporary[96] = "", *parent, *slash;
++	FILE *stream;
++	struct stat dir;
++	unsigned long long ticks = 0;
++	int dfd = -1, fd = -1, rc = -1, len;
++	if (!path) return -1;
++#if defined(TIME_ENABLE_MONTHLY_TEST_FIXTURE) && TIME_ENABLE_MONTHLY_TEST_FIXTURE
++	if (strncmp(path, "/tmp/time26-gpu-probe-", strlen("/tmp/time26-gpu-probe-")))
++#endif
++	if (strcmp(path, "/var/lib/pro6000d-monthly/node-ready")) return -1;
++	stream = fopen("/proc/sys/kernel/random/boot_id", "r");
++	if (!stream) return -1;
++	if (!fgets(boot, sizeof(boot), stream)) { fclose(stream); return -1; }
++	fclose(stream); boot[strcspn(boot, "\r\n")] = '\0';
++	if (strlen(boot) != 36 || strspn(boot, "0123456789abcdef-") != 36) return -1;
++	stream = fopen("/proc/self/stat", "r");
++	if (!stream) return -1;
++	if (!fgets(statline, sizeof(statline), stream)) { fclose(stream); return -1; }
++	fclose(stream);
++	cursor = strrchr(statline, ')');
++	if (!cursor) return -1;
++	cursor++;
++	field = strtok_r(cursor, " ", &save);
++	for (int i = 0; i < 19 && field; i++) field = strtok_r(NULL, " ", &save);
++	if (!field || sscanf(field, "%llu", &ticks) != 1 || !ticks) return -1;
++	len = snprintf(data, sizeof(data), "P6NR1|%ld|%llu|%s\n", (long)getpid(), ticks, boot);
++	if (len <= 0 || (size_t)len >= sizeof(data)) return -1;
++	parent = xstrdup(path); slash = strrchr(parent, '/');
++	if (!slash || slash == parent) goto done;
++	*slash = '\0';
++	dfd = open(parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
++	if (dfd < 0 || fstat(dfd, &dir) || !S_ISDIR(dir.st_mode) || dir.st_uid != 0 || (dir.st_mode & 0077)) goto done;
++	snprintf(temporary, sizeof(temporary), ".node-ready-%ld.tmp", (long)getpid());
++	fd = openat(dfd, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
++	if (fd < 0 || write(fd, data, len) != len || fsync(fd)) goto done;
++	if (close(fd)) { fd = -1; goto done; }
++	fd = -1;
++	if (renameat(dfd, temporary, dfd, "node-ready") || fsync(dfd)) goto done;
++	rc = 0;
++done:
++	if (fd >= 0) close(fd);
++	if (dfd >= 0) { if (rc && temporary[0]) unlinkat(dfd, temporary, 0); close(dfd); }
++	xfree(parent);
++	return rc;
+ }
+ 
++/* Verify Slurm's parsed bitmap-index-to-device mapping, including NVML
++ * merges, before this node can register for monthly quota scheduling. */
++static bool _quota_node_devices_valid(void)
++{
++	list_t *devices = gres_g_get_devices(NULL, false, 0, NULL, 0, NULL);
++	list_itr_t *it;
++	gres_device_t *device;
++	bool seen[128] = {0}, valid = true, fixture = false;
++	unsigned count = 0;
++#if defined(TIME_ENABLE_MONTHLY_TEST_FIXTURE) && TIME_ENABLE_MONTHLY_TEST_FIXTURE
++	const char *path = getenv("TIME26_TEST_GPU_INFO_DIR");
++	char hostname[64];
++	if (path && !gethostname(hostname, sizeof(hostname)) && !strcmp(hostname, "colima") &&
++	    access("/dev/nvidiactl", F_OK) != 0 &&
++	    !strncmp(path, "/tmp/time26-gpu-probe-", strlen("/tmp/time26-gpu-probe-"))) fixture = true;
++#endif
++	if (!devices) return false;
++	it = list_iterator_create(devices);
++	while ((device = list_next(it))) {
++		char expected[64];
++		struct stat st;
++		int index = device->index;
++		if (index < 0 || index >= 128 || !device->path || seen[index]) { valid = false; break; }
++		if (fixture) {
++			if (index > 1) { valid = false; break; }
++			snprintf(expected, sizeof(expected), "%s", index ? "/dev/zero" : "/dev/null");
++		} else
++			snprintf(expected, sizeof(expected), "/dev/nvidia%d", index);
++		if (strcmp(device->path, expected) || lstat(expected, &st) || !S_ISCHR(st.st_mode) ||
++		    st.st_uid != 0 || device->dev_desc.type != DEV_TYPE_CHAR ||
++		    device->dev_desc.major != major(st.st_rdev) || device->dev_desc.minor != minor(st.st_rdev) ||
++		    (!fixture && (major(st.st_rdev) != 195 || minor(st.st_rdev) != (unsigned)index))) {
++			valid = false; break;
++		}
++		seen[index] = true; count++;
++	}
++	list_iterator_destroy(it);
++	FREE_NULL_LIST(devices);
++	if (!count) return false;
++	for (unsigned i = 0; i < count; i++) if (!seen[i]) valid = false;
++	if (!fixture) {
++		for (unsigned i = 0; i < 128; i++) {
++			char path[64]; struct stat st;
++			snprintf(path, sizeof(path), "/dev/nvidia%u", i);
++			if (!lstat(path, &st) && !seen[i]) valid = false;
++		}
++	}
++	return valid;
++}
++#endif
++
+ static int _load_gres()
+ {
+ 	int rc;
+@@ -799,7 +904,13 @@
+ 				     (void *)&xcpuinfo_abs_to_mac,
+ 				     (void *)&xcpuinfo_mac_to_abs);
+ 	FREE_NULL_LIST(gres_list);
+-
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	if (rc == SLURM_SUCCESS && getenv("TIME_QUOTA_NODE_PROOF_FILE") &&
++	    (!_quota_node_devices_valid() || _quota_write_node_ready())) {
++		error("monthly quota node mapping or readiness evidence is not trustworthy");
++		rc = SLURM_ERROR;
++	}
++#endif
+ 	return rc;
+ }
+ 

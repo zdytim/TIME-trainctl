@@ -1,0 +1,365 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -106,6 +106,8 @@
+ 	/* In-memory only: restart during cleanup fails closed. */
+ 	bool selector_released;
+ 	bool release_started; /* persisted before selector deallocation */
++	bool proof_seen;
++	mq_time_t proof_at;
+ 	uint32_t final_state, final_exit, final_derived, final_reason, final_requid;
+ 	uint64_t final_start, final_end;
+ 	char final_node[MQ_MAX_FIELD];
+@@ -116,6 +118,8 @@
+ static int mq_fd = -1;
+ static int mq_checkpoint_fd = -1;
+ static int mq_witness_fd = -1;
++static int mq_nodeproof_fd = -1;
++static off_t mq_nodeproof_offset;
+ static bool mq_initialized;
+ static bool mq_enabled;
+ static bool mq_healthy;
+@@ -1500,6 +1504,76 @@
+ 		}
+ 	}
+ 	return (ferror(stream) || used) ? -1 : 0;
++}
++
++/* Node-written proof is root-owned and opened before dropping privilege.
++ * Match the complete allocation and termination identity, never just job ID. */
++static int _find_node_proof(const mq_active_record_t *active)
++{
++	static const char header[] = "P6NP1|HEADER|1\n";
++	struct stat st;
++	mq_time_t now;
++	FILE *stream = NULL;
++	char line[512];
++	size_t length;
++	int read_rc, result = 0, duplicate;
++	off_t next_offset;
++	if (mq_nodeproof_fd < 0 || _now(&now) || flock(mq_nodeproof_fd, LOCK_SH)) return -1;
++	if (fstat(mq_nodeproof_fd, &st) || st.st_size <= 0 || st.st_size < mq_nodeproof_offset ||
++	    lseek(mq_nodeproof_fd, mq_nodeproof_offset, SEEK_SET) < 0) {
++		flock(mq_nodeproof_fd, LOCK_UN); return -1;
++	}
++	duplicate = dup(mq_nodeproof_fd);
++	stream = duplicate >= 0 ? fdopen(duplicate, "r") : NULL;
++	if (!stream) {
++		if (duplicate >= 0) close(duplicate);
++		flock(mq_nodeproof_fd, LOCK_UN); return -1;
++	}
++	if (!mq_nodeproof_offset) {
++		if (_read_wal_line(stream, line, sizeof(line), &length) != 1 || strcmp(line, header) ||
++		    (next_offset = ftello(stream)) < 0) { result = -1; goto done; }
++		mq_nodeproof_offset = next_offset;
++	}
++	while ((read_rc = _read_wal_line(stream, line, sizeof(line), &length)) > 0) {
++		char *parts[11], *cursor, *item;
++		mq_active_record_t *candidate;
++		mq_time_t proof;
++		int count = 0;
++		uint32_t job, uid, state, exit_code, derived, nsec;
++		uint64_t sluid, start, sec;
++		line[length - 1] = '\0'; cursor = line;
++		while ((item = strsep(&cursor, "|")) && count < 11) parts[count++] = item;
++		if (item || cursor || count != 11 || strcmp(parts[0], "P6NP1") ||
++		    _parse_u32(parts[1], &job) || _parse_u64(parts[2], &sluid) || !sluid ||
++		    _parse_u32(parts[3], &uid) || _parse_u32(parts[4], &state) ||
++		    _parse_u32(parts[5], &exit_code) || _parse_u32(parts[6], &derived) ||
++		    _parse_u64(parts[7], &start) || _parse_u64(parts[8], &sec) ||
++		    _parse_u32(parts[9], &nsec) || nsec >= MQ_NSEC_PER_SEC || !_field_safe(parts[10])) {
++			result = -1; break;
++		}
++		candidate = _find_active_job(job);
++		if (candidate && candidate->sluid == sluid) {
++			if (!candidate->release_started || uid != candidate->uid ||
++			    state != candidate->final_state || exit_code != candidate->final_exit ||
++			    derived != candidate->final_derived || start != candidate->final_start ||
++			    sec < candidate->final_end || sec > now.sec ||
++			    (sec == now.sec && nsec > now.nsec) || strcmp(parts[10], candidate->final_node)) {
++				result = -1; break;
++			}
++			proof.sec = sec; proof.nsec = nsec;
++			if (!candidate->proof_seen || _time_cmp(&proof, &candidate->proof_at) < 0)
++				candidate->proof_at = proof;
++			candidate->proof_seen = true;
++		}
++		if ((next_offset = ftello(stream)) < 0) { result = -1; break; }
++		mq_nodeproof_offset = next_offset;
++	}
++	if (read_rc < 0) result = -1;
++	if (!result && active && active->proof_seen) result = 1;
++done:
++	fclose(stream);
++	flock(mq_nodeproof_fd, LOCK_UN);
++	return result;
+ }
+ 
+ static int _replay_wal(void)
+@@ -1632,6 +1706,24 @@
+ 	    fstat((int)raw, &st) || !S_ISREG(st.st_mode) || st.st_uid != 0 ||
+ 	    st.st_nlink != 1 || (st.st_mode & 0077) || st.st_size == 0 ||
+ 	    fcntl((int)raw, F_SETFD, FD_CLOEXEC)) return -1;
++	return (int)raw;
++}
++
++/* Opened by the root wrapper; this read-only descriptor never escapes exec. */
++int monthly_quota_inherited_nodeproof_fd(void)
++{
++	const char *text = getenv("TIME_QUOTA_NODE_PROOF_FD");
++	uint64_t raw;
++	struct stat st;
++	int flags;
++	static const char header[] = "P6NP1|HEADER|1\n";
++	char actual[sizeof(header) - 1];
++	if (!text || _parse_u64(text, &raw) || raw < 3 || raw > INT_MAX) return -1;
++	flags = fcntl((int)raw, F_GETFL);
++	if (flags < 0 || (flags & O_ACCMODE) != O_RDONLY || fstat((int)raw, &st) ||
++	    !S_ISREG(st.st_mode) || st.st_uid != 0 || st.st_nlink != 1 || (st.st_mode & 0077) ||
++	    pread((int)raw, actual, sizeof(actual), 0) != sizeof(actual) ||
++	    memcmp(actual, header, sizeof(actual)) || fcntl((int)raw, F_SETFD, FD_CLOEXEC)) return -1;
+ 	return (int)raw;
+ }
+ 
+@@ -1734,8 +1826,11 @@
+ 	    (stat_buf.st_mode & 0077) || _read_checkpoint(&checkpoint_seq, digest) ||
+ 	    checkpoint_seq != mq_seq || _open_witness(mq_seq, digest))
+ 		goto fail;
++	mq_nodeproof_fd = monthly_quota_inherited_nodeproof_fd();
++	if (mq_nodeproof_fd < 0 || mq_nodeproof_fd == mq_witness_fd || _find_node_proof(NULL) < 0) goto fail;
+ 	return 0;
+ fail:
++	if (mq_nodeproof_fd >= 0) { close(mq_nodeproof_fd); mq_nodeproof_fd = -1; }
+ 	if (mq_checkpoint_fd >= 0) {
+ 		close(mq_checkpoint_fd);
+ 		mq_checkpoint_fd = -1;
+@@ -2855,7 +2950,7 @@
+ 	active = _find_active_job(job_ptr->job_id);
+ 	if (mq_enabled && active) {
+ 		if (!proven || !active->selector_released || !active->sluid ||
+-		    active->sluid != job_ptr->step_id.sluid)
++		    active->sluid != job_ptr->step_id.sluid || _find_node_proof(active) != 1)
+ 			_mark_unhealthy("node cleanup not proven for allocation");
+ 		else
+ 			can_release = true;
+@@ -3610,7 +3705,7 @@
+     defined(TIME_ENABLE_MONTHLY_PRIORITY_DRAFT) && TIME_ENABLE_MONTHLY_PRIORITY_DRAFT
+ 	pthread_mutex_lock(&mq_lock);
+ 	ready = mq_enabled && mq_healthy && mq_reconciled && mq_selectable_replay &&
+-		mq_fd >= 0 && mq_checkpoint_fd >= 0 && mq_witness_fd >= 0;
++		mq_fd >= 0 && mq_checkpoint_fd >= 0 && mq_witness_fd >= 0 && mq_nodeproof_fd >= 0;
+ 	pthread_mutex_unlock(&mq_lock);
+ #endif
+ 	return ready;
+@@ -3621,7 +3716,7 @@
+ 	bool ready;
+ 	pthread_mutex_lock(&mq_lock);
+ 	ready = mq_enabled && mq_healthy && mq_reconciled &&
+-		(mq_fd >= 0) && (mq_checkpoint_fd >= 0) && (mq_witness_fd >= 0);
++		(mq_fd >= 0) && (mq_checkpoint_fd >= 0) && (mq_witness_fd >= 0) && (mq_nodeproof_fd >= 0);
+ 	pthread_mutex_unlock(&mq_lock);
+ 	return ready;
+ }
+@@ -3651,6 +3746,11 @@
+ 		close(mq_witness_fd);
+ 		mq_witness_fd = -1;
+ 	}
++	if (mq_nodeproof_fd >= 0) {
++		close(mq_nodeproof_fd);
++		mq_nodeproof_fd = -1;
++	}
++	mq_nodeproof_offset = 0;
+ 	_free_memory();
+ 	xfree(mq_path);
+ 	mq_path = NULL;
+--- a/src/slurmctld/monthly_quota.h
++++ b/src/slurmctld/monthly_quota.h
+@@ -78,6 +78,7 @@
+ /* Call only inside slurmctld. Future transport must authenticate the caller.
+  * Returns -1 and leaves output unchanged when disabled/unhealthy/unknown. */
+ extern int monthly_quota_inherited_witness_fd(void);
++extern int monthly_quota_inherited_nodeproof_fd(void);
+ extern int monthly_quota_snapshot(uid_t uid, monthly_quota_snapshot_t *out);
+ 
+ /* Atomic read-only snapshot at a supplied realtime value. Failure leaves
+--- a/src/slurmctld/controller.c
++++ b/src/slurmctld/controller.c
+@@ -679,8 +679,9 @@
+ #if defined(TIME_ENABLE_MONTHLY_LIFECYCLE_DRAFT) && TIME_ENABLE_MONTHLY_LIFECYCLE_DRAFT && \
+     defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
+ 		int quota_fd = slurmscriptd_mode ? -1 : monthly_quota_inherited_witness_fd();
+-		if (quota_fd >= 0) {
+-			int keep[] = { quota_fd, -1 };
++		int proof_fd = slurmscriptd_mode ? -1 : monthly_quota_inherited_nodeproof_fd();
++		if (quota_fd >= 0 && proof_fd >= 0 && quota_fd != proof_fd) {
++			int keep[] = { quota_fd, proof_fd, -1 };
+ 			closeall_except(STDERR_FILENO + 1, keep);
+ 		} else
+ #endif
+--- a/src/slurmctld/monthly_quota_control.c
++++ b/src/slurmctld/monthly_quota_control.c
+@@ -165,7 +165,7 @@
+ 		lock_slurmctld(config_lock);
+ 		if (monthly_quota_selectable_ready()) {
+ 			rc = 0;
+-			snprintf(reply, sizeof(reply), "OK TIME26_SELECTABLE_ENDING2_ROLL1_RANK1_CANCEL_BOUND1_AUTOCANCEL1_RECONCILE1\n");
++			snprintf(reply, sizeof(reply), "OK TIME26_SELECTABLE_ENDING2_ROLL1_RANK1_CANCEL_BOUND1_AUTOCANCEL1_RECONCILE1_NODEPROOF1\n");
+ 		}
+ 		unlock_slurmctld(config_lock);
+ 	} else if (count == 2 && !strcmp(part[0], "SNAP2")) {
+--- a/src/slurmd/slurmd/req.c
++++ b/src/slurmd/slurmd/req.c
+@@ -47,6 +47,7 @@
+ #include <fcntl.h>
+ #include <ftw.h>
+ #include <grp.h>
++#include <inttypes.h>
+ #ifdef HAVE_NUMA
+ #undef NUMA_VERSION1_COMPATIBILITY
+ #include <numa.h>
+@@ -57,6 +58,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/param.h>
++#include <sys/file.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
+ #include <sys/un.h>
+@@ -4507,7 +4509,94 @@
+ 		    !strncasecmp(start, token, sizeof(token) - 1)) return true;
+ 	}
+ 	return false;
++}
++#endif
++
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++/* Root-owned append-only node evidence survives a lost controller reply.
++ * The private file is provisioned separately; never recreate it on error. */
++static int _monthly_write_node_proof(const kill_job_msg_t *req, bool reuse_only)
++{
++	static const char header[] = "P6NP1|HEADER|1\n";
++	const char *path = getenv("TIME_QUOTA_NODE_PROOF_FILE");
++	char *parent, *slash, buf[512], actual[sizeof(header) - 1];
++	struct stat directory, info;
++	struct timespec now;
++	int fd = -1, rc = -1, length;
++	size_t offset;
++	if (!path) path = "/var/lib/pro6000d-monthly/node-proof.wal";
++	if (path[0] != '/' || !req->step_id.sluid || !req->step_id.job_id ||
++	    req->start_time <= 0 || !conf->node_name || !conf->node_name[0] ||
++	    strpbrk(conf->node_name, "| \t\r\n")) return -1;
++	parent = xstrdup(path);
++	slash = strrchr(parent, '/');
++	if (!slash || slash == parent) goto out;
++	*slash = '\0';
++	if (lstat(parent, &directory) || !S_ISDIR(directory.st_mode) ||
++	    directory.st_uid != 0 || (directory.st_mode & 0077)) goto out;
++	fd = open(path, O_RDWR | O_APPEND | O_NOFOLLOW | O_CLOEXEC);
++	if (fd < 0 || fstat(fd, &info) || !S_ISREG(info.st_mode) || info.st_uid != 0 ||
++	    info.st_nlink != 1 || (info.st_mode & 0077) ||
++	    pread(fd, actual, sizeof(actual), 0) != sizeof(actual) ||
++	    memcmp(actual, header, sizeof(actual)) || flock(fd, LOCK_EX) ||
++	    clock_gettime(CLOCK_REALTIME, &now) || now.tv_sec < req->start_time || now.tv_nsec < 0)
++		goto out;
++	if (reuse_only) {
++		FILE *stream;
++		char line[512], prefix[384], *end;
++		int copy_fd = dup(fd), prefix_len;
++		bool found = false, valid = true;
++		unsigned long long sec, nsec;
++		if (copy_fd < 0 || lseek(copy_fd, 0, SEEK_SET) < 0 || !(stream = fdopen(copy_fd, "r"))) {
++			if (copy_fd >= 0) close(copy_fd);
++			goto out;
++		}
++		prefix_len = snprintf(prefix, sizeof(prefix), "P6NP1|%u|%" PRIu64 "|%u|%u|%u|%u|%" PRIu64 "|",
++				      req->step_id.job_id, (uint64_t)req->step_id.sluid,
++				      req->job_uid, req->job_state, req->exit_code,
++				      req->derived_ec, (uint64_t)req->start_time);
++		if (prefix_len <= 0 || prefix_len >= (int)sizeof(prefix) ||
++		    !fgets(line, sizeof(line), stream) || strcmp(line, header)) valid = false;
++		while (valid && fgets(line, sizeof(line), stream)) {
++			size_t len = strlen(line);
++			if (!len || line[len - 1] != '\n' || strncmp(line, "P6NP1|", 6)) { valid = false; break; }
++			if (strncmp(line, prefix, prefix_len)) continue;
++			errno = 0; sec = strtoull(line + prefix_len, &end, 10);
++			if (errno || end == line + prefix_len || *end++ != '|') { valid = false; break; }
++			char *nsec_start = end;
++			errno = 0; nsec = strtoull(nsec_start, &end, 10);
++			if (errno || end == nsec_start || *end++ != '|' || nsec >= 1000000000ULL ||
++			    sec < (uint64_t)req->start_time || sec > (uint64_t)now.tv_sec ||
++			    (sec == (uint64_t)now.tv_sec && nsec > (uint64_t)now.tv_nsec) ||
++			    strlen(end) != strlen(conf->node_name) + 1 ||
++			    strncmp(end, conf->node_name, strlen(conf->node_name)) || end[strlen(conf->node_name)] != '\n') {
++				valid = false; break;
++			}
++			found = true;
++		}
++		if (ferror(stream)) valid = false;
++		fclose(stream);
++		if (valid && found && !fsync(fd)) rc = 0;
++		goto out;
++	}
++	length = snprintf(buf, sizeof(buf), "P6NP1|%u|%" PRIu64 "|%u|%u|%u|%u|%" PRIu64 "|%" PRIu64 "|%u|%s\n",
++			  req->step_id.job_id, (uint64_t)req->step_id.sluid, req->job_uid,
++			  req->job_state, req->exit_code, req->derived_ec, (uint64_t)req->start_time,
++			  (uint64_t)now.tv_sec, (unsigned)now.tv_nsec, conf->node_name);
++	if (length <= 0 || length >= (int)sizeof(buf)) goto out;
++	for (offset = 0; offset < (size_t)length;) {
++		ssize_t n = write(fd, buf + offset, (size_t)length - offset);
++		if (n < 0 && errno == EINTR) continue;
++		if (n <= 0) goto out;
++		offset += n;
++	}
++	if (!fsync(fd)) rc = 0;
++out:
++	if (fd >= 0) close(fd);
++	xfree(parent);
++	return rc;
+ }
++
+ #endif
+ 
+ static bool _steps_completed_now(slurm_step_id_t *step_id)
+@@ -4879,6 +4968,9 @@
+ 	int             nsteps = 0;
+ 	int		delay;
+ 	bool send_response = true;
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	bool reuse_node_proof = false;
++#endif
+ 
+ 	debug("%s: starting for %pI %ps",
+ 	      __func__, &req->step_id, &req->step_id);
+@@ -5063,6 +5155,16 @@
+ 	 */
+ 	if (cred_begin_expiration(&req->step_id) < 0) {
+ 		debug("Not running epilog for %pI: %m", &req->step_id);
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++		if (_monthly_cleanup_marker_enabled()) {
++			/* An expired credential is not evidence the previous epilog
++			 * succeeded. Reuse only a matching durable success record. */
++			if (_monthly_write_node_proof(req, true))
++				rc = ESLURMD_EPILOG_FAILED;
++			else
++				reuse_node_proof = true;
++		}
++#endif
+ 		goto done;
+ 	}
+ 
+@@ -5110,8 +5212,14 @@
+ #if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
+ 	if (!_wait_state_completed(&req->step_id, 5))
+ 		rc = ESLURMD_EPILOG_FAILED;
+-	else if (rc == SLURM_SUCCESS && _monthly_cleanup_marker_enabled())
+-		rc = TIME_MONTHLY_CLEANUP_OK;
++	else if (rc == SLURM_SUCCESS && _monthly_cleanup_marker_enabled()) {
++		if (!reuse_node_proof && _monthly_write_node_proof(req, false)) {
++			error("%pI: could not persist node cleanup proof", &req->step_id);
++			rc = ESLURMD_EPILOG_FAILED;
++		} else {
++			rc = TIME_MONTHLY_CLEANUP_OK;
++		}
++	}
+ #else
+ 	(void) _wait_state_completed(&req->step_id, 5);
+ #endif

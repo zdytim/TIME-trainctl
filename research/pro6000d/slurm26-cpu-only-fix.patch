@@ -1,0 +1,29 @@
+--- a/src/slurmctld/node_scheduler.c
++++ b/src/slurmctld/node_scheduler.c
+@@ -2509,0 +2510,18 @@
++/* A nonempty unparsed resource request is not proof of a CPU-only job.
++ * Slurm commonly records --cpus-per-task as the single cpu=NUM token. */
++static bool _monthly_cpu_only_tres(const char *value)
++{
++	const char *p;
++	if (!value || !*value)
++		return true;
++	if (strncmp(value, "cpu=", 4) && strncmp(value, "cpu:", 4))
++		return false;
++	p = value + 4;
++	if (!*p)
++		return false;
++	for (; *p; p++)
++		if (*p < '0' || *p > '9')
++			return false;
++	return true;
++}
++
+@@ -2540,2 +2558,5 @@
+-		if (tres_gpu || job->tres_per_job || job->tres_per_node || job->tres_per_socket ||
+-		    job->tres_per_task)
++		if (tres_gpu || (job->gres_list_req_accum && list_count(job->gres_list_req_accum)) ||
++		    !_monthly_cpu_only_tres(job->tres_per_job) ||
++		    !_monthly_cpu_only_tres(job->tres_per_node) ||
++		    !_monthly_cpu_only_tres(job->tres_per_socket) ||
++		    !_monthly_cpu_only_tres(job->tres_per_task))

@@ -1,0 +1,105 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -106,6 +106,9 @@
+ 	/* In-memory only: restart during cleanup fails closed. */
+ 	bool selector_released;
+ 	bool release_started; /* persisted before selector deallocation */
++	uint32_t final_state, final_exit, final_derived, final_reason, final_requid;
++	uint64_t final_start, final_end;
++	char final_node[MQ_MAX_FIELD];
+ 	struct mq_active_record *next;
+ } mq_active_record_t;
+ 
+@@ -1263,13 +1266,25 @@
+ 			return -1;
+ 		return _replay_selectable_advance(&to);
+ 	}
+-	if (mq_selectable_replay && !strcmp(event, "ENDING1")) {
+-		uint64_t sluid;
+-		if (field_count != 6 || _parse_u32(fields[3], &job_id) ||
++	if (mq_selectable_replay && !strcmp(event, "ENDING2")) {
++		uint64_t sluid, submit, start, end;
++		uint32_t restart, state, exit_code, derived, reason, requid;
++		if (field_count != 17 || _parse_u32(fields[3], &job_id) ||
+ 		    _parse_u64(fields[4], &generation) || _parse_u64(fields[5], &sluid) ||
+-		    !sluid || !(active = _find_active(job_id, generation)) ||
+-		    !active->committed || active->release_started || active->sluid != sluid)
++		    _parse_u32(fields[6], &uid) || _parse_u64(fields[7], &submit) ||
++		    _parse_u32(fields[8], &restart) || _parse_u32(fields[9], &state) ||
++		    _parse_u32(fields[10], &exit_code) || _parse_u32(fields[11], &derived) ||
++		    _parse_u64(fields[12], &start) || _parse_u64(fields[13], &end) ||
++		    _parse_u32(fields[14], &reason) || _parse_u32(fields[15], &requid) ||
++		    !_field_safe(fields[16]) || !start || end < start || !sluid ||
++		    !(active = _find_active(job_id, generation)) || !active->committed ||
++		    active->release_started || active->sluid != sluid || active->uid != uid ||
++		    active->submit_sec != submit || active->restart_count != restart)
+ 			return -1;
++		active->final_state = state; active->final_exit = exit_code;
++		active->final_derived = derived; active->final_reason = reason;
++		active->final_requid = requid; active->final_start = start; active->final_end = end;
++		memcpy(active->final_node, fields[16], strlen(fields[16]) + 1);
+ 		active->release_started = true;
+ 		return 0;
+ 	}
+@@ -1503,7 +1518,7 @@
+ 	if (!stream)
+ 		return -1;
+ 	while ((read_rc = _read_wal_line(stream, line, sizeof(line), &line_len)) > 0) {
+-		char *fields[16];
++		char *fields[20];
+ 		char *save = line;
+ 		char *field;
+ 		int field_count = 0;
+@@ -2777,19 +2792,37 @@
+ void monthly_quota_begin_release(struct job_record *job_ptr)
+ {
+ 	mq_active_record_t *active;
++	node_record_t *node = NULL;
++	int node_index = 0;
+ 	if (!job_ptr)
+ 		return;
+ 	pthread_mutex_lock(&mq_lock);
+ 	active = _find_active_job(job_ptr->job_id);
+ 	if (mq_enabled && active) {
++		if (job_ptr->node_bitmap && bit_set_count(job_ptr->node_bitmap) == 1)
++			node = next_node_bitmap(job_ptr->node_bitmap, &node_index);
+ 		if (!mq_healthy || !mq_reconciled || !mq_selectable_replay ||
+ 		    !active->committed || active->release_started || !active->sluid ||
+ 		    active->sluid != job_ptr->step_id.sluid || active->uid != job_ptr->user_id ||
+-		    _append_event("ENDING1|%u|%" PRIu64 "|%" PRIu64,
+-				  active->job_id, active->generation, active->sluid))
+-			_mark_unhealthy("cannot persist allocation release start");
+-		else
++		    !job_ptr->details || job_ptr->details->submit_time <= 0 ||
++		    active->submit_sec != (uint64_t)job_ptr->details->submit_time ||
++		    active->restart_count != job_ptr->restart_cnt || job_ptr->start_time <= 0 ||
++		    job_ptr->end_time < job_ptr->start_time || !node || !_field_safe(node->name) ||
++		    _append_event("ENDING2|%u|%" PRIu64 "|%" PRIu64 "|%u|%" PRIu64
++				  "|%u|%u|%u|%u|%" PRIu64 "|%" PRIu64 "|%u|%u|%s",
++				  active->job_id, active->generation, active->sluid, active->uid,
++				  active->submit_sec, active->restart_count, job_ptr->job_state,
++				  job_ptr->exit_code, job_ptr->derived_ec, (uint64_t)job_ptr->start_time,
++				  (uint64_t)job_ptr->end_time, job_ptr->state_reason, job_ptr->requid, node->name)) {
++			_mark_unhealthy("cannot persist allocation termination identity and outcome");
++		} else {
++			active->final_state = job_ptr->job_state; active->final_exit = job_ptr->exit_code;
++			active->final_derived = job_ptr->derived_ec; active->final_reason = job_ptr->state_reason;
++			active->final_requid = job_ptr->requid; active->final_start = job_ptr->start_time;
++			active->final_end = job_ptr->end_time;
++			memcpy(active->final_node, node->name, strlen(node->name) + 1);
+ 			active->release_started = true;
++		}
+ 	}
+ 	pthread_mutex_unlock(&mq_lock);
+ }
+--- a/src/slurmctld/monthly_quota_control.c
++++ b/src/slurmctld/monthly_quota_control.c
+@@ -165,7 +165,7 @@
+ 		lock_slurmctld(config_lock);
+ 		if (monthly_quota_selectable_ready()) {
+ 			rc = 0;
+-			snprintf(reply, sizeof(reply), "OK TIME26_SELECTABLE_ENDING1_ROLL1_RANK1_CANCEL_BOUND1_AUTOCANCEL1_RECONCILE1\n");
++			snprintf(reply, sizeof(reply), "OK TIME26_SELECTABLE_ENDING2_ROLL1_RANK1_CANCEL_BOUND1_AUTOCANCEL1_RECONCILE1\n");
+ 		}
+ 		unlock_slurmctld(config_lock);
+ 	} else if (count == 2 && !strcmp(part[0], "SNAP2")) {

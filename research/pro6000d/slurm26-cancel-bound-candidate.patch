@@ -1,0 +1,119 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -130,7 +130,7 @@
+ 	uint32_t uid, month, tier, gpu, minutes, job_id;
+ 	uint64_t amount, generation;
+ 	uint64_t final_sluid;
+-	uint32_t terminal; /* 0 live; 1 cancelled; 2 released */
++	uint32_t terminal; /* 0 live; 1 cancelled; 2 released; 3 cancelled after bind */
+ 	char request[33];
+ 	struct mq_reserve1 *next;
+ } mq_reserve1_t;
+@@ -1129,6 +1129,16 @@
+ 		    !(entry = _reserve1_find(uid, fields[4])) || entry->terminal || entry->job_id)
+ 			return -1;
+ 		_reserve1_finish(entry, 1, 0);
++		return 0;
++	}
++	if (mq_selectable_replay && !strcmp(event, "CANCEL_BOUND1")) {
++		mq_reserve1_t *entry;
++		if (field_count != 6 || _parse_u32(fields[3], &uid) ||
++		    !_reserve1_request_valid(fields[4]) || _parse_u32(fields[5], &job_id) || !job_id ||
++		    !(entry = _reserve1_find(uid, fields[4])) || entry->terminal || entry->generation ||
++		    (entry->job_id && entry->job_id != job_id)) return -1;
++		entry->job_id = job_id;
++		_reserve1_finish(entry, 3, 0);
+ 		return 0;
+ 	}
+ 	if (mq_selectable_replay && !strcmp(event, "ROLL1")) {
+@@ -3350,6 +3360,43 @@
+ 		goto out;
+ 	}
+ 	_reserve1_finish(entry, 1, 0);
++	rc = 0;
++out:
++	pthread_mutex_unlock(&mq_lock);
++	return rc;
++}
++
++/* Release only an identified scheduler job that never started. */
++int monthly_quota_cancel_bound1(uid_t uid, const char *request, uint32_t job_id)
++{
++	mq_reserve1_t *entry;
++	struct job_record *job;
++	enum time_tier selected;
++	char marker[33];
++	int rc = -1;
++	if ((uid_t)(uint32_t)uid != uid || !_reserve1_request_valid(request) || !job_id)
++		return -1;
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || !mq_reconciled || !mq_selectable_replay ||
++	    !(entry = _reserve1_find((uint32_t)uid, request))) goto out;
++	if (entry->terminal) {
++		if (entry->terminal == 3 && entry->job_id == job_id) rc = 0;
++		goto out;
++	}
++	if (entry->generation || (entry->job_id && entry->job_id != job_id) ||
++	    _find_active_job(job_id) || !(job = find_job_record(job_id)) ||
++	    job->user_id != uid || !IS_JOB_COMPLETED(job) ||
++	    (job->start_time && (!job->end_time || job->start_time != job->end_time)) ||
++	    (job->node_bitmap && bit_set_count(job->node_bitmap)) ||
++	    time_parse_job_marker(job->comment, marker, &selected) ||
++	    strcmp(marker, request) || selected != entry->tier)
++		goto out;
++	if (_append_event("CANCEL_BOUND1|%u|%s|%u", (uint32_t)uid, request, job_id)) {
++		_mark_unhealthy("bound cancellation persistence failed");
++		goto out;
++	}
++	entry->job_id = job_id;
++	_reserve1_finish(entry, 3, 0);
+ 	rc = 0;
+ out:
+ 	pthread_mutex_unlock(&mq_lock);
+@@ -3441,9 +3488,10 @@
+ 	if (entry->terminal) {
+ 		if ((entry->terminal == 1 && (entry->job_id || entry->generation || entry->final_sluid)) ||
+ 		    (entry->terminal == 2 && (!entry->job_id || !entry->generation)) ||
+-		    entry->terminal > 2)
++		    (entry->terminal == 3 && (!entry->job_id || entry->generation || entry->final_sluid)) ||
++		    entry->terminal > 3)
+ 			goto done;
+-		result.state = entry->terminal == 1 ? 4 : 5;
++		result.state = entry->terminal == 1 ? 4 : entry->terminal == 2 ? 5 : 6;
+ 		result.sluid = entry->final_sluid;
+ 		*out = result;
+ 		rc = 1;
+--- a/src/slurmctld/monthly_quota.h
++++ b/src/slurmctld/monthly_quota.h
+@@ -20,6 +20,7 @@
+ extern int monthly_quota_reserve1(uid_t uid, const char *request, uint32_t tier,
+ 				  uint32_t gpu, uint32_t minutes, uint64_t *amount);
+ extern int monthly_quota_cancel1(uid_t uid, const char *request);
++extern int monthly_quota_cancel_bound1(uid_t uid, const char *request, uint32_t job_id);
+ extern int monthly_quota_roll1(uid_t uid, const char *request);
+ extern int monthly_quota_reserve1_lookup(uid_t uid, const char *request,
+ 					 uint32_t *month, uint32_t *tier,
+--- a/src/slurmctld/monthly_quota_control.c
++++ b/src/slurmctld/monthly_quota_control.c
+@@ -84,6 +84,12 @@
+ 	if (count == 3 && !strcmp(part[0], "CANCEL1")) {
+ 		lock_slurmctld(grant_lock);
+ 		rc = monthly_quota_cancel1((uid_t)uid, part[2]);
++		unlock_slurmctld(grant_lock);
++		if (!rc) snprintf(reply, sizeof(reply), "OK\n");
++	} else if (count == 4 && !strcmp(part[0], "CANCEL_BOUND1") &&
++	    !number(part[3], &bind_job) && bind_job > 0 && bind_job <= UINT32_MAX) {
++		lock_slurmctld(grant_lock);
++		rc = monthly_quota_cancel_bound1((uid_t)uid, part[2], bind_job);
+ 		unlock_slurmctld(grant_lock);
+ 		if (!rc) snprintf(reply, sizeof(reply), "OK\n");
+ 	} else if (count == 4 && !strcmp(part[0], "BIND1") &&
+@@ -159,7 +165,7 @@
+ 		lock_slurmctld(config_lock);
+ 		if (monthly_quota_selectable_ready()) {
+ 			rc = 0;
+-			snprintf(reply, sizeof(reply), "OK TIME26_SELECTABLE_ENDING1_ROLL1_RANK1\n");
++			snprintf(reply, sizeof(reply), "OK TIME26_SELECTABLE_ENDING1_ROLL1_RANK1_CANCEL_BOUND1\n");
+ 		}
+ 		unlock_slurmctld(config_lock);
+ 	} else if (count == 2 && !strcmp(part[0], "SNAP2")) {

@@ -1,0 +1,103 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -138,6 +138,9 @@
+ 	uint32_t uid, month, tier, gpu, minutes, job_id;
+ 	uint64_t amount, generation;
+ 	uint64_t final_sluid;
++	uint64_t final_submit, final_start, final_end;
++	uint32_t final_restart, final_state, final_exit, final_derived, final_reason, final_requid;
++	char final_node[MQ_MAX_FIELD];
+ 	uint32_t terminal; /* 0 live; 1 cancelled; 2 released; 3 cancelled after bind */
+ 	char request[33];
+ 	struct mq_reserve1 *next;
+@@ -182,6 +185,18 @@
+ #endif
+ }
+ 
++/* RELEASE2 replay retains the termination identity even if Slurm reloads an
++ * older RUNNING checkpoint after the quota record was already settled. */
++static void _reserve1_copy_final(mq_reserve1_t *entry, const mq_active_record_t *active)
++{
++	entry->final_submit = active->submit_sec; entry->final_restart = active->restart_count;
++	entry->final_start = active->final_start; entry->final_end = active->final_end;
++	entry->final_state = active->final_state; entry->final_exit = active->final_exit;
++	entry->final_derived = active->final_derived; entry->final_reason = active->final_reason;
++	entry->final_requid = active->final_requid;
++	memcpy(entry->final_node, active->final_node, sizeof(entry->final_node));
++}
++
+ static int _time_cmp(const mq_time_t *a, const mq_time_t *b)
+ {
+ 	if (a->sec < b->sec)
+@@ -1292,6 +1307,16 @@
+ 		active->release_started = true;
+ 		return 0;
+ 	}
++	if (mq_selectable_replay && !strcmp(event, "SELECT_DONE1")) {
++		uint64_t sluid;
++		if (field_count != 6 || _parse_u32(fields[3], &job_id) ||
++		    _parse_u64(fields[4], &generation) || _parse_u64(fields[5], &sluid) ||
++		    !sluid || !(active = _find_active(job_id, generation)) ||
++		    !active->committed || !active->release_started || active->selector_released || active->sluid != sluid)
++			return -1;
++		active->selector_released = true;
++		return 0;
++	}
+ 	if (mq_selectable_replay && !strcmp(event, "RELEASE2")) {
+ 		mq_reserve1_t *reservation = NULL;
+ 		if (field_count != 7 || _parse_u32(fields[3], &job_id) ||
+@@ -1299,13 +1324,14 @@
+ 		    _parse_u32(fields[6], &to.nsec) || to.nsec >= MQ_NSEC_PER_SEC)
+ 			return -1;
+ 		active = _find_active(job_id, generation);
+-		if (!active || !active->committed || !active->release_started ||
++		if (!active || !active->committed || !active->release_started || !active->selector_released ||
+ 		    _time_cmp(&active->anchor, &to)) return -1;
+ 		if (active->reservation_bound) {
+ 			reservation = _reserve1_find(active->uid, active->marker_id);
+ 			if (!reservation || reservation->terminal || reservation->job_id != active->job_id ||
+ 			    reservation->generation != active->generation)
+ 				return -1;
++			_reserve1_copy_final(reservation, active);
+ 			_reserve1_finish(reservation, 2, active->sluid);
+ 		}
+ 		_remove_active(active);
+@@ -2934,8 +2960,13 @@
+ 		    active->sluid != job_ptr->step_id.sluid ||
+ 		    active->uid != job_ptr->user_id)
+ 			_mark_unhealthy("selector release failed or identity mismatch");
+-		else
+-			active->selector_released = true;
++		else if (!active->selector_released) {
++			if (_append_event("SELECT_DONE1|%u|%" PRIu64 "|%" PRIu64,
++					  active->job_id, active->generation, active->sluid))
++				_mark_unhealthy("cannot persist selector release");
++			else
++				active->selector_released = true;
++		}
+ 	}
+ 	pthread_mutex_unlock(&mq_lock);
+ }
+@@ -3048,8 +3079,10 @@
+ 			pthread_mutex_unlock(&mq_lock);
+ 			return;
+ 		}
+-		if (reservation)
++		if (reservation) {
++			_reserve1_copy_final(reservation, active);
+ 			_reserve1_finish(reservation, 2, active->sluid);
++		}
+ 		_remove_active(active);
+ 		pthread_mutex_unlock(&mq_lock);
+ 		return;
+--- a/src/slurmctld/monthly_quota_control.c
++++ b/src/slurmctld/monthly_quota_control.c
+@@ -165,7 +165,7 @@
+ 		lock_slurmctld(config_lock);
+ 		if (monthly_quota_selectable_ready()) {
+ 			rc = 0;
+-			snprintf(reply, sizeof(reply), "OK TIME26_SELECTABLE_ENDING2_ROLL1_RANK1_CANCEL_BOUND1_AUTOCANCEL1_RECONCILE1_NODEPROOF1\n");
++			snprintf(reply, sizeof(reply), "OK TIME26_SELECTABLE_ENDING2_ROLL1_RANK1_CANCEL_BOUND1_AUTOCANCEL1_RECONCILE1_NODEPROOF1_SELECT_DONE1\n");
+ 		}
+ 		unlock_slurmctld(config_lock);
+ 	} else if (count == 2 && !strcmp(part[0], "SNAP2")) {

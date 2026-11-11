@@ -1,0 +1,100 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -15,6 +15,7 @@
+ #include <inttypes.h>
+ #include <limits.h>
+ #include <pthread.h>
++#include <signal.h>
+ #include <openssl/sha.h>
+ #include <stdarg.h>
+ #include <stdbool.h>
+@@ -3403,6 +3404,50 @@
+ 	return rc;
+ }
+ 
++/* Called under the same Slurm locks as job cancellation, before the first
++ * scheduling pass. Reconcile independently persisted job and quota states. */
++int monthly_quota_reconcile_cancelled(list_t *jobs)
++{
++	list_itr_t *iterator;
++	struct job_record *job;
++	int result = 0;
++	if (!jobs) return -1;
++	iterator = list_iterator_create(jobs);
++	while ((job = list_next(iterator))) {
++		mq_reserve1_t *entry;
++		char marker[33];
++		enum time_tier selected;
++		int action = 0;
++		if (time_parse_job_marker(job->comment, marker, &selected)) continue;
++		pthread_mutex_lock(&mq_lock);
++		entry = _reserve1_find(job->user_id, marker);
++		if (mq_enabled && mq_healthy && mq_reconciled && entry && entry->tier == selected &&
++		    (!entry->job_id || entry->job_id == job->job_id) && !entry->generation) {
++			if (entry->terminal == 3 && entry->job_id == job->job_id && IS_JOB_PENDING(job))
++				action = 1; /* cancelled WAL, stale pending Slurm checkpoint */
++			else if (!entry->terminal && IS_JOB_COMPLETED(job))
++				action = 2; /* terminal Slurm job before ledger recovery */
++		}
++		pthread_mutex_unlock(&mq_lock);
++		if (action == 1) {
++			if (IS_JOB_COMPLETING(job) || job->het_job_id || job->array_recs || job->fed_details ||
++			    (job->node_bitmap && bit_set_count(job->node_bitmap)) ||
++			    job_signal(job, SIGKILL, KILL_NO_SIBS, slurm_conf.slurm_user_id, false) != SLURM_SUCCESS) {
++				result = -1; break;
++			}
++		} else if (action == 2 && monthly_quota_cancel_bound1(job->user_id, marker, job->job_id)) {
++			result = -1; break;
++		}
++	}
++	list_iterator_destroy(iterator);
++	if (result) {
++		pthread_mutex_lock(&mq_lock);
++		_mark_unhealthy("cancelled job recovery is ambiguous");
++		pthread_mutex_unlock(&mq_lock);
++	}
++	return result;
++}
++
+ int monthly_quota_bind1(uid_t uid, const char *request, uint32_t job_id)
+ {
+ 	mq_reserve1_t *entry, *other;
+--- a/src/slurmctld/monthly_quota.h
++++ b/src/slurmctld/monthly_quota.h
+@@ -156,6 +156,7 @@
+ 
+ /* Called after job/select/GRES state has been restored, before scheduling. */
+ extern int monthly_quota_reconcile(list_t *job_list);
++extern int monthly_quota_reconcile_cancelled(list_t *job_list);
+ extern int monthly_quota_reconcile_readonly(list_t *job_list);
+ extern bool monthly_quota_selectable_ready(void);
+ extern int monthly_quota_control_start(void);
+--- a/src/slurmctld/controller.c
++++ b/src/slurmctld/controller.c
+@@ -1119,6 +1119,15 @@
+ 			quota_recovery = monthly_quota_reconcile(job_list);
+ 			assoc_mgr_unlock(&tres_lock);
+ 			unlock_slurmctld(recovery_locks);
++			if (!quota_recovery) {
++				slurmctld_lock_t cancel_locks = {
++					.conf = READ_LOCK, .job = WRITE_LOCK,
++					.node = WRITE_LOCK, .fed = READ_LOCK
++				};
++				lock_slurmctld(cancel_locks);
++				quota_recovery = monthly_quota_reconcile_cancelled(job_list);
++				unlock_slurmctld(cancel_locks);
++			}
+ 			if (quota_recovery)
+ 				error("monthly quota recovery failed; GPU admission remains closed");
+ 			else if (monthly_quota_control_start())
+--- a/src/slurmctld/monthly_quota_control.c
++++ b/src/slurmctld/monthly_quota_control.c
+@@ -165,7 +165,7 @@
+ 		lock_slurmctld(config_lock);
+ 		if (monthly_quota_selectable_ready()) {
+ 			rc = 0;
+-			snprintf(reply, sizeof(reply), "OK TIME26_SELECTABLE_ENDING1_ROLL1_RANK1_CANCEL_BOUND1_AUTOCANCEL1\n");
++			snprintf(reply, sizeof(reply), "OK TIME26_SELECTABLE_ENDING1_ROLL1_RANK1_CANCEL_BOUND1_AUTOCANCEL1_RECONCILE1\n");
+ 		}
+ 		unlock_slurmctld(config_lock);
+ 	} else if (count == 2 && !strcmp(part[0], "SNAP2")) {

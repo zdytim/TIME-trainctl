@@ -11,6 +11,10 @@ from __future__ import annotations
 
 import argparse
 from monthly_quota import MonthlyLedger, month_now
+from monthly_reservation import ReservationCoordinator, ReservationDeferred, ReservationUncertain
+from controller_bridge import ControllerBridge, ControllerUnavailable, ControllerOutcomeUnknown
+from controller_view import selectable_snapshot_view, unavailable
+from activation_attestation import verify_release
 import base64
 import datetime as dt
 import grp
@@ -41,7 +45,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 VERSION = "0.1.0"
 DEFAULT_CONFIG = "/etc/pro6000d-training/config.json"
 DEFAULT_SOCKET = "/run/pro6000d-training/backend.sock"
-ACTIVE_STATES = ("WAITING_QUOTA", "SUBMITTING", "PENDING", "RUNNING", "COMPLETING", "SUSPENDED")
+ACTIVE_STATES = ("WAITING_QUOTA", "CANCELLING_RESERVATION", "SUBMITTING", "PENDING", "RUNNING", "COMPLETING", "SUSPENDED")
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 SAFE_ENV = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
 
@@ -135,6 +139,17 @@ class Store:
               updated_at TEXT NOT NULL, started_at TEXT, finished_at TEXT
             );
             CREATE INDEX IF NOT EXISTS jobs_owner_state ON jobs(owner_uid, state);
+            CREATE TABLE IF NOT EXISTS job_dispatch_order (
+              seq INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL UNIQUE
+            );
+            INSERT OR IGNORE INTO job_dispatch_order(job_id)
+              SELECT id FROM jobs WHERE NOT EXISTS
+                (SELECT 1 FROM job_dispatch_order d WHERE d.job_id=jobs.id)
+              ORDER BY created_at,id;
+            CREATE TRIGGER IF NOT EXISTS jobs_dispatch_order_insert
+              AFTER INSERT ON jobs BEGIN
+                INSERT OR IGNORE INTO job_dispatch_order(job_id) VALUES (NEW.id);
+              END;
             CREATE TABLE IF NOT EXISTS applications (
               id TEXT PRIMARY KEY, owner_uid INTEGER NOT NULL, owner_name TEXT NOT NULL,
               kind TEXT NOT NULL, status TEXT NOT NULL, requested_json TEXT NOT NULL,
@@ -222,11 +237,16 @@ class Service:
         self.store.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS jobs_request ON jobs(owner_uid,client_request_id) WHERE client_request_id IS NOT NULL")
         for name, definition in (("origin", "TEXT NOT NULL DEFAULT 'platform'"),
                                  ("source_scheduler_name", "TEXT"), ("source_submit_time", "TEXT"),
-                                 ("resource_unknown", "INTEGER NOT NULL DEFAULT 0")):
+                                 ("resource_unknown", "INTEGER NOT NULL DEFAULT 0"),
+                                 ("selected_tier", "TEXT"), ("cancel_target", "TEXT")):
             if name not in columns:
                 self.store.db.execute("ALTER TABLE jobs ADD COLUMN " + name + " " + definition)
+        self.store.db.execute("CREATE INDEX IF NOT EXISTS jobs_dispatch_scan ON jobs(origin,state,selected_tier,id)")
 
-
+        self.store.db.execute("""CREATE TABLE IF NOT EXISTS monthly_grant_outbox (
+            application_id TEXT PRIMARY KEY, target_uid INTEGER NOT NULL, month INTEGER NOT NULL,
+            gpu_seconds INTEGER NOT NULL, actor_uid INTEGER NOT NULL, state TEXT NOT NULL,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
         self.monthly = MonthlyLedger(self)
 
     # ---------- identity and authorization ----------
@@ -295,7 +315,7 @@ class Service:
                 who = self.identity(user.pw_uid)
             except ApiError:
                 continue
-            users.append({**who, "quota": self.quota(user.pw_uid), "usage": self.active_usage(user.pw_uid), "monthly_quota": self.monthly.summary(user.pw_uid)})
+            users.append({**who, "quota": self.quota(user.pw_uid), "usage": self.active_usage(user.pw_uid), "monthly_quota": self.monthly_controller_snapshot(user.pw_uid)})
         return sorted(users, key=lambda x: x["uid"])
 
     def user_roots(self, user: pwd.struct_passwd) -> List[pathlib.Path]:
@@ -326,6 +346,20 @@ class Service:
         user = self.user(ident["uid"])
         if not isinstance(payload, dict):
             raise ApiError(400, "invalid_job", "任务必须是对象")
+        selected_tier = payload.get("selected_tier")
+        readiness = self.monthly_controller_snapshot(ident["uid"])
+        ready = readiness.get("enforcement_ready") is True and readiness.get("selectable_tiers_ready") is True
+        cfg = self.config.get("monthly_controller", {})
+        configured = isinstance(cfg, dict) and cfg.get("activation_enabled") is True
+        if configured and not ready:
+            raise ApiError(503, "monthly_gate_unavailable", "月度额度控制暂不可用，请稍后重试")
+        if "selected_tier" in payload:
+            if not isinstance(selected_tier, str) or selected_tier not in ("debug", "important", "normal"):
+                raise ApiError(400, "invalid_selected_tier", "请选择有效的月度额度档位")
+            if not ready:
+                raise ApiError(409, "selected_tier_unavailable", "月度选档控制尚未就绪")
+        elif ready:
+            raise ApiError(400, "selected_tier_required", "请选择月度额度档位")
         name = payload.get("name", "training")
         command = payload.get("command", "")
         qos = payload.get("qos", "normal")
@@ -375,7 +409,8 @@ class Service:
             raise ApiError(400, "invalid_environment", "环境名只能包含安全路径字符")
         return {"name": str(name), "command": command.strip(), "qos": qos, "gpu": gpu, "cpu": cpu,
                 "memory_mb": mem, "time_minutes": minutes, "workdir": workdir,
-                "output_path": output, "environment": env_name}
+                "output_path": output, "environment": env_name,
+                **({"selected_tier": selected_tier} if "selected_tier" in payload else {})}
 
     def active_usage(self, uid: int) -> Dict[str, int]:
         rows = self.store.db.execute("SELECT requested_gpu,state FROM jobs WHERE owner_uid=?", (uid,)).fetchall()
@@ -513,10 +548,20 @@ class Service:
             state = rec["state"].split("+")[0]
             if not state:
                 continue
+            final = state not in ("PENDING", "RUNNING", "COMPLETING", "SUSPENDED", "CONFIGURING", "RESIZING", "REQUEUED", "REQUEUE_FED")
+            if row["selected_tier"] is not None:
+                try:
+                    coordinator = self.monthly_reservation_coordinator()
+                    if final:
+                        coordinator.finish(row["id"], row["owner_uid"], int(sid))
+                    else:
+                        coordinator.bind(row["id"], row["owner_uid"], int(sid))
+                except ReservationUncertain:
+                    self.store.db.execute("UPDATE jobs SET reason_code='binding_uncertain',reason_text='月度预留绑定未确认，等待核对',updated_at=? WHERE id=?", (utc_now(), row["id"]))
+                    continue
             reason = rec.get("reason", "")
             if external:
                 reason = ("外部任务 GPU 数量未知，按整机保守预留；" if row["resource_unknown"] else "外部 Slurm 任务，仅查看；") + (reason or state)
-            final = state not in ("PENDING", "RUNNING", "COMPLETING", "SUSPENDED", "CONFIGURING", "RESIZING", "REQUEUED", "REQUEUE_FED")
             if state in ("CONFIGURING", "RESIZING", "REQUEUED", "REQUEUE_FED"):
                 state = "PENDING"
             self.store.db.execute("UPDATE jobs SET state=?,reason_code=?,reason_text=?,updated_at=?,started_at=COALESCE(started_at,?),finished_at=? WHERE id=?", (state, reason, reason or state, utc_now(), utc_now() if state == "RUNNING" else None, utc_now() if final else None, row["id"]))
@@ -547,6 +592,7 @@ class Service:
         self.reconcile()
         self.monthly.refresh()
         self.expire_applications()
+        self.reconcile_reservation_cancellations()
         if self.last_reconcile_ok:
             self.dispatch_waiting()
 
@@ -820,14 +866,90 @@ class Service:
 
     # ---------- jobs ----------
     def row_job(self, row: sqlite3.Row) -> Dict[str, Any]:
-        return {"name": row["name"], "qos": row["qos"], "gpu": row["requested_gpu"],
-                "cpu": row["requested_cpu"], "memory_mb": row["requested_mem_mb"],
-                "time_minutes": row["requested_minutes"], "workdir": row["workdir"],
-                "environment": row["env_name"], "command": row["command"], "output_path": row["output_path"]}
+        result = {"name": row["name"], "qos": row["qos"], "gpu": row["requested_gpu"],
+                  "cpu": row["requested_cpu"], "memory_mb": row["requested_mem_mb"],
+                  "time_minutes": row["requested_minutes"], "workdir": row["workdir"],
+                  "environment": row["env_name"], "command": row["command"], "output_path": row["output_path"]}
+        if "selected_tier" in row.keys() and row["selected_tier"] is not None:
+            result["selected_tier"] = row["selected_tier"]
+        return result
+
+    def monthly_controller_snapshot(self, uid: int) -> Dict[str, Any]:
+        cfg = self.config.get("monthly_controller", {})
+        if not isinstance(cfg, dict) or cfg.get("read_enabled") is not True:
+            if isinstance(cfg, dict) and cfg.get("activation_enabled") is True:
+                return unavailable(True)
+            return self.monthly.summary(uid)
+        try:
+            controller_uid = pwd.getpwnam(cfg.get("controller_user", "slurm")).pw_uid
+            bridge = ControllerBridge(cfg.get("socket_path", "/var/lib/slurm/ctld/time-quota.sock"), controller_uid)
+            verified_pid = None
+            if cfg.get("activation_enabled") is True:
+                verified_pid = verify_release(cfg.get("release_manifest", "/etc/pro6000d-training/monthly-release.json"),
+                                              controller_uid, return_controller_pid=True)
+                if verified_pid:
+                    bridge.expected_pid = verified_pid
+            snapshot = bridge.selectable_snapshot(uid)
+            observed = snapshot.get("observed_sec")
+            if (snapshot.get("month") != int(month_now().replace("-", "")) or
+                    isinstance(observed, bool) or not isinstance(observed, int) or
+                    abs(time.time() - observed) > 15):
+                raise ValueError("stale controller snapshot")
+            # The deployer enables this only after paired binaries and
+            # configuration are verified; the live controller must also
+            # attest the recovered, enabled protocol on every read.
+            verified = bool(verified_pid) and bridge.readiness() is True
+            view = selectable_snapshot_view(snapshot, verified)
+            view['request_available'] = verified and cfg.get('grant_enabled') is True
+            return view
+        except (KeyError, TypeError, ValueError, ControllerUnavailable):
+            return unavailable(False)
+
+    def verified_monthly_bridge(self) -> ControllerBridge:
+        cfg = self.config.get("monthly_controller", {})
+        if not isinstance(cfg, dict) or cfg.get("activation_enabled") is not True or cfg.get("read_enabled") is not True:
+            raise ControllerUnavailable("monthly release is not enabled")
+        try:
+            uid = pwd.getpwnam(cfg.get("controller_user", "slurm")).pw_uid
+            pid = verify_release(cfg.get("release_manifest", "/etc/pro6000d-training/monthly-release.json"),
+                                 uid, return_controller_pid=True)
+            if not pid:
+                raise ControllerUnavailable("monthly release artifacts are not verified")
+            bridge = ControllerBridge(cfg.get("socket_path", "/var/lib/slurm/ctld/time-quota.sock"), uid)
+            bridge.expected_pid = pid
+            if not bridge.readiness():
+                raise ControllerUnavailable("monthly controller is not ready")
+            return bridge
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ControllerUnavailable("controller configuration unavailable") from exc
+
+    def monthly_reservation_coordinator(self) -> ReservationCoordinator:
+        try:
+            return ReservationCoordinator(self.store.db, self.verified_monthly_bridge())
+        except ControllerUnavailable as exc:
+            raise ReservationUncertain("controller configuration unavailable") from exc
 
     def dispatch_job(self, ident: Dict[str, Any], row: sqlite3.Row, job: Dict[str, Any], temporary: bool = False) -> Dict[str, Any]:
         if row["origin"] != "platform":
             raise ApiError(409, "external_job_read_only", "外部 Slurm 任务不能通过平台重新提交")
+        selected = job.get("selected_tier")
+        coordinator = None
+        cfg = self.config.get("monthly_controller", {})
+        configured = isinstance(cfg, dict) and cfg.get("activation_enabled") is True
+        if configured and selected is None:
+            raise ApiError(409, "selected_tier_required", "原有排队任务需要选择月度额度档位")
+        if selected is not None:
+            readiness = self.monthly_controller_snapshot(row["owner_uid"])
+            if readiness.get("enforcement_ready") is not True or readiness.get("selectable_tiers_ready") is not True:
+                raise ApiError(409, "selected_tier_unavailable", "月度选档控制尚未就绪")
+            try:
+                coordinator = self.monthly_reservation_coordinator()
+                coordinator.hold(row["id"], row["owner_uid"], selected, job["gpu"], job["time_minutes"],
+                                 int(month_now().replace("-", "")), require_waiting=True)
+            except ReservationDeferred as exc:
+                raise ApiError(409, "monthly_capacity_wait", "所选档位余额不足以覆盖申请时限；任务继续排队") from exc
+            except ReservationUncertain as exc:
+                raise ApiError(503, "reservation_unconfirmed", "月度预留未确认；任务保持排队") from exc
         user = self.user(row["owner_uid"])
         job_gid = grp.getgrnam(self.config.get("job_group", "pro6000d-gpu")).gr_gid
         script_dir = pathlib.Path(self.config.get("job_script_dir", "/var/lib/pro6000d-training/jobs"))
@@ -846,35 +968,91 @@ class Service:
                 fh.flush(); os.fsync(fh.fileno())
         # Commit the submission intent before the external side effect. A crash
         # or timeout leaves SUBMITTING and is reconciled by unique scheduler name.
-        self.store.db.execute("UPDATE jobs SET state='SUBMITTING',reason_code='submitting',reason_text='正在提交调度器',updated_at=? WHERE id=?", (utc_now(), row["id"]))
+        changed = self.store.db.execute("UPDATE jobs SET state='SUBMITTING',reason_code='submitting',reason_text='正在提交调度器',updated_at=? WHERE id=? AND state='WAITING_QUOTA'", (utc_now(), row["id"])).rowcount
+        if changed != 1:
+            raise ApiError(409, "submission_already_claimed", "任务状态已变化，等待核对")
         # ALL exports only run()'s explicit sanitized environment. On Slurm 19,
         # NONE implicitly asks Slurm to collect a login environment through PAM.
         argv = ["sbatch", "--parsable", "--uid", str(user.pw_uid), "--gid", str(job_gid),
                 "--job-name", "p6-" + row["id"], "--partition", self.config.get("partition", "gpu"),
-                "--comment", "pro6000d-job:" + row["id"], "--gres", "gpu:%d" % job["gpu"],
+                "--comment", "pro6000d-job:" + row["id"] + ((":tier=" + selected) if selected is not None else ""), "--gres", "gpu:%d" % job["gpu"],
                 "--cpus-per-task", str(job["cpu"]), "--mem", "%dM" % job["memory_mb"],
                 "--time", str(job["time_minutes"]), "--chdir", job["workdir"],
                 "--export", "ALL", "--output", job["output_path"], "--error", job["output_path"], str(script)]
+        if selected is not None:
+            # The current controller gate validates a single-node request.
+            argv[-1:-1] = ["--nodes=1-1"]
         if self.config.get("slurm_account"):
             argv[-1:-1] = ["--account", str(self.config["slurm_account"]), "--qos", job["qos"]]
         code, out, err = run(argv, timeout=20)
         sid = out.split(";", 1)[0].strip()
         if code == 0 and sid.isdigit():
+            if selected is not None:
+                # Persist the scheduler ID before binding. A lost reply or
+                # process crash is reconciled against this same identity.
+                self.store.db.execute("UPDATE jobs SET scheduler_id=?,reason_code='binding_reservation',reason_text='正在确认月度预留绑定',updated_at=? WHERE id=?", (sid, utc_now(), row["id"]))
+                try:
+                    coordinator.bind(row["id"], row["owner_uid"], int(sid))
+                except ReservationUncertain:
+                    self.store.db.execute("UPDATE jobs SET reason_code='binding_uncertain',reason_text='月度预留绑定结果未确认，等待核对',updated_at=? WHERE id=?", (utc_now(), row["id"]))
+                    self.store.audit(user.pw_uid, user.pw_name, "dispatch", "job", row["id"], {"scheduler_id":sid}, "uncertain")
+                    return self.job_json(self.store.db.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone())
             self.store.db.execute("UPDATE jobs SET state='PENDING',scheduler_id=?,reason_code='waiting_for_scheduler',reason_text='已提交 Slurm，等待资源',updated_at=? WHERE id=?", (sid, utc_now(), row["id"]))
-        elif code == 124 or code == 0:
+        elif selected is not None or code == 124 or code == 0:
             self.store.db.execute("UPDATE jobs SET reason_code='submission_uncertain',reason_text='提交结果未确认；保留请求和额度，后台核对，不重复提交',updated_at=? WHERE id=?", (utc_now(), row["id"]))
         else:
             self.store.db.execute("UPDATE jobs SET state='REJECTED',reason_code='scheduler_rejected',reason_text=?,updated_at=?,finished_at=? WHERE id=?", (err[:2000] or "调度器拒绝", utc_now(), utc_now(), row["id"]))
-        self.store.audit(user.pw_uid, user.pw_name, "dispatch", "job", row["id"], {"scheduler_id": sid if sid.isdigit() else None, "returncode": code}, "accepted" if code == 0 else "uncertain" if code == 124 else "rejected")
+        self.store.audit(user.pw_uid, user.pw_name, "dispatch", "job", row["id"], {"scheduler_id": sid if sid.isdigit() else None, "returncode": code}, "accepted" if code == 0 and sid.isdigit() else "uncertain" if selected is not None or code in (0, 124) else "rejected")
         return self.job_json(self.store.db.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone())
 
     def dispatch_waiting(self) -> None:
         if not self.last_reconcile_ok or not self.admission_available():
             return
-        for row in self.store.db.execute("SELECT * FROM jobs WHERE origin='platform' AND state='WAITING_QUOTA' ORDER BY created_at,id LIMIT 256").fetchall():
+        # Each bounded epoch scans a finite snapshot once. A separate limited
+        # lane checks newly arrived higher-priority jobs before lower tiers.
+        # Persisted sequence numbers survive VACUUM and cannot be reused.
+        rank = "CASE j.selected_tier WHEN 'debug' THEN 0 WHEN 'important' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END"
+        epoch = getattr(self, '_dispatch_epoch', None)
+        if epoch is None:
+            last = self.store.db.execute("SELECT max(d.seq) FROM jobs j JOIN job_dispatch_order d ON d.job_id=j.id WHERE j.origin='platform' AND j.state='WAITING_QUOTA'").fetchone()[0]
+            if last is None:
+                return
+            epoch = {'end': last, 'base': [0]*4, 'new': [last]*4, 'new_left': [64]*4}
+            self._dispatch_epoch = epoch
+        rows = []
+        for priority in range(4):
+            common = "SELECT j.*,d.seq AS dispatch_seq," + rank + " AS dispatch_rank FROM jobs j JOIN job_dispatch_order d ON d.job_id=j.id WHERE j.origin='platform' AND j.state='WAITING_QUOTA' AND " + rank + "=? AND d.seq>? "
+            rows.extend(self.store.db.execute(common + "AND d.seq<=? ORDER BY d.seq LIMIT ?", (priority, epoch['base'][priority], epoch['end'], 64-len(rows))).fetchall())
+            if len(rows) == 64:
+                break
+            if epoch['new_left'][priority]:
+                new_rows = self.store.db.execute(common + "ORDER BY d.seq LIMIT ?", (priority, epoch['new'][priority], min(epoch['new_left'][priority],64-len(rows)))).fetchall()
+                rows.extend(new_rows)
+            if len(rows) == 64:
+                break
+        if not rows:
+            self._dispatch_epoch = None
+            return
+        deadline = time.monotonic() + 1.0
+        processed = 0
+        for row in rows:
+            if processed and time.monotonic() >= deadline:
+                break
+            priority, seq = row['dispatch_rank'], row['dispatch_seq']
+            if seq <= epoch['end']:
+                epoch['base'][priority] = seq
+            else:
+                epoch['new'][priority] = seq
+                epoch['new_left'][priority] -= 1
+            processed += 1
             try:
                 ident = self.identity(row["owner_uid"])
-                monthly_block = self.monthly.block_reason(row["owner_uid"])
+                controller_cfg = self.config.get("monthly_controller", {})
+                controller_active = isinstance(controller_cfg, dict) and controller_cfg.get("activation_enabled") is True
+                # The legacy staging ledger intentionally blocks dispatch and
+                # is not authoritative after the controller cutover. The live
+                # controller readiness is checked again by validate/dispatch.
+                monthly_block = None if controller_active else self.monthly.block_reason(row["owner_uid"])
                 if monthly_block:
                     self.store.db.execute("UPDATE jobs SET reason_code='monthly_quota_wait',reason_text=?,updated_at=? WHERE id=?", (monthly_block,utc_now(),row["id"]))
                     continue
@@ -884,7 +1062,10 @@ class Service:
                 app = self.store.db.execute("SELECT * FROM applications WHERE id=?", (row["temporary_application_id"],)).fetchone() if row["temporary_application_id"] else None
                 temporary = bool(app and app["status"] == "APPROVED" and app["bound_job_id"] == row["id"])
                 if app and (not temporary or parse_iso(app["expires_at"]) <= dt.datetime.now(dt.timezone.utc)):
-                    self.store.db.execute("UPDATE jobs SET state='EXPIRED',reason_code='approval_expired',reason_text='批准在运行前过期，需重新申请',finished_at=?,updated_at=? WHERE id=?", (utc_now(), utc_now(), row["id"]))
+                    if row["selected_tier"] is not None:
+                        self._fence_reservation_cancellation(row["id"], "EXPIRED")
+                    else:
+                        self.store.db.execute("UPDATE jobs SET state='EXPIRED',reason_code='approval_expired',reason_text='批准在运行前过期，需重新申请',finished_at=?,updated_at=? WHERE id=? AND state='WAITING_QUOTA'", (utc_now(), utc_now(), row["id"]))
                     continue
                 cap = max(quota["gpu_limit"], job["gpu"]) if temporary else quota["gpu_limit"]
                 if not temporary and (job["gpu"] > quota["gpu_limit"] or job["time_minutes"] > int(self.qos[job["qos"]]["max_minutes"])):
@@ -941,7 +1122,7 @@ class Service:
                 changed = db.execute("UPDATE applications SET authorization_used=1,bound_job_id=?,updated_at=? WHERE id=? AND status='APPROVED' AND authorization_used=0 AND bound_job_id IS NULL", (jid, utc_now(), app_id)).rowcount
                 if changed != 1:
                     raise ApiError(409, "authorization_consumed", "批准已被其他请求使用")
-            db.execute("INSERT INTO jobs(id,owner_uid,owner_name,name,state,requested_gpu,requested_cpu,requested_mem_mb,requested_minutes,qos,workdir,env_name,command,output_path,reason_code,reason_text,temporary_application_id,created_at,updated_at,client_request_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (jid, uid, ident["username"], job["name"], "WAITING_QUOTA", job["gpu"], job["cpu"], job["memory_mb"], job["time_minutes"], job["qos"], job["workdir"], job["environment"], job["command"], job["output_path"], "waiting_user_quota", "已入队，等待个人额度与设备资源", app_id, utc_now(), utc_now(), request_id))
+            db.execute("INSERT INTO jobs(id,owner_uid,owner_name,name,state,requested_gpu,requested_cpu,requested_mem_mb,requested_minutes,qos,workdir,env_name,command,output_path,reason_code,reason_text,temporary_application_id,created_at,updated_at,client_request_id,selected_tier) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (jid, uid, ident["username"], job["name"], "WAITING_QUOTA", job["gpu"], job["cpu"], job["memory_mb"], job["time_minutes"], job["qos"], job["workdir"], job["environment"], job["command"], job["output_path"], "waiting_user_quota", "已入队，等待个人额度与设备资源", app_id, utc_now(), utc_now(), request_id, job.get("selected_tier")))
             self.store.audit(uid, ident["username"], "queue", "job", jid, {"temporary_application_id": app_id}, "accepted")
             db.execute("COMMIT")
         except Exception:
@@ -978,6 +1159,26 @@ class Service:
             rows = self.store.db.execute("SELECT * FROM jobs WHERE owner_uid=? ORDER BY created_at DESC LIMIT 1000", (ident["uid"],)).fetchall()
         return [self.job_json(x) for x in rows]
 
+    def _fence_reservation_cancellation(self, jid: str, target: str) -> bool:
+        if target not in ("CANCELLED", "EXPIRED"):
+            raise ValueError("invalid cancellation target")
+        return self.store.db.execute("UPDATE jobs SET state='CANCELLING_RESERVATION',cancel_target=?,reason_code='cancelling',reason_text='正在核对月度预留',updated_at=? WHERE id=? AND state='WAITING_QUOTA' AND scheduler_id IS NULL", (target, utc_now(), jid)).rowcount == 1
+
+    def reconcile_reservation_cancellations(self) -> None:
+        rows = self.store.db.execute("SELECT * FROM jobs WHERE state='CANCELLING_RESERVATION' AND scheduler_id IS NULL").fetchall()
+        for row in rows:
+            try:
+                self.monthly_reservation_coordinator().cancel(row["id"], row["owner_uid"])
+            except ReservationUncertain:
+                self.store.db.execute("UPDATE jobs SET reason_code='cancellation_unconfirmed',reason_text='预留释放未确认，等待核对',updated_at=? WHERE id=? AND state='CANCELLING_RESERVATION'", (utc_now(), row["id"]))
+                continue
+            target = row["cancel_target"]
+            if target not in ("CANCELLED", "EXPIRED"):
+                self.store.db.execute("UPDATE jobs SET reason_code='cancellation_unconfirmed',reason_text='取消目标不明，等待管理员核对',updated_at=? WHERE id=?", (utc_now(), row["id"]))
+                continue
+            reason = "批准已过期并确认释放预留" if target == "EXPIRED" else "已取消排队并确认释放预留"
+            self.store.db.execute("UPDATE jobs SET state=?,reason_code=?,reason_text=?,updated_at=?,finished_at=? WHERE id=? AND state='CANCELLING_RESERVATION'", (target, "approval_expired" if target == "EXPIRED" else "cancelled_by_user", reason, utc_now(), utc_now(), row["id"]))
+
     def cancel(self, ident: Dict[str, Any], jid: str) -> Dict[str, Any]:
         self.tick()
         row = self.store.db.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
@@ -991,6 +1192,15 @@ class Service:
             return self.job_json(row)
         if row["state"] == "SUBMITTING" and not row["scheduler_id"]:
             raise ApiError(409, "submission_uncertain", "提交结果尚未确认，不能假报取消成功；请稍后核对")
+        if row["selected_tier"] is not None and not row["scheduler_id"]:
+            if row["state"] == "WAITING_QUOTA":
+                if not self._fence_reservation_cancellation(jid, "CANCELLED"):
+                    raise ApiError(409, "submission_uncertain", "任务状态已变化，请稍后核对")
+            elif row["state"] != "CANCELLING_RESERVATION":
+                raise ApiError(409, "submission_uncertain", "任务状态未确认，无法取消预留")
+            self.reconcile_reservation_cancellations()
+            self.store.audit(ident["uid"], ident["username"], "cancel", "job", jid, {}, "requested")
+            return self.job_json(self.store.db.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone())
         if row["scheduler_id"]:
             code, _, err = run(["scancel", row["scheduler_id"]], timeout=8)
             if code:
@@ -1054,15 +1264,65 @@ finally: os.close(fd)
         for row in self.store.db.execute("SELECT * FROM applications WHERE kind='temporary_job' AND status='APPROVED' AND expires_at IS NOT NULL").fetchall():
             if parse_iso(row["expires_at"]) > now:
                 continue
-            job = self.store.db.execute("SELECT * FROM jobs WHERE id=?", (row["bound_job_id"],)).fetchone() if row["bound_job_id"] else None
-            # Expiry is admission deadline. Once sent to Slurm it is grandfathered;
-            # never kill a running or scheduler-pending job on approval expiry.
-            if job and job["state"] != "WAITING_QUOTA":
-                continue
-            self.store.db.execute("UPDATE applications SET status='EXPIRED',updated_at=? WHERE id=?", (utc_now(), row["id"]))
-            if job:
-                self.store.db.execute("UPDATE jobs SET state='EXPIRED',reason_code='approval_expired',reason_text='批准在提交调度器前已过期',finished_at=?,updated_at=? WHERE id=?", (utc_now(), utc_now(), job["id"]))
+            db = self.store.db
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                job = db.execute("SELECT * FROM jobs WHERE id=?", (row["bound_job_id"],)).fetchone() if row["bound_job_id"] else None
+                # Submission's WAITING -> SUBMITTING claim uses the same DB;
+                # never expire or cancel an already claimed scheduler job.
+                if job and job["state"] != "WAITING_QUOTA":
+                    db.execute("COMMIT")
+                    continue
+                if job and job["selected_tier"] is not None:
+                    if not self._fence_reservation_cancellation(job["id"], "EXPIRED"):
+                        raise RuntimeError("unable to fence expired reservation")
+                elif job:
+                    db.execute("UPDATE jobs SET state='EXPIRED',reason_code='approval_expired',reason_text='批准在提交调度器前已过期',finished_at=?,updated_at=? WHERE id=? AND state='WAITING_QUOTA'", (utc_now(), utc_now(), job["id"]))
+                db.execute("UPDATE applications SET status='EXPIRED',updated_at=? WHERE id=? AND status='APPROVED'", (utc_now(), row["id"]))
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
             self.add_notification(row["owner_uid"], "application_expired", "批准已过期", "未提交给调度器的授权已失效；已提交的任务不受影响。")
+
+    def monthly_controller_bridge(self) -> ControllerBridge:
+        cfg = self.config.get("monthly_controller", {})
+        if not isinstance(cfg, dict) or cfg.get("grant_enabled") is not True:
+            raise ApiError(409, "monthly_not_enabled", "月度额度追加尚未启用")
+        try:
+            return self.verified_monthly_bridge()
+        except ControllerUnavailable as exc:
+            raise ApiError(503, "controller_unavailable", "控制器配置不可用") from exc
+
+    def finish_monthly_grant(self, ident: Dict[str, Any], aid: str) -> Dict[str, Any]:
+        self.require_admin(ident)
+        row = self.store.db.execute("SELECT * FROM monthly_grant_outbox WHERE application_id=?", (aid,)).fetchone()
+        if not row:
+            raise ApiError(404, "grant_not_found", "追加额度记录不存在")
+        if row["state"] == "APPLIED":
+            return dict(self.store.db.execute("SELECT * FROM applications WHERE id=?", (aid,)).fetchone())
+        if row["state"] != "PENDING":
+            raise ApiError(409, "grant_state_inconsistent", "追加额度状态不明，需管理员核对")
+        bridge = self.monthly_controller_bridge()
+        try:
+            bridge.grant(row["target_uid"], row["month"], row["gpu_seconds"], aid, "uid-%s" % row["actor_uid"])
+        except (ControllerUnavailable, ValueError) as exc:
+            raise ApiError(503, "grant_unconfirmed", "控制器结果未确认，保留原申请等待核对", {"application_id":aid}) from exc
+        db = self.store.db
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            changed = db.execute("UPDATE monthly_grant_outbox SET state='APPLIED',updated_at=? WHERE application_id=? AND state='PENDING'", (utc_now(),aid)).rowcount
+            if changed:
+                applied = db.execute("UPDATE applications SET status='APPROVED',updated_at=? WHERE id=? AND status='GRANT_PENDING'", (utc_now(),aid)).rowcount
+                if applied != 1:
+                    raise ApiError(409, "grant_state_inconsistent", "控制器可能已生效，但申请状态不一致，需管理员核对")
+                self.store.audit(ident["uid"],ident["username"],"grant_applied","application",aid,{"approved_by_uid":row["actor_uid"]},"confirmed")
+                self.add_notification(row["target_uid"],"application_decision","额度追加已生效","控制器已确认本月额度追加")
+            db.execute("COMMIT")
+        except Exception:
+            db.execute("ROLLBACK")
+            raise
+        return dict(db.execute("SELECT * FROM applications WHERE id=?", (aid,)).fetchone())
 
     def monthly_request(self, requested: Any) -> Dict[str, Any]:
         if not isinstance(requested,dict):
@@ -1087,8 +1347,8 @@ finally: os.close(fd)
             raise ApiError(400, "reason_required", "理由长度需为 5 到 2000 字符")
         requested = payload.get("requested")
         if kind == "monthly_gpu_hours":
-            if not self.monthly.summary(ident["uid"])["enforcement_ready"]:
-                raise ApiError(409,"monthly_not_enabled","月度启动限制尚未启用，暂不受理追加申请")
+            if not self.monthly_controller_snapshot(ident["uid"]).get("request_available"):
+                raise ApiError(409,"monthly_not_enabled","月度额度追加暂不可用")
             requested = self.monthly_request(requested)
             prior = self.store.db.execute("SELECT a.* FROM monthly_requests r JOIN applications a ON a.id=r.application_id WHERE r.uid=? AND r.request_id=?", (ident["uid"],requested["client_request_id"])).fetchone()
             if prior:
@@ -1147,15 +1407,31 @@ finally: os.close(fd)
             raise ApiError(400, "decision_reason_required", "拒绝或调整批准需要填写理由")
         approved = json_object(row["requested_json"], {})
         expiry = None
+        if row["kind"] == "monthly_gpu_hours" and action != "reject":
+            if not self.monthly_controller_snapshot(row["owner_uid"]).get("enforcement_ready"):
+                raise ApiError(409, "monthly_not_enabled", "月度启动限制尚未启用，暂不能批准追加额度")
+            self.monthly_controller_bridge()
+            adjusted = payload.get("approved", {}) if action == "approve_adjusted" else {}
+            if not isinstance(adjusted, dict) or set(adjusted) - {"gpu_hours"}:
+                raise ApiError(400, "invalid_approved", "仅允许调整追加 GPU 小时")
+            approved = self.monthly_request({**approved, **adjusted})
+            db = self.store.db
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                changed = db.execute("UPDATE applications SET status='GRANT_PENDING',approved_json=?,decision_reason=?,updated_at=? WHERE id=? AND status='PENDING'", (json.dumps(approved,sort_keys=True),reason or "管理员批准",utc_now(),aid)).rowcount
+                if changed != 1: raise ApiError(409,"application_already_decided","申请已处理")
+                db.execute("INSERT INTO monthly_grant_outbox VALUES(?,?,?,?,?,'PENDING',?,?)", (aid,row["owner_uid"],int(approved["month"].replace('-','')),approved["gpu_hours"]*3600,ident["uid"],utc_now(),utc_now()))
+                self.store.audit(ident["uid"],ident["username"],action,"application",aid,{"approved":approved,"reason":reason},"grant_pending")
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+            return self.finish_monthly_grant(ident, aid)
         if action != "reject":
             adjusted = payload.get("approved", {}) if action == "approve_adjusted" else {}
             if not isinstance(adjusted, dict):
                 raise ApiError(400, "invalid_approved", "批准内容必须是对象")
-            if row["kind"] == "monthly_gpu_hours":
-                if not self.monthly.summary(row["owner_uid"])["enforcement_ready"]:
-                    raise ApiError(409,"monthly_not_enabled","月度启动限制尚未启用，暂不能批准追加额度")
-                approved = self.monthly_request({**approved, **{k:v for k,v in adjusted.items() if k == "gpu_hours"}})
-            elif row["kind"] == "temporary_job":
+            if row["kind"] == "temporary_job":
                 for key in ("gpu", "cpu", "memory_mb", "time_minutes", "qos"):
                     if key in adjusted: approved[key] = adjusted[key]
                 approved = self.validate_job(self.identity(row["owner_uid"]), approved, temporary=True)
@@ -1170,8 +1446,6 @@ finally: os.close(fd)
         try:
             changed=db.execute("UPDATE applications SET status=?,approved_json=?,decision_reason=?,expires_at=?,updated_at=? WHERE id=? AND status='PENDING'", (status,json.dumps(approved,sort_keys=True) if status=="APPROVED" else None,reason or "管理员批准",expiry,utc_now(),aid)).rowcount
             if changed != 1: raise ApiError(409,"application_already_decided","申请已处理")
-            if status == "APPROVED" and row["kind"] == "monthly_gpu_hours":
-                db.execute("INSERT INTO monthly_additions VALUES(?,?,?,?,?,?,?)", (aid,row["owner_uid"],approved["month"],approved["gpu_hours"]*3600,ident["uid"],reason or "管理员批准",utc_now()))
             if status == "APPROVED" and row["kind"] == "quota_change":
                 self.write_quota(row["owner_uid"], approved)
             self.add_notification(row["owner_uid"],"application_decision","申请已批准" if status=="APPROVED" else "申请已拒绝",reason or "管理员批准")
@@ -1287,7 +1561,7 @@ finally: os.close(fd)
         if not isinstance(payload,dict): raise ApiError(400,"invalid_body","请求正文必须是对象")
         if method == "GET" and path == "/api/v1/me": return {"identity": ident, "version": VERSION}
         if method == "GET" and path == "/api/v1/state":
-            return {"identity": ident, "hostname": socket.gethostname(), "display_name": self.config.get("display_name") or socket.gethostname(), "jobs": self.jobs(ident), "monthly_quota": self.monthly.summary(uid), "monthly_accounts": [{"uid":a["uid"],"username":a["username"],**a["monthly_quota"]} for a in self.accounts(ident)] if ident["is_admin"] else [], "gpus": self.gpu_inventory(ident), "metrics": self.metrics(ident), "quota": self.quota(uid), "accounts": self.accounts(ident), "default_quota": {**self.default_quota,"concurrent_job_limit":self.default_quota["concurrent_gpu_limit"]}, "temporary_authorizations_enabled": bool(self.config.get("temporary_authorizations", {}).get("enabled", False)), "applications": self.applications(ident), "notifications": self.notifications(ident), "rules": self.qos, "scheduler_available": self.last_reconcile_ok, "scheduler_error": self.scheduler_error, "observed_at": utc_now()}
+            return {"identity": ident, "hostname": socket.gethostname(), "display_name": self.config.get("display_name") or socket.gethostname(), "jobs": self.jobs(ident), "monthly_quota": self.monthly_controller_snapshot(uid), "monthly_accounts": [{"uid":a["uid"],"username":a["username"],**a["monthly_quota"]} for a in self.accounts(ident)] if ident["is_admin"] else [], "gpus": self.gpu_inventory(ident), "metrics": self.metrics(ident), "quota": self.quota(uid), "accounts": self.accounts(ident), "default_quota": {**self.default_quota,"concurrent_job_limit":self.default_quota["concurrent_gpu_limit"]}, "temporary_authorizations_enabled": bool(self.config.get("temporary_authorizations", {}).get("enabled", False)), "applications": self.applications(ident), "notifications": self.notifications(ident), "rules": self.qos, "scheduler_available": self.last_reconcile_ok, "scheduler_error": self.scheduler_error, "observed_at": utc_now()}
         if method == "GET" and path == "/api/v1/jobs": return {"jobs": self.jobs(ident)}
         if method == "POST" and path == "/api/v1/jobs/validate": return {"job": self.validate_job(ident, payload), "quota": self.quota(uid), "usage": self.active_usage(uid)}
         if method == "POST" and path == "/api/v1/jobs": return {"job": self.submit(ident, payload)}
@@ -1295,6 +1569,7 @@ finally: os.close(fd)
         if method == "GET" and path.startswith("/api/v1/jobs/") and path.endswith("/log"): return self.log(ident, path.split("/")[-2])
         if method == "GET" and path == "/api/v1/applications": return {"applications": self.applications(ident)}
         if method == "POST" and path == "/api/v1/applications": return {"application": self.create_application(ident, payload)}
+        if method == "POST" and path.startswith("/api/v1/applications/") and path.endswith("/grant-reconcile"): return {"application": self.finish_monthly_grant(ident, path.split("/")[-2])}
         if method == "POST" and path.startswith("/api/v1/applications/") and path.endswith("/decision"): return {"application": self.decide_application(ident, path.split("/")[-2], payload)}
         if method == "POST" and path.startswith("/api/v1/notifications/") and path.endswith("/read"): self.read_notification(ident, path.split("/")[-2]); return {"ok": True}
         if method == "POST" and path == "/api/v1/rules/preview": return self.rule_preview(ident, payload)

@@ -1,0 +1,92 @@
+--- a/src/slurmctld/job_scheduler.c
++++ b/src/slurmctld/job_scheduler.c
+@@ -86,6 +86,8 @@
+ #include "src/slurmctld/licenses.h"
+ #include "src/slurmctld/locks.h"
+ #include "src/slurmctld/node_scheduler.h"
++#include "src/slurmctld/monthly_quota.h"
++#include "src/slurmctld/selectable-tier-comment.h"
+ #include "src/slurmctld/power_save.h"
+ #include "src/slurmctld/proc_req.h"
+ #include "src/slurmctld/reservation.h"
+@@ -1081,6 +1083,8 @@
+ 	job_queue_rec->job_ptr  = job_queue_req->job_ptr;
+ 	job_queue_rec->part_ptr = job_queue_req->part_ptr;
+ 	job_queue_rec->priority = job_queue_req->prio;
++	job_queue_rec->monthly_ordered = false;
++	job_queue_rec->monthly_rank = 0;
+ 	job_queue_rec->qos_ptr = job_queue_req->job_ptr->qos_ptr;
+ 	job_queue_rec->resv_ptr = job_queue_req->resv_ptr;
+ 
+@@ -2167,6 +2171,45 @@
+  */
+ extern void sort_job_queue(list_t *job_queue)
+ {
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD && \
++    defined(TIME_ENABLE_MONTHLY_PRIORITY_DRAFT) && TIME_ENABLE_MONTHLY_PRIORITY_DRAFT
++	if (monthly_quota_enabled()) {
++		size_t count = list_count(job_queue), i = 0;
++		if (!count) return;
++		job_queue_rec_t **records = xcalloc(count, sizeof(*records));
++		struct job_record **jobs = xcalloc(count, sizeof(*jobs));
++		monthly_quota_tier_t *tiers = xcalloc(count, sizeof(*tiers));
++		list_itr_t *iterator = list_iterator_create(job_queue);
++		job_queue_rec_t *record;
++		struct timespec now;
++		while ((record = list_next(iterator))) {
++			char marker[33];
++			enum time_tier selected;
++			record->monthly_ordered = false;
++			records[i] = record;
++			/* Unmarked/CPU work retains a neutral rank. Invalid GPU
++			 * requests are still rejected by the allocation gate. */
++			tiers[i] = MONTHLY_QUOTA_NORMAL;
++			if (!time_parse_job_marker(record->job_ptr->comment, marker, &selected)) {
++				jobs[i] = record->job_ptr;
++				tiers[i] = (monthly_quota_tier_t)selected;
++			}
++			i++;
++		}
++		list_iterator_destroy(iterator);
++		if (i == count) {
++			/* On snapshot failure retain the parsed selected-tier order;
++			 * final admission independently rejects unavailable quota. */
++			if (!clock_gettime(CLOCK_REALTIME, &now) && now.tv_sec >= 0)
++				(void) monthly_quota_jobs_tiers_at(jobs, count, now.tv_sec, now.tv_nsec, tiers);
++			for (i = 0; i < count; i++) {
++				records[i]->monthly_rank = tiers[i];
++				records[i]->monthly_ordered = true;
++			}
++		}
++		xfree(tiers); xfree(jobs); xfree(records);
++	}
++#endif
+ 	list_sort(job_queue, sort_job_queue2);
+ }
+ 
+@@ -2267,6 +2310,14 @@
+ 			return -1;
+ 	}
+ 
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD && \
++    defined(TIME_ENABLE_MONTHLY_PRIORITY_DRAFT) && TIME_ENABLE_MONTHLY_PRIORITY_DRAFT
++	/* Both scheduler and backfill consume this frozen, transitive order.
++	 * Preserve reservations and partition tiers before quota priority. */
++	if (job_rec1->monthly_ordered && job_rec2->monthly_ordered &&
++	    job_rec1->monthly_rank != job_rec2->monthly_rank)
++		return job_rec1->monthly_rank < job_rec2->monthly_rank ? -1 : 1;
++#endif
+ 	if (bf_hetjob_prio && job_rec1->job_ptr->het_job_id &&
+ 	    (job_rec1->job_ptr->het_job_id !=
+ 	     job_rec2->job_ptr->het_job_id)) {
+--- a/src/slurmctld/job_scheduler.h
++++ b/src/slurmctld/job_scheduler.h
+@@ -51,6 +51,8 @@
+ 	part_record_t *part_ptr;	/* Pointer to partition record. Each
+ 					 * job may have multiple partitions. */
+ 	uint32_t priority;		/* Job priority in THIS partition */
++	uint8_t monthly_rank;		/* frozen at queue sort */
++	bool monthly_ordered;
+ 	slurmdb_qos_rec_t *qos_ptr; /* Pointer to the qos record. Each
+ 				     * job may have requested multiple QOS. */
+ 	slurmctld_resv_t *resv_ptr;     /* If job didn't ask for a reservation,

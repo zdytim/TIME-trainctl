@@ -1,0 +1,19 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -3153 +3153 @@
+-	if (_reserve1_available(uid, month, tier, &now, &available) || required > available)
++	if (_reserve1_available(uid, month, tier, &now, &available))
+@@ -3154,0 +3155,6 @@
++	/* No reservation event has been written on this path. The broker
++	 * can retry the same identity once capacity becomes available. */
++	if (required > available) {
++		rc = -2;
++		goto out;
++	}
+--- a/src/slurmctld/monthly_quota_control.c
++++ b/src/slurmctld/monthly_quota_control.c
+@@ -106,0 +107,4 @@
++		else if (rc == -2) {
++			snprintf(reply, sizeof(reply), "DENIED capacity\n");
++			rc = 0;
++		}

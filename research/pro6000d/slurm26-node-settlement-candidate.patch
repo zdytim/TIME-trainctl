@@ -1,0 +1,347 @@
+--- a/src/common/slurm_protocol_defs.h
++++ b/src/common/slurm_protocol_defs.h
+@@ -41,6 +41,9 @@
+ #ifndef _SLURM_PROTOCOL_DEFS_H
+ #define _SLURM_PROTOCOL_DEFS_H
+ 
++/* Paired TIME node/controller cleanup confirmation, not a public Slurm error. */
++#define TIME_MONTHLY_CLEANUP_OK 0x544d514fU
++
+ #include <inttypes.h>
+ #include <sys/wait.h>
+ 
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -102,6 +102,9 @@
+ 	enum time_tier current_tier;  /* V2 running allocation cursor */
+ 	mq_time_t anchor;
+ 	bool committed;
++	/* In-memory only: restart during cleanup fails closed. */
++	bool selector_released;
++	bool release_started; /* persisted before selector deallocation */
+ 	struct mq_active_record *next;
+ } mq_active_record_t;
+ 
+@@ -1230,6 +1233,16 @@
+ 		    _parse_u32(fields[4], &to.nsec) || to.nsec >= MQ_NSEC_PER_SEC)
+ 			return -1;
+ 		return _replay_selectable_advance(&to);
++	}
++	if (mq_selectable_replay && !strcmp(event, "ENDING1")) {
++		uint64_t sluid;
++		if (field_count != 6 || _parse_u32(fields[3], &job_id) ||
++		    _parse_u64(fields[4], &generation) || _parse_u64(fields[5], &sluid) ||
++		    !sluid || !(active = _find_active(job_id, generation)) ||
++		    !active->committed || active->release_started || active->sluid != sluid)
++			return -1;
++		active->release_started = true;
++		return 0;
+ 	}
+ 	if (mq_selectable_replay && !strcmp(event, "RELEASE2")) {
+ 		mq_reserve1_t *reservation = NULL;
+@@ -1238,7 +1251,8 @@
+ 		    _parse_u32(fields[6], &to.nsec) || to.nsec >= MQ_NSEC_PER_SEC)
+ 			return -1;
+ 		active = _find_active(job_id, generation);
+-		if (!active || !active->committed || _time_cmp(&active->anchor, &to)) return -1;
++		if (!active || !active->committed || !active->release_started ||
++		    _time_cmp(&active->anchor, &to)) return -1;
+ 		if (active->reservation_bound) {
+ 			reservation = _reserve1_find(active->uid, active->marker_id);
+ 			if (!reservation || reservation->terminal || reservation->job_id != active->job_id ||
+@@ -2705,8 +2719,66 @@
+ 		return;
+ 	}
+ 	monthly_quota_ambiguous(job_ptr);
++}
++
++void monthly_quota_begin_release(struct job_record *job_ptr)
++{
++	mq_active_record_t *active;
++	if (!job_ptr)
++		return;
++	pthread_mutex_lock(&mq_lock);
++	active = _find_active_job(job_ptr->job_id);
++	if (mq_enabled && active) {
++		if (!mq_healthy || !mq_reconciled || !mq_selectable_replay ||
++		    !active->committed || active->release_started || !active->sluid ||
++		    active->sluid != job_ptr->step_id.sluid || active->uid != job_ptr->user_id ||
++		    _append_event("ENDING1|%u|%" PRIu64 "|%" PRIu64,
++				  active->job_id, active->generation, active->sluid))
++			_mark_unhealthy("cannot persist allocation release start");
++		else
++			active->release_started = true;
++	}
++	pthread_mutex_unlock(&mq_lock);
++}
++
++void monthly_quota_selector_release(struct job_record *job_ptr, bool success)
++{
++	mq_active_record_t *active;
++	if (!job_ptr)
++		return;
++	pthread_mutex_lock(&mq_lock);
++	active = _find_active_job(job_ptr->job_id);
++	if (mq_enabled && active) {
++		if (!success || !active->committed || !active->release_started || !active->sluid ||
++		    active->sluid != job_ptr->step_id.sluid ||
++		    active->uid != job_ptr->user_id)
++			_mark_unhealthy("selector release failed or identity mismatch");
++		else
++			active->selector_released = true;
++	}
++	pthread_mutex_unlock(&mq_lock);
+ }
+ 
++void monthly_quota_node_completion(struct job_record *job_ptr, bool proven)
++{
++	mq_active_record_t *active;
++	bool can_release = false;
++	if (!job_ptr)
++		return;
++	pthread_mutex_lock(&mq_lock);
++	active = _find_active_job(job_ptr->job_id);
++	if (mq_enabled && active) {
++		if (!proven || !active->selector_released || !active->sluid ||
++		    active->sluid != job_ptr->step_id.sluid)
++			_mark_unhealthy("node cleanup not proven for allocation");
++		else
++			can_release = true;
++	}
++	pthread_mutex_unlock(&mq_lock);
++	if (can_release)
++		monthly_quota_release(job_ptr);
++}
++
+ void monthly_quota_release_unproven(struct job_record *job_ptr)
+ {
+ 	mq_active_record_t *active;
+@@ -2751,8 +2823,8 @@
+ 		pthread_mutex_unlock(&mq_lock);
+ 		return;
+ 	}
+-	if (!active->committed) {
+-		_mark_unhealthy("release encountered uncommitted allocation");
++	if (!active->committed || !active->release_started || !active->selector_released) {
++		_mark_unhealthy("release encountered uncommitted or unproven allocation");
+ 		pthread_mutex_unlock(&mq_lock);
+ 		return;
+ 	}
+@@ -3033,7 +3105,7 @@
+ 
+ 		/* A PREPARE alone does not prove when or whether a GPU was
+ 		 * allocated. Recovery must not manufacture a COMMIT event. */
+-		if (!active->committed) {
++		if (!active->committed || active->release_started) {
+ 			bad = true;
+ 			continue;
+ 		}
+--- a/src/slurmctld/monthly_quota.h
++++ b/src/slurmctld/monthly_quota.h
+@@ -140,6 +140,9 @@
+ /* Close the allocation only after Slurm has completed its release path. */
+ extern void monthly_quota_release(struct job_record *job_ptr);
+ extern void monthly_quota_release_unproven(struct job_record *job_ptr);
++extern void monthly_quota_begin_release(struct job_record *job_ptr);
++extern void monthly_quota_selector_release(struct job_record *job_ptr, bool success);
++extern void monthly_quota_node_completion(struct job_record *job_ptr, bool proven);
+ 
+ /* cons_tres retains GRES during suspension; GPU accounting continues. */
+ extern void monthly_quota_suspend(struct job_record *job_ptr, bool indefinite);
+--- a/src/slurmctld/node_scheduler.c
++++ b/src/slurmctld/node_scheduler.c
+@@ -347,13 +347,20 @@
+ 
+ 	node_mgr_make_node_blocked(job_ptr, false);
+ 
+-	if (select_g_job_fini(job_ptr) != SLURM_SUCCESS)
+-		error("select_g_job_fini(%pJ): %m", job_ptr);
+-
++	{
+ #if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
+-	xassert(verify_lock(JOB_LOCK, WRITE_LOCK));
+-	monthly_quota_release_unproven(job_ptr);
++		/* Persist before selector mutation so a crash cannot replay stale RUNNING
++		 * state as evidence that node cleanup has not begun. */
++		monthly_quota_begin_release(job_ptr);
+ #endif
++		int select_rc = select_g_job_fini(job_ptr);
++		if (select_rc != SLURM_SUCCESS)
++			error("select_g_job_fini(%pJ): %m", job_ptr);
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++		xassert(verify_lock(JOB_LOCK, WRITE_LOCK));
++		monthly_quota_selector_release(job_ptr, select_rc == SLURM_SUCCESS);
++#endif
++	}
+ 
+ 	/* Release any job-related switch data */
+ 	switch_g_job_complete(job_ptr);
+--- a/src/slurmctld/proc_req.c
++++ b/src/slurmctld/proc_req.c
+@@ -54,6 +54,7 @@
+ 
+ #include "slurm/slurm_errno.h"
+ 
++#include "src/slurmctld/monthly_quota.h"
+ #include "src/common/assoc_mgr.h"
+ #include "src/common/cron.h"
+ #include "src/common/fd.h"
+@@ -2007,9 +2008,28 @@
+ 
+ 	if (!(job_ptr = find_job(&epilog_msg->step_id)))
+ 		error("%s: could not find %pI", __func__, &epilog_msg->step_id);
+-	else if (job_epilog_complete(job_ptr, epilog_msg->node_name,
+-				     epilog_msg->return_code))
+-		run_scheduler = true;
++	else {
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++		node_record_t *node = find_node_record(epilog_msg->node_name);
++		bool cleanup_marker = epilog_msg->return_code == TIME_MONTHLY_CLEANUP_OK;
++		bool proven = cleanup_marker &&
++			msg->protocol_version >= SLURM_25_11_PROTOCOL_VERSION &&
++			epilog_msg->step_id.sluid &&
++			epilog_msg->step_id.sluid == job_ptr->step_id.sluid &&
++			IS_JOB_COMPLETING(job_ptr) && node && !IS_NODE_DOWN(node) &&
++			job_ptr->node_bitmap && bit_set_count(job_ptr->node_bitmap) == 1 &&
++			job_ptr->node_bitmap_cg &&
++			bit_set_count(job_ptr->node_bitmap_cg) == 1 &&
++			bit_test(job_ptr->node_bitmap_cg, node->index) &&
++			!(slurm_conf.prolog_flags & PROLOG_FLAG_RUN_IN_JOB);
++		monthly_quota_node_completion(job_ptr, proven);
++		if (cleanup_marker)
++			epilog_msg->return_code = SLURM_SUCCESS;
++#endif
++		if (job_epilog_complete(job_ptr, epilog_msg->node_name,
++					 epilog_msg->return_code))
++			run_scheduler = true;
++	}
+ 
+ 	if (epilog_msg->return_code)
+ 		error("%s: epilog error %pJ Node=%s Err=%s %s",
+--- a/src/slurmctld/agent.c
++++ b/src/slurmctld/agent.c
+@@ -74,6 +74,7 @@
+ #include <sys/wait.h>
+ #include <unistd.h>
+ 
++#include "src/slurmctld/monthly_quota.h"
+ #include "src/common/env.h"
+ #include "src/common/fd.h"
+ #include "src/common/forward.h"
+@@ -1149,10 +1150,14 @@
+ 				debug("%s: unable to find %pI to mark epilog completed on node=%s with return_code=%u",
+ 				      __func__, &kill_job->step_id,
+ 				      ret_data_info->node_name, rc);
+-			else if (job_epilog_complete(job_ptr,
+-						     ret_data_info->node_name,
+-						     rc))
+-				run_scheduler = true;
++			else {
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++				/* A shortcut response is not node cleanup evidence. */
++				monthly_quota_node_completion(job_ptr, false);
++#endif
++				if (job_epilog_complete(job_ptr, ret_data_info->node_name, rc))
++					run_scheduler = true;
++			}
+ 			unlock_slurmctld(job_write_lock);
+ 		}
+ 
+--- a/src/slurmd/slurmd/req.c
++++ b/src/slurmd/slurmd/req.c
+@@ -170,7 +170,7 @@
+ 					     uid_t req_uid,
+ 					     gid_t req_gid,
+ 					     uint16_t protocol_version);
+-static void _wait_state_completed(slurm_step_id_t *step_id, int max_delay);
++static bool _wait_state_completed(slurm_step_id_t *step_id, int max_delay);
+ static uid_t _get_job_uid(slurm_step_id_t *step_id);
+ 
+ static int  _add_starting_step(uint16_t type, void *req);
+@@ -4476,7 +4476,7 @@
+  * This indicates that switch_g_job_postfini has completed and
+  * freed the switch windows (as needed only for Federation switch).
+  */
+-static void _wait_state_completed(slurm_step_id_t *step_id, int max_delay)
++static bool _wait_state_completed(slurm_step_id_t *step_id, int max_delay)
+ {
+ 	int i;
+ 
+@@ -4488,7 +4488,27 @@
+ 	if (i >= max_delay)
+ 		error("%s: timed out waiting for %pI to complete",
+ 		      __func__, step_id);
++	return i < max_delay;
++}
++
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++/* Match the controller's comma/space delimited activation token exactly. */
++static bool _monthly_cleanup_marker_enabled(void)
++{
++	const char *cursor = slurm_conf.slurmctld_params, *start;
++	static const char token[] = "MonthlyGpuQuota";
++	if (!cursor)
++		return false;
++	while (*cursor) {
++		while (*cursor == ',' || *cursor == ' ' || *cursor == '\t') cursor++;
++		start = cursor;
++		while (*cursor && *cursor != ',' && *cursor != ' ' && *cursor != '\t') cursor++;
++		if ((size_t)(cursor - start) == sizeof(token) - 1 &&
++		    !strncasecmp(start, token, sizeof(token) - 1)) return true;
++	}
++	return false;
+ }
++#endif
+ 
+ static bool _steps_completed_now(slurm_step_id_t *step_id)
+ {
+@@ -4505,8 +4525,14 @@
+ 			fd = stepd_connect(stepd->directory, stepd->nodename,
+ 					   &stepd->step_id,
+ 					   &stepd->protocol_version);
+-			if (fd == -1)
++			if (fd == -1) {
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++				rc = false;
++				break;
++#else
+ 				continue;
++#endif
++			}
+ 
+ 			if (stepd_state(fd, stepd->protocol_version)
+ 			    != SLURMSTEPD_NOT_RUNNING) {
+@@ -4970,6 +4996,9 @@
+ 	 *    request. We need to send current switch state on AIX
+ 	 *    systems, so this bypass can not be used.
+ 	 */
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	(void) nsteps;
++#else
+ 	if ((nsteps == 0) && !slurm_conf.epilog && !spank_has_epilog()) {
+ 		debug4("sent ALREADY_COMPLETE");
+ 		if (send_response) {
+@@ -4996,6 +5025,7 @@
+ 		launch_complete_rm(&req->step_id);
+ 		return;
+ 	}
++#endif
+ 
+ 	/*
+ 	 *  At this point, if connection still open, we send controller
+@@ -5077,7 +5107,14 @@
+ 	launch_complete_rm(&req->step_id);
+ 
+ done:
+-	_wait_state_completed(&req->step_id, 5);
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	if (!_wait_state_completed(&req->step_id, 5))
++		rc = ESLURMD_EPILOG_FAILED;
++	else if (rc == SLURM_SUCCESS && _monthly_cleanup_marker_enabled())
++		rc = TIME_MONTHLY_CLEANUP_OK;
++#else
++	(void) _wait_state_completed(&req->step_id, 5);
++#endif
+ 	_waiter_complete(&req->step_id);
+ 
+ 	if (!(slurm_conf.prolog_flags & PROLOG_FLAG_RUN_IN_JOB))

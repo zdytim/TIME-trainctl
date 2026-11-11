@@ -21,11 +21,24 @@ int job_submit(job_desc_msg_t *job, uint32_t uid, char **error_msg)
     (void)error_msg;
     if (uid != 0 || !job || job->user_id == 0 || job->user_id == NO_VAL || !job->comment)
         return ESLURM_ACCESS_DENIED;
-    if (strncmp(job->comment, prefix, sizeof(prefix)-1) != 0 ||
-        strlen(job->comment) != sizeof(prefix)-1+32)
+    if (strncmp(job->comment, prefix, sizeof(prefix)-1) != 0)
         return ESLURM_ACCESS_DENIED;
-    for (const char *p=job->comment+sizeof(prefix)-1; *p; ++p)
-        if (!isxdigit((unsigned char)*p)) return ESLURM_ACCESS_DENIED;
+    const char *id = job->comment + sizeof(prefix)-1;
+    /* Validate the full length before reading the 32-byte identifier. */
+    size_t len = strlen(id);
+    if (len < 32)
+        return ESLURM_ACCESS_DENIED;
+    const char *tier = id + 32;
+    if (*tier && strcmp(tier, ":tier=debug") &&
+        strcmp(tier, ":tier=important") && strcmp(tier, ":tier=normal"))
+        return ESLURM_ACCESS_DENIED;
+    for (size_t i = 0; i < 32; i++) {
+        unsigned char c = (unsigned char)id[i];
+        /* Legacy identities keep their historical acceptance; V2 identity
+         * matches the controller's lowercase hexadecimal parser exactly. */
+        if (*tier ? !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) : !isxdigit(c))
+            return ESLURM_ACCESS_DENIED;
+    }
     return SLURM_SUCCESS;
 }
 

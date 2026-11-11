@@ -91,7 +91,7 @@ def main():
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     root = Path(__file__).resolve().parent.parent
     source = root/'backend'
-    for name in ('pro6000d-training-api.py', 'pro6000d-training-client.py', 'monthly_quota.py'):
+    for name in ('pro6000d-training-api.py', 'pro6000d-training-client.py', 'monthly_quota.py', 'monthly_reservation.py', 'controller_bridge.py', 'controller_view.py', 'activation_attestation.py'):
         if not (source/name).is_file(): raise SystemExit('Missing source: '+name)
     config = json.loads(CONFIG.read_text())
     monthly = config.get('monthly_quota', {})

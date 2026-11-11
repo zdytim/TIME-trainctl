@@ -1,0 +1,42 @@
+--- a/src/slurmctld/job_mgr.c
++++ b/src/slurmctld/job_mgr.c
+@@ -106,6 +106,8 @@
+ #include "src/slurmctld/licenses.h"
+ #include "src/slurmctld/locks.h"
+ #include "src/slurmctld/node_scheduler.h"
++#include "src/slurmctld/monthly_quota.h"
++#include "src/slurmctld/selectable-tier-comment.h"
+ #include "src/slurmctld/power_save.h"
+ #include "src/slurmctld/proc_req.h"
+ #include "src/slurmctld/read_config.h"
+@@ -17190,6 +17192,19 @@
+ 	uint32_t max_exit_code = 0;
+ 
+ 	xassert(job_ptr);
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	/* Record release before a never-started terminal job can be purged,
++	 * even if the broker is offline. The controller rechecks identity,
++	 * generation, node bitmap and the actual terminal state. */
++	if (!requeue && IS_JOB_COMPLETED(job_ptr) &&
++	    !(job_ptr->bit_flags & JOB_WAS_RUNNING)) {
++		xassert(verify_lock(JOB_LOCK, WRITE_LOCK));
++		char marker[33];
++		enum time_tier selected;
++		if (!time_parse_job_marker(job_ptr->comment, marker, &selected))
++			(void) monthly_quota_cancel_bound1(job_ptr->user_id, marker, job_ptr->job_id);
++	}
++#endif
+ 
+ 	if (job_ptr->resv_ports)
+ 		resv_port_job_free(job_ptr);
+--- a/src/slurmctld/monthly_quota_control.c
++++ b/src/slurmctld/monthly_quota_control.c
+@@ -165,7 +165,7 @@
+ 		lock_slurmctld(config_lock);
+ 		if (monthly_quota_selectable_ready()) {
+ 			rc = 0;
+-			snprintf(reply, sizeof(reply), "OK TIME26_SELECTABLE_ENDING1_ROLL1_RANK1_CANCEL_BOUND1\n");
++			snprintf(reply, sizeof(reply), "OK TIME26_SELECTABLE_ENDING1_ROLL1_RANK1_CANCEL_BOUND1_AUTOCANCEL1\n");
+ 		}
+ 		unlock_slurmctld(config_lock);
+ 	} else if (count == 2 && !strcmp(part[0], "SNAP2")) {

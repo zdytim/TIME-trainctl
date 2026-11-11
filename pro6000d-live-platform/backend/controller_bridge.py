@@ -14,6 +14,10 @@ class ControllerUnavailable(Exception):
     pass
 
 
+class ControllerDenied(Exception):
+    """Controller confirmed no reservation was created due to capacity."""
+
+
 class ControllerOutcomeUnknown(ControllerUnavailable):
     """The controller may have applied a mutation; reconcile by grant ID."""
 
@@ -23,6 +27,7 @@ class ControllerBridge:
         self.path = path
         self.controller_uid = int(controller_uid)
         self.timeout = timeout
+        self.expected_pid = None
 
     def _connect(self):
         if os.geteuid() != 0:
@@ -39,7 +44,7 @@ class ControllerBridge:
             try:
                 sock.connect(self.path)
                 pid, uid, _gid = struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-                if uid != self.controller_uid or pid <= 0:
+                if uid != self.controller_uid or pid <= 0 or (self.expected_pid is not None and pid != self.expected_pid):
                     raise ControllerUnavailable("controller peer identity mismatch")
                 return sock
             except Exception:
@@ -81,6 +86,10 @@ class ControllerBridge:
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= upper:
             raise ValueError("invalid unsigned integer")
         return value
+
+    def readiness(self):
+        """Verify the paired controller protocol and recovered gate state."""
+        return self._exchange("READY1 0") == "OK TIME26_SELECTABLE_ENDING2_ROLL1_RANK1_CANCEL_BOUND1_AUTOCANCEL1_RECONCILE1_NODEPROOF1_SELECT_DONE1_GPUMAP1_CANCEL_EMPTY1"
 
     def snapshot(self, uid):
         uid = self._uint(uid, 2**32 - 1)
@@ -186,6 +195,8 @@ class ControllerBridge:
             raise ValueError("invalid reservation amount")
         line = self._exchange("RESERVE1 %d %s %d %d %d" %
                               (uid, request_id, tier_ids[tier], gpu, minutes), mutation=True)
+        if line == "DENIED capacity":
+            raise ControllerDenied("selected tier cannot cover the request")
         if line != "OK %d" % amount:
             raise ControllerOutcomeUnknown("unexpected reserve reply; reconcile the same request ID")
         return {"request_id": request_id, "reserved_gpu_nanoseconds": amount}
@@ -204,6 +215,27 @@ class ControllerBridge:
         return {"uid": uid, "request_id": request_id, "month": month,
                 "tier": ("debug", "important", "normal")[tier], "gpu": gpu,
                 "minutes": minutes, "reserved_gpu_nanoseconds": amount}
+
+    def cancel_bound_reservation(self, uid, request_id, scheduler_id):
+        """Release a controller-verified terminal job that never allocated."""
+        uid, request_id = self._reservation_request(uid, request_id)
+        scheduler_id = self._uint(scheduler_id, 2**32 - 1)
+        if not scheduler_id:
+            raise ValueError("invalid scheduler job ID")
+        line = self._exchange("CANCEL_BOUND1 %d %s %d" % (uid, request_id, scheduler_id), mutation=True)
+        if line != "OK":
+            raise ControllerOutcomeUnknown("bound cancellation outcome unknown")
+        return {"cancelled": True}
+
+    def rollover_reservation(self, uid, request_id):
+        """Renew an unstarted hold into the controller's current month."""
+        uid, request_id = self._reservation_request(uid, request_id)
+        line = self._exchange("ROLL1 %d %s" % (uid, request_id), mutation=True)
+        if line == "DENIED capacity":
+            raise ControllerDenied("capacity")
+        if line != "OK":
+            raise ControllerOutcomeUnknown("reservation rollover outcome unknown")
+        return {"rolled": True}
 
     def bind_reservation(self, uid, request_id, scheduler_id):
         """Bind only a confirmed pending job; never assume a lost reply failed."""
@@ -229,17 +261,34 @@ class ControllerBridge:
         if (not 197001 <= month <= 999912 or not 1 <= month % 100 <= 12 or tier > 2 or
                 not 1 <= gpu <= 2**32 - 1 or not 1 <= minutes <= 2**32 - 1 or
                 amount > 2**64 - 1 or amount != gpu * minutes * 60 * 10**9 or
-                job > 2**32 - 1 or generation > 2**64 - 1 or sluid > 2**64 - 1 or state > 5 or
+                job > 2**32 - 1 or generation > 2**64 - 1 or sluid > 2**64 - 1 or state > 6 or
                 (state == 0 and (job or generation or sluid)) or
                 (state == 1 and (not job or generation or sluid)) or
                 (state in (2, 3, 5) and (not job or not generation)) or
-                (state == 4 and (job or generation or sluid))):
+                (state == 4 and (job or generation or sluid)) or
+                (state == 6 and (not job or generation or sluid))):
             raise ControllerUnavailable("invalid reservation status fields")
         return {"uid": uid, "request_id": request_id, "present": True, "month": month,
                 "tier": ("debug", "important", "normal")[tier], "gpu": gpu, "minutes": minutes,
                 "original_gpu_nanoseconds": amount, "hold_active": state < 4, "scheduler_id": job or None,
                 "generation": generation or None, "sluid": sluid or None,
-                "state": ("unbound", "bound", "prepared", "active", "cancelled", "released")[state]}
+                "state": ("unbound", "bound", "prepared", "active", "cancelled", "released", "cancelled_bound")[state]}
+
+    def cancel_request(self, uid, request_id, tier, gpu, minutes):
+        """Atomically cancel an unbound hold or tombstone an absent request."""
+        uid, request_id = self._reservation_request(uid, request_id)
+        tiers = {"debug": 0, "important": 1, "normal": 2}
+        if tier not in tiers:
+            raise ValueError("invalid reservation tier")
+        gpu = self._uint(gpu, 2**32 - 1)
+        minutes = self._uint(minutes, 2**32 - 1)
+        if not gpu or not minutes or gpu * minutes * 60 * 10**9 > 2**64 - 1:
+            raise ValueError("invalid reservation amount")
+        line = self._exchange("CANCEL_REQUEST1 %d %s %d %d %d" %
+                              (uid, request_id, tiers[tier], gpu, minutes), mutation=True)
+        if line != "OK":
+            raise ControllerOutcomeUnknown("cancellation outcome unknown; reconcile same identity")
+        return {"request_id": request_id, "cancelled": True}
 
     def cancel_unbound_reservation(self, uid, request_id):
         """Cancel only an observed unbound hold; reconcile every unknown result.
