@@ -234,6 +234,8 @@ class Service:
         columns = {r[1] for r in self.store.db.execute("PRAGMA table_info(jobs)")}
         if "client_request_id" not in columns:
             self.store.db.execute("ALTER TABLE jobs ADD COLUMN client_request_id TEXT")
+        if "client_request_hash" not in columns:
+            self.store.db.execute("ALTER TABLE jobs ADD COLUMN client_request_hash TEXT")
         self.store.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS jobs_request ON jobs(owner_uid,client_request_id) WHERE client_request_id IS NOT NULL")
         for name, definition in (("origin", "TEXT NOT NULL DEFAULT 'platform'"),
                                  ("source_scheduler_name", "TEXT"), ("source_submit_time", "TEXT"),
@@ -1081,11 +1083,19 @@ class Service:
     def submit(self, ident: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
         uid = ident["uid"]
         request_id = payload.get("client_request_id")
+        request_hash = None
         if request_id is not None:
             if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9-]{8,80}", request_id):
                 raise ApiError(400, "invalid_request_id", "请求标识无效")
+            try:
+                canonical = json.dumps(payload,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False).encode('utf-8')
+            except (TypeError, ValueError):
+                raise ApiError(400, "invalid_job", "任务请求无法规范化")
+            request_hash = hashlib.sha256(canonical).hexdigest()
             prior = self.store.db.execute("SELECT * FROM jobs WHERE owner_uid=? AND client_request_id=?", (uid, request_id)).fetchone()
             if prior:
+                if prior['client_request_hash'] != request_hash:
+                    raise ApiError(409, "idempotency_conflict", "请求编号已使用或历史请求无法核对，请查看原任务", {"job_id":prior['id']})
                 return self.job_json(prior)
         self.tick()
         if not self.scheduler_available() or not self.admission_available():
@@ -1122,7 +1132,7 @@ class Service:
                 changed = db.execute("UPDATE applications SET authorization_used=1,bound_job_id=?,updated_at=? WHERE id=? AND status='APPROVED' AND authorization_used=0 AND bound_job_id IS NULL", (jid, utc_now(), app_id)).rowcount
                 if changed != 1:
                     raise ApiError(409, "authorization_consumed", "批准已被其他请求使用")
-            db.execute("INSERT INTO jobs(id,owner_uid,owner_name,name,state,requested_gpu,requested_cpu,requested_mem_mb,requested_minutes,qos,workdir,env_name,command,output_path,reason_code,reason_text,temporary_application_id,created_at,updated_at,client_request_id,selected_tier) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (jid, uid, ident["username"], job["name"], "WAITING_QUOTA", job["gpu"], job["cpu"], job["memory_mb"], job["time_minutes"], job["qos"], job["workdir"], job["environment"], job["command"], job["output_path"], "waiting_user_quota", "已入队，等待个人额度与设备资源", app_id, utc_now(), utc_now(), request_id, job.get("selected_tier")))
+            db.execute("INSERT INTO jobs(id,owner_uid,owner_name,name,state,requested_gpu,requested_cpu,requested_mem_mb,requested_minutes,qos,workdir,env_name,command,output_path,reason_code,reason_text,temporary_application_id,created_at,updated_at,client_request_id,selected_tier,client_request_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (jid, uid, ident["username"], job["name"], "WAITING_QUOTA", job["gpu"], job["cpu"], job["memory_mb"], job["time_minutes"], job["qos"], job["workdir"], job["environment"], job["command"], job["output_path"], "waiting_user_quota", "已入队，等待个人额度与设备资源", app_id, utc_now(), utc_now(), request_id, job.get("selected_tier"), request_hash))
             self.store.audit(uid, ident["username"], "queue", "job", jid, {"temporary_application_id": app_id}, "accepted")
             db.execute("COMMIT")
         except Exception:
@@ -1560,8 +1570,20 @@ finally: os.close(fd)
         payload = request.get("body") or {}
         if not isinstance(payload,dict): raise ApiError(400,"invalid_body","请求正文必须是对象")
         if method == "GET" and path == "/api/v1/me": return {"identity": ident, "version": VERSION}
+        if method == "GET" and path == "/api/v1/capabilities":
+            monthly = self.monthly_controller_snapshot(uid)
+            ready = monthly.get("enforcement_ready") is True and monthly.get("selectable_tiers_ready") is True
+            return {"schema_version":"1.0", "api_version":VERSION, "identity_source":"unix_peer_uid",
+                    "execution":"shell_command", "logs":{"mode":"bounded_tail","follow":False},
+                    "multi_node":False,
+                    "monthly_quota":{"mode":"enforcing" if ready else "unknown",
+                                     "enforcement_ready":ready, "accounting":monthly.get("accounting_status","unknown"),
+                                     "selected_tier_required":ready},
+                    "monthly_requests":{"available":ready and monthly.get("request_available") is True,
+                                        "idempotency":"owner-request-id-v1",
+                                        "reconcile":"application-grant-v1"}}
         if method == "GET" and path == "/api/v1/state":
-            return {"identity": ident, "hostname": socket.gethostname(), "display_name": self.config.get("display_name") or socket.gethostname(), "jobs": self.jobs(ident), "monthly_quota": self.monthly_controller_snapshot(uid), "monthly_accounts": [{"uid":a["uid"],"username":a["username"],**a["monthly_quota"]} for a in self.accounts(ident)] if ident["is_admin"] else [], "gpus": self.gpu_inventory(ident), "metrics": self.metrics(ident), "quota": self.quota(uid), "accounts": self.accounts(ident), "default_quota": {**self.default_quota,"concurrent_job_limit":self.default_quota["concurrent_gpu_limit"]}, "temporary_authorizations_enabled": bool(self.config.get("temporary_authorizations", {}).get("enabled", False)), "applications": self.applications(ident), "notifications": self.notifications(ident), "rules": self.qos, "scheduler_available": self.last_reconcile_ok, "scheduler_error": self.scheduler_error, "observed_at": utc_now()}
+            return {"identity": ident, "hostname": socket.gethostname(), "display_name": self.config.get("display_name") or socket.gethostname(), "jobs": self.jobs(ident), "monthly_quota": self.monthly_controller_snapshot(uid), "monthly_accounts": [{"uid":a["uid"],"username":a["username"],**a["monthly_quota"]} for a in self.accounts(ident)] if ident["is_admin"] else [], "gpus": self.gpu_inventory(ident), "metrics": self.metrics(ident), "quota": self.quota(uid), "usage": self.active_usage(uid), "accounts": self.accounts(ident), "default_quota": {**self.default_quota,"concurrent_job_limit":self.default_quota["concurrent_gpu_limit"]}, "temporary_authorizations_enabled": bool(self.config.get("temporary_authorizations", {}).get("enabled", False)), "applications": self.applications(ident), "notifications": self.notifications(ident), "rules": self.qos, "scheduler_available": self.last_reconcile_ok, "scheduler_error": self.scheduler_error, "observed_at": utc_now()}
         if method == "GET" and path == "/api/v1/jobs": return {"jobs": self.jobs(ident)}
         if method == "POST" and path == "/api/v1/jobs/validate": return {"job": self.validate_job(ident, payload), "quota": self.quota(uid), "usage": self.active_usage(uid)}
         if method == "POST" and path == "/api/v1/jobs": return {"job": self.submit(ident, payload)}

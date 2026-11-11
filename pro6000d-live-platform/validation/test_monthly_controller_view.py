@@ -51,4 +51,17 @@ class ControllerViewTests(unittest.TestCase):
         self.assertFalse(view['usage_verified'])
         self.assertFalse(view['enforcement_ready'])
 
+    def test_capabilities_follow_verified_monthly_state(self):
+        self.s.identity=lambda uid: {'uid':uid}
+        for ready in (False,True):
+            self.s.monthly_controller_snapshot=lambda uid: {'mode':'enforcing' if ready else 'unknown',
+                'enforcement_ready':ready,'selectable_tiers_ready':ready,
+                'accounting_status':'ok' if ready else 'unknown','request_available':ready}
+            result=self.s.handle(1001,{'method':'GET','path':'/api/v1/capabilities'})
+            self.assertEqual(result['schema_version'],'1.0')
+            self.assertIs(result['monthly_quota']['enforcement_ready'],ready)
+            self.assertIs(result['monthly_requests']['available'],ready)
+            self.assertEqual(result['monthly_requests']['idempotency'],'owner-request-id-v1')
+            self.assertEqual(result['monthly_requests']['reconcile'],'application-grant-v1')
+
 if __name__=='__main__': unittest.main()

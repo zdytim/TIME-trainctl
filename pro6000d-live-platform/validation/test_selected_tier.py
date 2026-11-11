@@ -277,6 +277,27 @@ class SelectedTierTests(unittest.TestCase):
         row = service.store.db.execute('SELECT selected_tier,state FROM jobs WHERE id=?', (job['id'],)).fetchone()
         self.assertEqual((row['selected_tier'],row['state']), ('important','WAITING_QUOTA'))
         service.store.db.close()
+
+    def test_submit_request_id_replay_requires_same_payload(self):
+        config_path = pathlib.Path(self.tmp.name) / 'replay-config.json'
+        config_path.write_text(json.dumps({'state_db':str(pathlib.Path(self.tmp.name)/'replay.sqlite3'),
+                                           'capacity':{'gpu':4,'cpu':16,'memory_mb':65536}}))
+        service=api.Service(str(config_path))
+        service.user=self.service.user; service.safe_user_path=self.service.safe_user_path
+        service.monthly.summary=self.service.monthly.summary
+        service.tick=lambda:None; service.scheduler_available=lambda:True; service.admission_available=lambda:True
+        service.dispatch_waiting=lambda:None
+        service.quota=lambda uid:{'gpu_limit':4,'concurrent_job_limit':4,'active_job_limit':8}
+        ident={'uid':1001,'username':'worker','is_admin':False}
+        payload={**self.job,'client_request_id':'stable-12345'}
+        first=service.submit(ident,payload)
+        self.assertEqual(first['id'],service.submit(ident,dict(payload))['id'])
+        with self.assertRaises(api.ApiError) as exc:
+            service.submit(ident,{**payload,'selected_tier':'debug'})
+        self.assertEqual(exc.exception.code,'idempotency_conflict')
+        with self.assertRaises(api.ApiError): service.submit(ident,{**payload,'command':'different'})
+        self.assertEqual(service.store.db.execute('SELECT count(*) FROM jobs').fetchone()[0],1)
+        service.store.db.close()
     def test_row_job_preserves_stored_tier(self):
         row = {'name':'train','qos':'normal','requested_gpu':1,'requested_cpu':1,'requested_mem_mb':1024,
                'requested_minutes':60,'workdir':self.tmp.name,'env_name':'system','command':'true',
