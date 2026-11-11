@@ -21,10 +21,13 @@ def main():
     deploy = Path(__file__).resolve().parents[1] / 'deploy'
     node_unit = (deploy/'slurmd-monthly.conf').read_text().split('[Service]',1)[0]
     controller_unit = (deploy/'slurmctld-monthly.conf').read_text().split('[Service]',1)[0]
+    controller_service = (deploy/'slurmctld-monthly.conf').read_text().split('[Service]',1)[1]
     if not all(x in node_unit for x in ('Before=slurmctld.service', 'Wants=slurmctld.service')):
         raise RuntimeError('node dependency drop-in differs from tested design')
     if not all(x in controller_unit for x in ('Requires=slurmd.service', 'BindsTo=slurmd.service', 'After=slurmd.service', 'PartOf=slurmd.service')):
         raise RuntimeError('controller dependency drop-in differs from tested design')
+    if 'RuntimeDirectory=\n' not in controller_service or '/usr/bin/install -d -o slurm -g slurm -m 0755 /run/slurmctld' not in controller_service:
+        raise RuntimeError('controller runtime directory is not created with stable slurm ownership')
     token = uuid.uuid4().hex[:12]
     node, controller = f'time26-node-{token}.service', f'time26-controller-{token}.service'
     unit_dir = Path('/run/systemd/system')
