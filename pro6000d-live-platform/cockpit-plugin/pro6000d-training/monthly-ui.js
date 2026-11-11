@@ -10,16 +10,16 @@
   function panel(view) {
     const q = view || {};
     const active = q.enforcement_ready === true && q.selectable_tiers_ready === true;
-    const status = active ? '强制调度已启用' : '强制调度未启用';
+    const status = active ? '强制调度已启用' : '强制调度状态未确认';
     const apply = active && q.request_available === true ? '<button type="button" class="pf-c-button pf-m-secondary" data-action="monthly-apply">申请追加 GPU 小时</button>' : '';
     const valid = q.usage_verified === true && Array.isArray(q.tiers) &&
       names.every(name => q.tiers.filter(t => t && t.name === name).length === 1);
-    if (!valid) return `<section class="panel section-space"><div class="panelhead"><h2>月度 GPU 小时</h2><span>${status}</span></div><div class="panelbody">${escape(q.enforcement_limitation || '月度账本暂不可用。')}</div></section>`;
+    if (!valid) return `<section class="panel section-space"><div class="panelhead"><h2>月度 GPU 小时</h2><span>${status}</span></div><div class="panelbody">${escape(q.state === 'unknown' ? '无法确认控制器额度状态，请联系管理员。' : (q.enforcement_limitation || '月度账本暂不可用。'))}</div></section>`;
     const rows = names.map(name => {
       const t = q.tiers.find(item => item.name === name);
       return `<tr><td>${escape(name)}</td><td>${hours(t.limit_gpu_seconds)}</td><td>${hours(t.used_gpu_seconds)}</td><td>${hours(t.remaining_gpu_seconds)}</td></tr>`;
     }).join('');
-    return `<section class="panel section-space"><div class="panelhead"><h2>月度 GPU 小时 · ${escape(q.month || '—')}</h2><span>${status} ${apply}</span></div><div class="panelbody"><div class="table-scroll"><table><thead><tr><th>档位</th><th>额度</th><th>已使用</th><th>账面剩余</th></tr></thead><tbody>${rows}</tbody></table></div><p class="small">单位：GPU·小时。账面剩余未扣除排队或运行任务的未消耗预留，实际可预留额度可能更少；超额 ${hours(q.overage_gpu_seconds)}，运行任务继续计费。</p>${active?'':`<div class="notice">${escape(q.enforcement_limitation || '账本仅供查看，调度门控尚未启用。')}</div>`}</div></section>`;
+    return `<section class="panel section-space"><div class="panelhead"><h2>月度 GPU 小时 · ${escape(q.month || '—')}</h2><span>${status} ${apply}</span></div><div class="panelbody"><div class="table-scroll"><table><thead><tr><th>档位</th><th>额度</th><th>已使用</th><th>账面剩余</th></tr></thead><tbody>${rows}</tbody></table></div><p class="small">单位：GPU·小时。账面剩余未扣除排队或运行任务的未消耗预留，实际可预留额度可能更少；超额 ${hours(q.overage_gpu_seconds)}，运行任务继续计费。</p>${active?'':`<div class="notice">${escape(q.enforcement_limitation || '账本已读取，强制调度状态尚未确认。')}</div>`}</div></section>`;
   }
   function selector(view, selected) {
     const q = view || {};
