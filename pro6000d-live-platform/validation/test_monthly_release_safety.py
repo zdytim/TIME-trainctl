@@ -63,4 +63,20 @@ class ReleaseSafetyTests(unittest.TestCase):
                      'PartitionName=gpu Nodes=pro6000d State=UP State=DOWN\n'):
             with self.assertRaises(RuntimeError): activation.configured_conf(conf,'INACTIVE')
 
+    def test_node_unit_removes_only_old_controller_ordering(self):
+        unit='[Unit]\nAfter=network-online.target munge.service slurmctld.service\nRequires=munge.service\n[Service]\nExecStart=/opt/slurm/current/sbin/slurmd -D\n'
+        result=activation.configured_node_unit(unit).decode()
+        self.assertIn('After=network-online.target munge.service\n',result)
+        self.assertIn('Requires=munge.service\n',result)
+        self.assertNotIn('After=network-online.target munge.service slurmctld.service',result)
+        with self.assertRaises(RuntimeError): activation.configured_node_unit(unit.replace('slurmctld.service','other.service'))
+
+    def test_gres_disables_autodetection_for_checked_minor_mapping(self):
+        self.assertEqual(activation.configured_gres('AutoDetect=nvml\nName=gpu File=/dev/nvidia[0-3]\n'),
+                         b'AutoDetect=off\nName=gpu File=/dev/nvidia[0-3]\n')
+        for conf in ('AutoDetect=nvml\nAutoDetect=nvml\nName=gpu File=/dev/nvidia[0-3]\n',
+                     'AutoDetect=rsmi\nName=gpu File=/dev/nvidia[0-3]\n',
+                     'Name=gpu File=/dev/nvidia[0-3]\n'):
+            with self.assertRaises(RuntimeError): activation.configured_gres(conf)
+
 if __name__=='__main__': unittest.main()

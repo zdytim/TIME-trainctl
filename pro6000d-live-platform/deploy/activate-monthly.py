@@ -32,6 +32,7 @@ CONFIG = Path('/etc/pro6000d-training/config.json')
 MANIFEST = Path('/etc/pro6000d-training/monthly-release.json')
 CONTROLLER_DROPIN = Path('/etc/systemd/system/slurmctld.service.d/monthly.conf')
 NODE_DROPIN = Path('/etc/systemd/system/slurmd.service.d/monthly.conf')
+NODE_UNIT = Path('/etc/systemd/system/slurmd.service')
 WRAPPER = Path('/usr/local/libexec/pro6000d-quota-controller')
 CURRENT = Path('/opt/slurm/current')
 PREFIX = Path('/opt/slurm/26.05.5-timequota-20261111')
@@ -134,6 +135,36 @@ def configured_conf(text, partition_state):
     if count!=1: raise RuntimeError('gpu partition state could not be rewritten')
     lines[i]=active+(separator+comment if separator else '')
     return ('\n'.join(lines).rstrip() + '\nSlurmctldParameters=MonthlyGpuQuota\nPluginDir=/opt/slurm/current/lib/slurm\n').encode()
+
+
+def configured_node_unit(text):
+    section = None
+    removed = 0
+    result = []
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith('[') and stripped.endswith(']'):
+            section = stripped
+        if section == '[Unit]' and stripped.startswith('After='):
+            values = stripped[6:].split()
+            removed += values.count('slurmctld.service')
+            values = [value for value in values if value != 'slurmctld.service']
+            line = 'After=' + ' '.join(values) + '\n'
+        result.append(line)
+    if removed != 1:
+        raise RuntimeError('unexpected node service ordering; manual review required')
+    return ''.join(result).encode()
+
+
+def configured_gres(text):
+    # NVML sorts by PCI links, which can differ from device-minor order.
+    # The release binds bitmap positions to minors, so use explicit files.
+    lines = text.splitlines()
+    active = [line.strip() for line in lines if line.strip() and not line.lstrip().startswith('#')]
+    if active != ['AutoDetect=nvml', 'Name=gpu File=/dev/nvidia[0-3]']:
+        raise RuntimeError('unexpected GRES configuration; manual review required')
+    return ''.join('AutoDetect=off\n' if line.strip() == 'AutoDetect=nvml' else line + '\n'
+                   for line in lines).encode()
 
 
 def check_release_bootstrap():
@@ -249,6 +280,9 @@ def main():
             if db.execute('SELECT count(*) FROM '+table).fetchone()[0]:
                 raise SystemExit('legacy monthly data requires migration')
     original_conf=CONF.read_text()
+    original_node_unit=NODE_UNIT.read_text()
+    final_node_unit=configured_node_unit(original_node_unit)
+    final_gres=configured_gres(GRES.read_text())
     fenced_conf=configured_conf(original_conf,'INACTIVE')
     final_conf=configured_conf(original_conf,'UP')
     part=run('/usr/local/bin/scontrol','show','partition','gpu','-o')
@@ -260,7 +294,7 @@ def main():
     stamp=dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
     backup=Path('/var/backups/pro6000d-training')/('monthly-release-'+stamp)
     backup.mkdir(parents=True,mode=0o700)
-    for path in (CONF,CONFIG):
+    for path in (CONF,GRES,CONFIG,NODE_UNIT):
         dest=backup/'files'/str(path).lstrip('/'); dest.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(path,dest)
     with sqlite3.connect(str(dbpath)) as live, sqlite3.connect(str(backup/'state.sqlite3')) as saved:
         live.backup(saved)
@@ -313,6 +347,8 @@ def main():
         create_private(WITNESS/'node-proof.wal',b'P6NP1|HEADER|1\n')
         sync_dir(STATE); sync_dir(WITNESS); sync_dir(WITNESS.parent)
         replace(CONF,fenced_conf,stat.S_IMODE(CONF.stat().st_mode))
+        replace(GRES,final_gres,stat.S_IMODE(GRES.stat().st_mode))
+        replace(NODE_UNIT,final_node_unit,stat.S_IMODE(NODE_UNIT.stat().st_mode))
         replace(WRAPPER,(ROOT/'deploy/quota-controller-wrapper.py').read_bytes(),0o755)
         replace(CONTROLLER_DROPIN,(ROOT/'deploy/slurmctld-monthly.conf').read_bytes(),0o644)
         replace(NODE_DROPIN,(ROOT/'deploy/slurmd-monthly.conf').read_bytes(),0o644)
@@ -329,7 +365,10 @@ def main():
         release={'version':1,'files':files,'pidfiles':{'controller':'/run/slurmctld/slurmctld.pid','node':'/run/slurmd/slurmd.pid'}}
         replace(MANIFEST,(json.dumps(release,indent=2)+'\n').encode(),0o600)
         mark('starting paired slurm services')
-        run('systemctl','daemon-reload'); run('systemctl','start','slurmd')
+        run('systemctl','daemon-reload')
+        if 'slurmctld.service' in run('systemctl','show','slurmd.service','-p','After','--value').split():
+            raise RuntimeError('node service still ordered after controller')
+        run('systemctl','start','slurmd')
         sys.path.insert(0,str(ROOT/'backend'))
         from controller_bridge import ControllerBridge, ControllerUnavailable
         bridge=ControllerBridge(str(STATE/'time-quota.sock'),slurm.pw_uid)
@@ -405,7 +444,7 @@ def main():
                 if PREFIX.exists(): shutil.rmtree(PREFIX)
                 for path in (MANIFEST,CONTROLLER_DROPIN,NODE_DROPIN,WRAPPER):
                     if path.exists(): path.unlink()
-                for path in (CONF,CONFIG): shutil.copy2(backup/'files'/str(path).lstrip('/'),path)
+                for path in (CONF,GRES,CONFIG,NODE_UNIT): shutil.copy2(backup/'files'/str(path).lstrip('/'),path)
                 run('systemctl','daemon-reload')
             if services_stopped: run('systemctl','start','slurmctld','slurmd')
             if partition_down: run('/usr/local/bin/scontrol','update','PartitionName=gpu','State=UP')

@@ -177,3 +177,13 @@ the same bounded readiness window without requiring monthly fields.
 
 The 19.05.5 implementation reads restart count from its internal step record.
 This supports trusted request construction, not an end-to-end security claim.
+### pro6000d device mapping during first activation
+
+The target's NVML enumeration orders GPUs by PCI topology rather than device
+minor. The first-activation script accepts only the reviewed four-device GRES
+configuration and replaces `AutoDetect=nvml` with `AutoDetect=off`, retaining
+the explicit `/dev/nvidia[0-3]` files so the node can attest bitmap-to-device
+identity. This means NVML-provided GPU/CPU affinity and GPU link topology are
+not available to Slurm while this configuration is active. The original
+`gres.conf` and node service unit are backed up and restored on pre-admission
+rollback. Do not apply this conversion to a different GRES configuration.

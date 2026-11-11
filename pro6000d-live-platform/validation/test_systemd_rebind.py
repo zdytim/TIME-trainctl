@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise candidate systemd dependency behavior in the GPU-free Colima VM."""
 import os
+import importlib.util
 from pathlib import Path
 import signal
 import subprocess
@@ -20,7 +21,7 @@ def main():
     deploy = Path(__file__).resolve().parents[1] / 'deploy'
     node_unit = (deploy/'slurmd-monthly.conf').read_text().split('[Service]',1)[0]
     controller_unit = (deploy/'slurmctld-monthly.conf').read_text().split('[Service]',1)[0]
-    if not all(x in node_unit for x in ('After=\n', 'Before=slurmctld.service', 'Wants=slurmctld.service')):
+    if not all(x in node_unit for x in ('Before=slurmctld.service', 'Wants=slurmctld.service')):
         raise RuntimeError('node dependency drop-in differs from tested design')
     if not all(x in controller_unit for x in ('Requires=slurmd.service', 'BindsTo=slurmd.service', 'After=slurmd.service', 'PartOf=slurmd.service')):
         raise RuntimeError('controller dependency drop-in differs from tested design')
@@ -30,8 +31,15 @@ def main():
     paths = (unit_dir/node, unit_dir/controller)
     for path in paths:
         if path.exists(): raise RuntimeError('unexpected existing test unit')
-    paths[0].write_text(f'''[Unit]\nWants={controller}\nBefore={controller}\n[Service]\nType=simple\nExecStart=/bin/sleep 300\nRestart=on-failure\nRestartSec=1\n''')
-    paths[1].write_text(f'''[Unit]\nRequires={node}\nBindsTo={node}\nAfter={node}\nPartOf={node}\n[Service]\nType=simple\nExecStart=/bin/sleep 300\nRestart=on-failure\nRestartSec=1\n''')
+    spec=importlib.util.spec_from_file_location('activation',deploy/'activate-monthly.py')
+    activation=importlib.util.module_from_spec(spec); spec.loader.exec_module(activation)
+    original='[Unit]\nAfter=network-online.target munge.service slurmctld.service\n[Service]\nType=simple\nExecStart=/bin/sleep 300\nRestart=on-failure\nRestartSec=1\n'
+    paths[0].write_bytes(activation.configured_node_unit(original))
+    paths[1].write_text('[Unit]\n[Service]\nType=simple\nExecStart=/bin/sleep 300\nRestart=on-failure\nRestartSec=1\n')
+    dropdirs=(unit_dir/(node+'.d'),unit_dir/(controller+'.d'))
+    for directory in dropdirs: directory.mkdir()
+    (dropdirs[0]/'monthly.conf').write_text(node_unit.replace('slurmctld.service',controller))
+    (dropdirs[1]/'monthly.conf').write_text(controller_unit.replace('slurmd.service',node))
     def pid(unit):
         result=run('systemctl','show','-p','MainPID','--value',unit,check=False)
         return int(result.stdout.strip() or '0')
@@ -56,6 +64,9 @@ def main():
         run('systemctl','stop',controller,node,check=False)
         for path in paths:
             path.unlink(missing_ok=True)
+        for directory in dropdirs:
+            (directory/'monthly.conf').unlink(missing_ok=True)
+            directory.rmdir()
         run('systemctl','daemon-reload',check=False)
 
 if __name__ == '__main__':
