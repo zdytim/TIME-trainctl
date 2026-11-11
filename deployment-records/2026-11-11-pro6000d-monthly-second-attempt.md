@@ -1,0 +1,7 @@
+# pro6000d monthly quota: second activation attempt
+
+- Target: `ubuntu` (`pro6000d`); activation commit `488ee347c3782a2b9de3b150d000afc49af084e1`, pushed to `origin/pro6000d-slurm26`.
+- 2026-11-11 16:04 CST: after verifying an empty queue, activation began. Backup: `/var/backups/pro6000d-training/monthly-release-20261111T080420.671764Z`.
+- The node started with explicit GPU mapping and paired systemd ordering. The controller's quota recovery failed before admission opened; automatic rollback restored the previous Slurm and platform configurations. At 16:05 CST the original controller, node, and training service were active and the queue was empty. Monthly enforcement was not activated.
+- An isolated controller using a separate port and independent ledger reproduced the failure against the real NVIDIA inventory. Slurm's `next_node` does not advance the iterator, so the controller erroneously treated the single node as two. A regression harness checks one node, zero nodes, two nodes, hostname mismatch and GRES mismatch; the corrected target controller subsequently returned a snapshot using an independent ledger and real GPU inventory.
+- The first attempt's exact empty initialization files and diagnostic node-ready evidence were preserved under `/var/backups/pro6000d-training/monthly-release-20261111T075301.342962Z/initial-ledger-preserved`, with recorded SHA-256 digests; no production quota history was reset.

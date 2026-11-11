@@ -30,6 +30,7 @@ PATCHES = (
     'slurm26-cancel-recovery-candidate.patch', 'slurm26-ending-metadata-candidate.patch',
     'slurm26-node-proof-candidate.patch', 'slurm26-selector-evidence-candidate.patch',
     'slurm26-recovery-defer-candidate.patch', 'slurm26-selector-rebuild-candidate.patch',
+    'slurm26-local-node-iterator-fix.patch',
 )
 
 

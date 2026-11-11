@@ -138,14 +138,18 @@
     {
       "name": "slurm26-selector-rebuild-candidate.patch",
       "sha256": "99f656d07ca67361e6bfa2f37cc299229cce4934057dbe92497c32e788620f30"
+    },
+    {
+      "name": "slurm26-local-node-iterator-fix.patch",
+      "sha256": "b905389a4f48f3d73cdcc42779e7e02a942e6b08f25172e1ce72edfd6085e201"
     }
   ],
   "base_source_sha256": "d25618767b8ac0b7f2cbdafc631cceb8d26081717316ee06af3e78943cfd0897",
-  "overlay_sha256": "40365ea4ad6b156ed682e72767e675857a08b9e41215e377fbaaac4615fd257a",
-  "installed_tree_sha256": "5a94031ebfce302dc1b53e514f0b5751b08d231fe9eed652e571ea76a2062b62",
+  "overlay_sha256": "4fdd5d43eb5bc8ec729c48dab293351f225962920caae1054c746b3691c3bacd",
+  "installed_tree_sha256": "6d376b7966569a0a98e7bf9811d7a67188ff23767b1ae1a146da33d22ced7dc9",
   "source_files": {
     "src/slurmctld/monthly_quota.h": "4665885ceff330b855613aacbedef3bebc575948060f32349ba4107014d1336f",
-    "src/slurmctld/monthly_quota.c": "7c2338f44d6ce0f643d258a6e515e41103d98f1e7e959928054cb816ad8d1bb1",
+    "src/slurmctld/monthly_quota.c": "0fe5dc7a36561f5228a5031b0cd1292886008088670d01a48f298c64614082fb",
     "src/slurmctld/read_config.c": "f7117509f849e9c4e922ac3d049a2283b767435c251b0521f186f7b49a346461",
     "src/slurmctld/proc_req.c": "49af5a68d86319fb7564cbeb90eb83b93941cf77dda1e7adc191e39ca43c20af",
     "src/slurmctld/job_mgr.c": "d1976f6af09e7aecb696e9e028adbcf5d127f6822ea43e490b224d1bbcc8fd27",
@@ -164,7 +168,7 @@
     "src/plugins/select/cons_tres/job_resources.c": "6b78666fc4459b68f299ec71866a1853094e5b708ccd128cc94d4b7d186ef647"
   },
   "artifacts": {
-    "sbin/slurmctld": "bbb8d94b2ad3dbc256350a159050e1ef76819b55639d9a4690cc78cd936ec0ae",
+    "sbin/slurmctld": "ace7aa994e0d63b980f1f8ddb1827a089d8c2d50df0394ca98f9f886c42dc118",
     "sbin/slurmd": "5e1b5fc34c02953d55474ad3f7c35fcd14631b59352a884643aba2d5cd503932",
     "lib/slurm/job_submit_pro6000d.so": "ed4305c5e64cd5a96fe92671f5e164bea920626e96d0d71046daf83b9fdddf29",
     "lib/slurm/cgroup_v2.so": "d60af69bc8a2e54c3fcf9b3af0d1ac27667ff61c50ef32e2ca5cc5e8bebe9d9d",

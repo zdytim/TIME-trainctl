@@ -1,0 +1,13 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -613,7 +613,9 @@
+ 	int index = 0;
+ 	char hostname[256];
+ 	if (mq_test_inventory) return true;
+-	local = next_node(&index); other = next_node(&index);
++	local = next_node(&index);
++	if (local) index++;
++	other = next_node(&index);
+ 	if (!local || other || !local->node_hostname || gethostname(hostname, sizeof(hostname))) return false;
+ 	hostname[sizeof(hostname) - 1] = '\0';
+ 	if (strcmp(local->node_hostname, hostname)) return false;
