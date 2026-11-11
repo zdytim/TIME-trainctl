@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+import subprocess
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'deploy'))
@@ -78,5 +79,21 @@ class ReleaseSafetyTests(unittest.TestCase):
                      'AutoDetect=rsmi\nName=gpu File=/dev/nvidia[0-3]\n',
                      'Name=gpu File=/dev/nvidia[0-3]\n'):
             with self.assertRaises(RuntimeError): activation.configured_gres(conf)
+
+    def test_admin_health_retries_socket_startup_race(self):
+        class Reply:
+            stdout = '{"ok":true,"data":{"monthly_quota":{"enforcement_ready":true,"selectable_tiers_ready":true,"request_available":true}}}'
+        failure = subprocess.CalledProcessError(1, ['client'], stderr='socket not ready')
+        with patch.object(activation.subprocess, 'run', side_effect=[failure, Reply()]) as run, \
+             patch.object(activation.time, 'sleep'):
+            activation.wait_enabled_admin_state(1000, 1000)
+        self.assertEqual(run.call_count, 2)
+
+    def test_admin_health_rejects_non_boolean_readiness_without_retry(self):
+        class Reply:
+            stdout = '{"ok":true,"data":{"monthly_quota":{"enforcement_ready":"false","selectable_tiers_ready":true,"request_available":true}}}'
+        with patch.object(activation.subprocess, 'run', return_value=Reply()) as run:
+            with self.assertRaises(RuntimeError): activation.wait_enabled_admin_state(1000, 1000)
+        self.assertEqual(run.call_count, 1)
 
 if __name__=='__main__': unittest.main()

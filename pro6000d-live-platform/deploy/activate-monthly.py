@@ -167,6 +167,29 @@ def configured_gres(text):
                    for line in lines).encode()
 
 
+def wait_enabled_admin_state(uid, gid, timeout=15):
+    request = json.dumps({'method':'GET','path':'/api/v1/state'}) + '\n'
+    deadline = time.monotonic() + timeout
+    last_error = None
+    while time.monotonic() < deadline:
+        try:
+            reply = subprocess.run(['setpriv','--reuid='+str(uid),'--regid='+str(gid),'--init-groups',
+                                    '/usr/local/bin/pro6000d-training-client'],input=request,text=True,
+                                   capture_output=True,timeout=max(.01,deadline-time.monotonic()),
+                                   check=True,env=SAFE_ENV)
+            data = json.loads(reply.stdout)
+            q = data.get('data',{}).get('monthly_quota',{})
+            if (data.get('ok') is not True or q.get('enforcement_ready') is not True or
+                    q.get('selectable_tiers_ready') is not True or q.get('request_available') is not True):
+                raise RuntimeError('platform did not report fully enabled monthly controls')
+            return
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            last_error = exc
+        remaining = deadline-time.monotonic()
+        if remaining > 0: time.sleep(min(.5,remaining))
+    raise RuntimeError('platform admin state did not become ready') from last_error
+
+
 def check_release_bootstrap():
     # The operator verifies the uploaded archive hash before root extraction.
     # Independently reject writable paths before importing release helpers.
@@ -416,13 +439,7 @@ def main():
         partition_down=False
         run('systemctl','start',SERVICE); stopped_backend=False
         admin=pwd.getpwnam('ubuntu')
-        request=json.dumps({'method':'GET','path':'/api/v1/state'})+'\n'
-        reply=subprocess.run(['setpriv','--reuid='+str(admin.pw_uid),'--regid='+str(admin.pw_gid),'--init-groups',
-                              '/usr/local/bin/pro6000d-training-client'],input=request,text=True,capture_output=True,timeout=30,check=True,env=SAFE_ENV)
-        data=json.loads(reply.stdout)
-        q=data.get('data',{}).get('monthly_quota',{})
-        if not data.get('ok') or not q.get('enforcement_ready') or not q.get('selectable_tiers_ready') or not q.get('request_available'):
-            raise RuntimeError('platform did not report fully enabled monthly controls')
+        wait_enabled_admin_state(admin.pw_uid,admin.pw_gid)
         record.update(state='active',completed_utc=dt.datetime.now(dt.timezone.utc).isoformat(),
                       components=['slurmctld','slurmd','plugins','quota ledger','platform API','Cockpit'],
                       verification='empty queue, paired release attestation, controller READY1, admin API enabled; production allocation test pending')
