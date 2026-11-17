@@ -103,6 +103,12 @@ def preflight(candidate, tree_hash, commit, remote_ref, proof, official):
     if not CURRENT.is_symlink() or CURRENT.resolve() != Path('/opt/slurm/26.05.5-timequota-20261111'):
         raise RuntimeError('unexpected current Slurm version')
     if PREFIX.exists(): raise RuntimeError('candidate installation already exists')
+    for path in (Path('/etc/pro6000d-training/priority-identity'),
+                 Path('/var/lib/pro6000d-monthly-priority'),
+                 Path('/etc/systemd/system/slurmctld.service.d/priority-identity.conf'),
+                 Path('/etc/systemd/system/pro6000d-training.service.d/priority-storage.conf')):
+        if path.exists() or path.is_symlink():
+            raise RuntimeError('priority upgrade residue needs recovery: '+str(path))
     for service in ('slurmctld','slurmd','pro6000d-training'):
         run('systemctl','is-active','--quiet',service)
     if run('/usr/local/bin/squeue','--all','-h','-o','%i %T'):
@@ -317,6 +323,9 @@ def _perform_cutover_locked(candidate, tree_hash, commit, remote_ref, proof, off
         identity_dropin=Path('/etc/systemd/system/slurmctld.service.d/priority-identity.conf')
         if identity_dropin.exists(): raise RuntimeError('identity drop-in already exists')
         atomic_write(identity_dropin,('[Service]\nEnvironment=TIME_ORDERED_IDENTITY_DIR='+str(identity)+'\n').encode(),0o644)
+        broker_dropin=Path('/etc/systemd/system/pro6000d-training.service.d/priority-storage.conf')
+        if broker_dropin.exists(): raise RuntimeError('priority storage drop-in already exists')
+        atomic_write(broker_dropin,b'[Service]\nReadWritePaths=/var/lib/pro6000d-monthly-priority\n',0o644)
         atomic_write(slurm_conf,inactive,stat.S_IMODE(slurm_conf.stat().st_mode))
         tmp_link=CURRENT.with_name('.priority-current-'+stamp)
         os.symlink(str(PREFIX),tmp_link); os.replace(tmp_link,CURRENT)
