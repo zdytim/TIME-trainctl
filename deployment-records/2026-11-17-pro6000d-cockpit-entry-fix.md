@@ -1,0 +1,5 @@
+# pro6000d Cockpit entry permission fix
+
+On 2026-11-17 Asia/Shanghai, commit `464400a` was pushed to `pro6000d-slurm26` and applied to the already-deployed pro6000d Cockpit package: its directory and nested asset directories were set to mode 0755 so Cockpit can discover the existing world-readable plugin files as the logged-in user. The release installer was updated to preserve this behavior on future deployments.
+
+Verification as the `ubuntu` account: `cockpit-bridge --packages` lists `pro6000d-training`. The Slurm controller, node daemon and training management service remained active; no service was restarted and no job or ledger was changed. Existing Cockpit sessions may require refresh or a new login to reload the package list. The previous deployment backup remains `/var/backups/pro6000d-training/priority-upgrade-20261117T034802.986966Z`. No rollback was needed; directory modes may be restored from a verified backup if required, noting that mode 0700 prevents normal users from discovering the menu.
