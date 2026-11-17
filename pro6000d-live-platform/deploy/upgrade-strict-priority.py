@@ -342,6 +342,10 @@ def _perform_cutover_locked(candidate, tree_hash, commit, remote_ref, proof, off
             atomic_write(target,file.read_bytes(),0o755 if target.name=='pro6000d-training-client' else 0o644)
         for file in sorted(ui_source.rglob('*')):
             if file.is_file(): atomic_write(ui/file.relative_to(ui_source),file.read_bytes(),0o644)
+        # Cockpit discovers packages as the logged-in user, not as root.
+        # Existing directories may have inherited restrictive backup modes.
+        for directory in [ui, *(p for p in ui.rglob('*') if p.is_dir() and not p.is_symlink())]:
+            os.chmod(directory,0o755)
         monthly=cfg['monthly_controller']; monthly['priority_anchor_directory']=str(anchor); monthly['priority_lock_directory']=str(locks)
         monthly['experimental_creation_bound_top']=True; cfg['strict_priority_enabled']=True
         atomic_write(CONFIG,(json.dumps(cfg,ensure_ascii=False,indent=2)+'\n').encode(),stat.S_IMODE(CONFIG.stat().st_mode))
