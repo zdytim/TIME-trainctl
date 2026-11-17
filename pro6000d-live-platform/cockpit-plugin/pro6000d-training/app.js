@@ -97,10 +97,20 @@
     } finally {refreshBusy=false;}
   }
   function consumeState(){if(queuedState){state=queuedState;queuedState=null;}render();}
+  function visibleGpuDevices(gpu) {
+    const limit=Number((state.quota||{}).gpu_limit);
+    const processes=gpu.processes||[],uid=(state.identity||{}).uid,username=(state.identity||{}).username;
+    const own=new Set(processes.filter(p=>p.uid===uid||(p.uid==null&&p.username===username)).map(p=>String(p.gpu_uuid)));
+    const busy=new Set(processes.map(p=>String(p.gpu_uuid)));
+    const rank=d=>own.has(String(d.id))?0:busy.has(String(d.id))?2:1;
+    return (gpu.devices||[]).slice().sort((a,b)=>rank(a)-rank(b)).slice(0,Number.isSafeInteger(limit)&&limit>=0?limit:0);
+  }
   function gpuCards() {
     const gpu=state.gpus||{};
     if(!gpu.available)return `<div class="empty">GPU 数据暂不可用<div class="small">${esc(gpu.reason||'等待采集')}</div></div>`;
-    return `<div class="gpu-grid">${(gpu.devices||[]).map(g=>`<div class="gpu"><strong>GPU ${esc(g.index)} · ${esc(g.name)}</strong><div class="owner">${g.owner_job_id?'任务 '+esc(g.owner_job_id):'设备归属以任务队列为准'}</div><div class="meter"><span style="width:${Math.max(0,Math.min(100,Number(g.utilization_percent)||0))}%"></span></div><div class="small">利用率 ${esc(g.utilization_percent)}% · 显存 ${esc(g.memory_used_mb)} / ${esc(g.memory_total_mb)} MiB</div><div class="small mono">${esc(g.id)}</div></div>`).join('')}</div>`;
+    const devices=visibleGpuDevices(gpu);
+    if(!devices.length)return '<div class="empty">当前没有可显示的 GPU，请查看账户 GPU 数量或联系管理员。</div>';
+    return `<div class="gpu-grid">${devices.map(g=>`<div class="gpu"><strong>GPU ${esc(g.index)} · ${esc(g.name)}</strong><div class="owner">${g.owner_job_id?'任务 '+esc(g.owner_job_id):'共享设备，实际分配由调度器决定'}</div><div class="meter"><span style="width:${Math.max(0,Math.min(100,Number(g.utilization_percent)||0))}%"></span></div><div class="small">利用率 ${esc(g.utilization_percent)}% · 显存 ${esc(g.memory_used_mb)} / ${esc(g.memory_total_mb)} MiB</div><div class="small mono">${esc(g.id)}</div></div>`).join('')}</div>`;
   }
   function overviewPage(){return head('概览','当前设备和训练资源',button('系统概览','native','data-path="/system"'))+banner()+gpuCards()+`<div class="grid2"><div class="card"><div class="cardbody"><h2>训练任务</h2><p>运行中 ${state.jobs.filter(j=>j.state==='RUNNING').length} · 排队 ${state.jobs.filter(j=>['PENDING','WAITING_QUOTA','SUBMITTING'].includes(j.state)).length}</p>${button('查看任务队列','page','data-target="training"')}</div></div><div class="card"><div class="cardbody"><h2>我的额度</h2><p>${esc(quotaText(state.quota))}</p>${button('查看账户与配额','page','data-target="accounts"')}</div></div></div>`;}
   function trainingPage(){
@@ -219,12 +229,7 @@
   }
   function metricsPage(){
     const m=state.metrics||{},gpu=state.gpus||m.gpu||{};
-    const limit=Number((state.quota||{}).gpu_limit);
-    const processes=gpu.processes||[],uid=(state.identity||{}).uid,username=(state.identity||{}).username;
-    const own=new Set(processes.filter(p=>p.uid===uid||(p.uid==null&&p.username===username)).map(p=>String(p.gpu_uuid)));
-    const busy=new Set(processes.map(p=>String(p.gpu_uuid)));
-    const rank=d=>own.has(String(d.id))?0:busy.has(String(d.id))?2:1;
-    const all=(gpu.devices||[]).slice().sort((a,b)=>rank(a)-rank(b)).slice(0,Number.isSafeInteger(limit)&&limit>=0?limit:0);
+    const all=visibleGpuDevices(gpu);
     const selected=all.filter(d=>monitorGPU==='all'||String(d.id)===monitorGPU);
     const unavailable=!gpu.available,stale=disconnected||gpu.stale;
     let warning='';
