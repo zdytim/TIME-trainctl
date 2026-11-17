@@ -203,7 +203,7 @@
   function gpuProcessTable(gpu,devices){
     const selected=new Set(devices.map(d=>String(d.id)));
     const ownOnly=!isAdmin()||monitorProcessScope==='mine';
-    let processes=(gpu.processes||[]).filter(p=>monitorGPU==='all'||selected.has(String(p.gpu_uuid)));
+    let processes=(gpu.processes||[]).filter(p=>selected.has(String(p.gpu_uuid)));
     if(ownOnly)processes=processes.filter(p=>p.uid===state.identity.uid||(p.uid==null&&p.username===state.identity.username));
     processes=processes.slice().sort((a,b)=>{
       const av=metricNumber(a[monitorSort]),bv=metricNumber(b[monitorSort]);
@@ -218,7 +218,13 @@
     return `<section class="panel gpu-process-panel"><div class="cardhead"><div><h2>GPU 进程 <span class="gpu-process-count">${processes.length}</span></h2><div class="small">${accessText}</div></div>${isAdmin()?`<label class="gpu-filter-label">进程范围<select class="control gpu-filter" data-monitor-filter="scope" aria-label="GPU 进程范围"><option value="all" ${monitorProcessScope==='all'?'selected':''}>全部账户</option><option value="mine" ${monitorProcessScope==='mine'?'selected':''}>仅我的进程</option></select></label>`:badge('仅本人','blue')}</div><div class="table-scroll"><table class="gpu-process-table"><thead><tr><th>设备</th><th aria-sort="${monitorSort==='pid'?(monitorSortDirection==='desc'?'descending':'ascending'):'none'}">${processSortButton('PID','pid')}</th><th>账户</th><th>进程 / 类型</th><th aria-sort="${monitorSort==='memory_used_mb'?(monitorSortDirection==='desc'?'descending':'ascending'):'none'}">${processSortButton('显存','memory_used_mb')}</th><th>进程 GPU</th><th>关联训练任务</th></tr></thead><tbody>${row||empty}</tbody></table></div><div class="gpu-process-footer">进程 GPU 利用率未提供时显示“—”，不会使用整卡利用率代替。${gpu.processes_truncated?' 当前进程列表已达到采集上限。':''}</div></section>`;
   }
   function metricsPage(){
-    const m=state.metrics||{},gpu=state.gpus||m.gpu||{},all=gpu.devices||[];
+    const m=state.metrics||{},gpu=state.gpus||m.gpu||{};
+    const limit=Number((state.quota||{}).gpu_limit);
+    const processes=gpu.processes||[],uid=(state.identity||{}).uid,username=(state.identity||{}).username;
+    const own=new Set(processes.filter(p=>p.uid===uid||(p.uid==null&&p.username===username)).map(p=>String(p.gpu_uuid)));
+    const busy=new Set(processes.map(p=>String(p.gpu_uuid)));
+    const rank=d=>own.has(String(d.id))?0:busy.has(String(d.id))?2:1;
+    const all=(gpu.devices||[]).slice().sort((a,b)=>rank(a)-rank(b)).slice(0,Number.isSafeInteger(limit)&&limit>=0?limit:0);
     const selected=all.filter(d=>monitorGPU==='all'||String(d.id)===monitorGPU);
     const unavailable=!gpu.available,stale=disconnected||gpu.stale;
     let warning='';
@@ -226,9 +232,9 @@
     else if(stale||unavailable)warning=`<div class="banner warn"><strong>${stale?'GPU 数据已过期':'GPU 采集暂不可用'}</strong> ${esc(gpu.reason||'等待下一次采集。')} ${gpu.observed_at?'最后成功采样：'+fmt(gpu.observed_at):''}</div>`;
     else if(!state.scheduler_available)warning='<div class="banner warn">调度服务尚未就绪；GPU 实时监控仍可独立查看。</div>';
     const absent=monitorGPU!=='all'&&!all.some(d=>String(d.id)===monitorGPU);
-    const header=head('性能监控','GPU 实时监控 · 利用率、显存与进程',button('系统性能','native','data-path="/metrics"'));
+    const header=head('性能监控','按账户 GPU 数量展示共享设备；训练时由调度器决定实际分配',button('系统性能','native','data-path="/metrics"'));
     const toolbar=`<div class="gpu-monitor-toolbar"><label class="gpu-filter-label">设备<select class="control gpu-filter" data-monitor-filter="gpu" aria-label="筛选 GPU 设备"><option value="all" ${monitorGPU==='all'?'selected':''}>全部 GPU${all.length?'（'+all.length+'）':''}</option>${all.map(d=>`<option value="${esc(d.id)}" ${String(d.id)===monitorGPU?'selected':''}>GPU ${esc(d.index)} · ${esc(d.name)}</option>`).join('')}${absent?`<option value="${esc(monitorGPU)}" selected>所选设备暂不可用</option>`:''}</select></label><div class="gpu-sampling"><span class="gpu-live-dot ${stale||unavailable?'paused':''}"></span>${stale?'数据过期':unavailable?'等待采集':'每 '+(gpu.sampling_interval_seconds||5)+' 秒采样'}<span>更新于 ${fmt(gpu.observed_at)}</span></div>${button('立即刷新','refresh')}</div>`;
-    const cards=selected.map(d=>detailedGpuCard(d,gpu)).join('')||`<div class="card gpu-monitor-empty"><strong>${absent?'所选 GPU 暂不可用':'尚未读取到 GPU 设备'}</strong><p>${esc(gpu.reason||'设备恢复后将自动刷新，请稍后查看。')}</p></div>`;
+    const cards=selected.map(d=>detailedGpuCard(d,gpu)).join('')||`<div class="card gpu-monitor-empty"><strong>${absent?'所选 GPU 暂不可用':gpu.available?'当前没有可显示的 GPU':'尚未读取到 GPU 设备'}</strong><p>${esc(gpu.reason||(gpu.available?'请查看账户 GPU 数量或联系管理员。':'设备恢复后将自动刷新，请稍后查看。'))}</p></div>`;
     const charts=`<div class="gpu-history-grid">${historyChart(gpu,selected,'utilization')}${historyChart(gpu,selected,'memory')}</div><p class="gpu-history-note">历史从本次服务采样后开始积累，最多保留约 10 分钟；空白和断线表示该时段没有有效数据。${gpu.history_started_at?'本次采样开始于 '+fmt(gpu.history_started_at)+'。':''}</p>`;
     const total=metricNumber(m.memory_total_mb),available=metricNumber(m.memory_available_mb),used=total!==null&&available!==null?total-available:null;
     const host=`<section class="gpu-host-summary" aria-label="主机用量"><strong>主机用量</strong><span>CPU 1 分钟负载 <b>${metricValue(m.cpu_load_1m,'',2)}</b></span><span>内存已用 <b>${memoryValue(used)}</b> / ${memoryValue(total)}</span><span>内存可用 <b>${memoryValue(available)}</b></span></section>`;
