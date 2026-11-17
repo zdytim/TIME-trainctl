@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "architecture": "x86_64",
+  "official_source_sha256": "4680cafc82b0689865c885eb703441e7ebf764896c40fd03a50f2fcb60664f68",
+  "source_archive_sha256": "0f270d5784f06bc7a924305d57ac5967a61ffc29e99c7faedb9be77b50686cd0",
+  "submit_source_sha256": "56ac2493d480727f9b00629dc2be560ee9e80389bf53b7408bb8f628225a43fd",
+  "build_script_sha256": "c9f8d1c080216b65d9b9ee0751a7b287b0236c04f44006048606e7a84f489c37",
+  "integration_patch_sha256": "6fd7cba433fb6c987e223d8d0d602949d4024378ca1cbdf17ea1eb32fd8cf188",
+  "installed_tree_sha256": "d96609bc002a3aeb6ad5c2eaca16f6e35cb152e605977411f28aaca926b48d1c",
+  "prefix": "/opt/slurm/26.05.5-timequota-priority-20261116",
+  "artifacts": {
+    "sbin/slurmctld": "bdf3ccf287dcf5f1c5a7425a0e550d38db243106c64dca90f77274dc0a614422",
+    "sbin/slurmd": "41e49420ef85d4269a87120bb34b2f28972a8a29d0c453e0684588262930188b",
+    "lib/slurm/job_submit_pro6000d.so": "ed4305c5e64cd5a96fe92671f5e164bea920626e96d0d71046daf83b9fdddf29",
+    "lib/slurm/select_cons_tres.so": "87ac6b20c60bf51d04e709d3318ed9c10fed6ae0b87773b5dc3c97cc1f4dc3a0",
+    "lib/slurm/sched_backfill.so": "19c2e9184b477a89885eb77336d8f373a5aa23a9adde07110bc34dfd6ca76f22",
+    "lib/slurm/cgroup_v2.so": "f7176c700b86b7d5d7f78cb6fd6720bdc8be03c4d510417d5d587c2c427bcc4a"
+  }
+}

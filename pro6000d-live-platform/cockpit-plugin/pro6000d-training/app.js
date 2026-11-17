@@ -117,7 +117,38 @@
   function accountsPage(){
     const d=state.default_quota||state.quota;
     if(!isAdmin())return head('我的账户','查看额度，或申请长期调整')+banner()+`<div class="card"><div class="cardbody"><h2>${esc(state.identity.username)}</h2><p>${esc(quotaText(state.quota))}</p><p>来源：${state.quota.source==='personal_override'?'个人覆盖':'继承默认'}</p>${button('申请长期额度调整','apply-quota')}</div></div>`;
-    return head('账户与配额','默认规则统一生效，特殊需要使用个人覆盖',button('系统账户管理','native','data-path="/users"'))+banner()+monthlyAccounts()+`<div class="card"><div class="cardhead"><h2>默认额度</h2>${button('编辑默认额度','edit-quota','data-uid="default"')}</div><div class="cardbody">${esc(quotaText(d))}</div></div><div class="panel section-space"><div class="panelhead"><h2>已开通训练平台的账户</h2></div><div class="table-scroll"><table><thead><tr><th>账户</th><th>当前用量</th><th>额度</th><th>来源</th><th>管理</th></tr></thead><tbody>${(state.accounts||[]).map(a=>`<tr><td><strong>${esc(a.username)}</strong><div class="small">${a.is_admin?'管理员':'普通用户'} · UID ${a.uid}</div></td><td>${(a.usage||{}).gpu||0} GPU / ${(a.usage||{}).concurrent_jobs||0} 并发 / ${(a.usage||{}).active_jobs||0} 活动任务</td><td>${esc(quotaText(a.quota))}</td><td>${a.quota.source==='personal_override'?'个人覆盖':'继承默认'}</td><td><button class="linkbutton" data-action="edit-quota" data-uid="${a.uid}">编辑</button>${a.quota.source==='personal_override'?`<button class="linkbutton" data-action="inherit-quota" data-uid="${a.uid}">恢复继承</button>`:''}</td></tr>`).join('')||'<tr><td colspan="5">暂无已开通账户</td></tr>'}</tbody></table></div></div>`;
+    return head('账户与配额','默认规则统一生效，特殊需要使用个人覆盖',button('系统账户管理','native','data-path="/users"'))+banner()+monthlyAccounts()+topPriorityPanel()+`<div class="card"><div class="cardhead"><h2>默认额度</h2>${button('编辑默认额度','edit-quota','data-uid="default"')}</div><div class="cardbody">${esc(quotaText(d))}</div></div><div class="panel section-space"><div class="panelhead"><h2>已开通训练平台的账户</h2></div><div class="table-scroll"><table><thead><tr><th>账户</th><th>当前用量</th><th>额度</th><th>来源</th><th>管理</th></tr></thead><tbody>${(state.accounts||[]).map(a=>`<tr><td><strong>${esc(a.username)}</strong><div class="small">${a.is_admin?'管理员':'普通用户'} · UID ${a.uid}</div></td><td>${(a.usage||{}).gpu||0} GPU / ${(a.usage||{}).concurrent_jobs||0} 并发 / ${(a.usage||{}).active_jobs||0} 活动任务</td><td>${esc(quotaText(a.quota))}</td><td>${a.quota.source==='personal_override'?'个人覆盖':'继承默认'}</td><td><button class="linkbutton" data-action="edit-quota" data-uid="${a.uid}">编辑</button>${a.quota.source==='personal_override'?`<button class="linkbutton" data-action="inherit-quota" data-uid="${a.uid}">恢复继承</button>`:''}</td></tr>`).join('')||'<tr><td colspan="5">暂无已开通账户</td></tr>'}</tbody></table></div></div>`;
+  }
+  function prioritySnapshot(){return queuedState||state;}
+  function topPriorityReady(){const s=prioritySnapshot(),p=s&&s.priority_management;return !!(isAdmin()&&!disconnected&&s&&s.identity&&s.identity.is_admin===true&&p&&p.available===true&&p.reconciled===true);}
+  function topPriorityPanel(){
+    const snapshot=prioritySnapshot();
+    if(!isAdmin()||!snapshot||!snapshot.priority_management)return '';
+    const rows=(snapshot.accounts||[]).map(a=>{const known=topPriorityReady()&&typeof a.top_priority==='boolean'&&typeof a.top_priority_identity_generation==='string'&&/^[0-9a-f]{32}$/.test(a.top_priority_identity_generation),clear=a.top_priority_pending===false&&Number.isSafeInteger(a.top_priority_version)&&a.top_priority_version>=0&&a.top_priority_version<Number.MAX_SAFE_INTEGER;
+      const action=known&&clear&&topPriorityReady()?`<button class="linkbutton" data-action="top-priority-edit" data-uid="${esc(a.uid)}">${a.top_priority?'取消最高优先级':'设为最高优先级'}</button>`:'';
+      return `<tr><td>${esc(a.username)}</td><td>${known?(a.top_priority?'最高优先级 · 月度不限额':'普通优先级'):'状态未确认'}${a.top_priority_pending===true?' · 变更待确认':a.top_priority_pending===false&&a.top_priority_version===Number.MAX_SAFE_INTEGER?' · 版本已达上限':!clear?' · 变更状态未确认':''}</td><td>${action}</td></tr>`;}).join('');
+    return `<div class="panel section-space"><div class="panelhead"><h2>最高优先级用户</h2></div><div class="panelbody"><p>最高优先级用户的月度额度不限，实际用量仍会记录；其任务等待时，其他用户的新任务必须等待。已运行的任务继续运行。</p>${topPriorityReady()?'':'<div class="notice">控制器状态未确认，暂不能更改。</div>'}<div class="table-scroll"><table><thead><tr><th>用户</th><th>当前状态</th><th>管理</th></tr></thead><tbody>${rows||'<tr><td colspan="3">暂无已开通账户</td></tr>'}</tbody></table></div></div></div>`;
+  }
+  function topPriorityEdit(uid){
+    if(!topPriorityReady())return notify('控制器状态未确认，不能更改优先级。',true);
+    const account=(prioritySnapshot().accounts||[]).find(a=>String(a.uid)===String(uid));
+    if(!account||typeof account.top_priority!=='boolean'||account.top_priority_pending!==false||!Number.isSafeInteger(account.top_priority_version)||account.top_priority_version<0||account.top_priority_version>=Number.MAX_SAFE_INTEGER||typeof account.top_priority_identity_generation!=='string'||!/^[0-9a-f]{32}$/.test(account.top_priority_identity_generation))return notify('用户状态或变更结果未确认，请刷新后重试。',true);
+    if(!window.crypto||typeof window.crypto.getRandomValues!=='function')return notify('无法生成安全的请求编号，请使用安全连接。',true);
+    const bytes=new Uint8Array(16);window.crypto.getRandomValues(bytes);
+    const requestId='top-'+Array.from(bytes,n=>n.toString(16).padStart(2,'0')).join('');
+    const enabled=!account.top_priority;
+    const description=enabled?'设为最高优先级后，该用户月度额度不限；其任务等待时其他用户的新任务必须等待。':'取消后恢复普通月度额度，已记录用量保留；正在运行的任务继续运行。';
+    modal(enabled?'设置最高优先级':'取消最高优先级',`<p>用户：${esc(account.username)}</p><p>${esc(description)}</p><p class="small">请求编号：${esc(requestId)}</p>`,button('返回','close-modal')+button('确认更改','top-priority-confirm','',true),{kind:'top-priority',uid:account.uid,enabled,requestId,expectedEnabled:account.top_priority,expectedVersion:account.top_priority_version,expectedIdentityGeneration:account.top_priority_identity_generation});
+  }
+  async function topPriorityConfirm(){
+    const ctx=modalState;
+    if(!ctx||ctx.kind!=='top-priority'||!topPriorityReady())return notify('控制器状态未确认，请刷新后重试。',true);
+    const current=(prioritySnapshot().accounts||[]).find(a=>String(a.uid)===String(ctx.uid));
+    if(!current||current.top_priority_pending!==false||current.top_priority!==ctx.expectedEnabled||current.top_priority_version!==ctx.expectedVersion||current.top_priority_identity_generation!==ctx.expectedIdentityGeneration)return notify('用户状态已变化，请关闭窗口并刷新后重新确认。',true);
+    await mutation(async()=>{ctx.dirty=true;const r=await api('POST','/api/v1/priority/users',{uid:ctx.uid,enabled:ctx.enabled,request_id:ctx.requestId,expected_enabled:ctx.expectedEnabled,expected_version:ctx.expectedVersion,expected_identity_generation:ctx.expectedIdentityGeneration});
+      const op=r&&r.operation;
+      if(!op||op.request_id!==ctx.requestId||!['committed','pending'].includes(op.state))throw {message:'控制器未确认操作结果，请记录请求编号并核对后再操作。'};
+      closeModal(true);await refresh(true);notify(op.state==='committed'?'优先级设置已由控制器确认':'请求已记录，控制器确认后才会生效');});
   }
   const metricNumber=v=>v===null||v===undefined||v===''||!Number.isFinite(Number(v))?null:Number(v);
   function metricValue(v,unit='',digits=0){const n=metricNumber(v);return n===null?'—':n.toFixed(digits)+(unit?' '+unit:'');}
@@ -308,6 +339,8 @@
     if(name==='send-quota-application')return sendQuotaApplication();
     if(name==='edit-quota')return editQuota(b.dataset.uid);
     if(name==='inherit-quota')return editQuota(b.dataset.uid,true);
+    if(name==='top-priority-edit')return topPriorityEdit(b.dataset.uid);
+    if(name==='top-priority-confirm')return topPriorityConfirm();
     if(name==='preview-quota')return previewQuota();
     if(name==='quota-back'){$('#quota-form').hidden=false;$('#quota-preview').innerHTML='';modalState.preview=null;$('.modalfoot').innerHTML=button('取消','close-modal')+button('预览影响','preview-quota','',true);return;}
     if(name==='preview-rules')return previewRules();
