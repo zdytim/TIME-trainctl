@@ -5,10 +5,12 @@ from __future__ import print_function
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
 import time as _time
+import unicodedata
 
 from time_core import (BrokerClient, RequestLedger, TimeError, UnknownOutcome,
                        discover_server_capabilities,
@@ -30,36 +32,206 @@ class JsonArgumentParser(argparse.ArgumentParser):
         raise TimeError("invalid_arguments", message, status=400)
 
 
+def cell(value):
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return "".join(" " if unicodedata.category(ch).startswith("C") else ch for ch in str(value))
+
+
+def display_width(value):
+    return sum(0 if unicodedata.combining(ch) else
+               2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+               for ch in value)
+
+
+def table(headers, rows):
+    rows = [tuple(map(cell, row)) for row in rows]
+    widths = [max(map(display_width, column)) for column in zip(headers, *rows)]
+    edge = "+" + "+".join("-" * (width + 2) for width in widths) + "+"
+
+    def line(row):
+        return "| " + " | ".join(value + " " * (width - display_width(value))
+                                 for value, width in zip(row, widths)) + " |"
+
+    return "\n".join([edge, line(headers), edge, *(line(row) for row in rows), edge])
+
+
+def gpu_view(state):
+    """Limit every returned GPU view to the caller's configured card count."""
+    cached = state.get("gpus") or {}
+    quota = (state.get("quota") or {}).get("gpu_limit")
+    limit = quota if type(quota) is int and quota >= 0 else 0
+    processes = cached.get("processes") or []
+    uid = (state.get("identity") or {}).get("uid")
+    own = {p.get("gpu_uuid") for p in processes if uid is not None and p.get("uid") == uid}
+    busy = {p.get("gpu_uuid") for p in processes}
+    devices = cached.get("devices") or []
+    selected = sorted(devices, key=lambda d: (d.get("id") not in own, d.get("id") in busy))[:limit]
+    visible_ids = {d["id"] for d in selected if d.get("id") is not None}
+    view = {k: cached[k] for k in (
+        "available", "stale", "status", "driver_version", "observed_at", "last_attempt_at",
+        "process_visibility", "history_started_at", "service_started_at", "history_scope",
+        "sampling_interval_seconds", "age_seconds") if k in cached}
+    if cached.get("available") is not True:
+        view["reason"] = "GPU telemetry unavailable"
+    view.update(
+        gpu_limit=quota if type(quota) is int and quota >= 0 else None,
+        devices=selected,
+        processes=[p for p in processes if p.get("gpu_uuid") in visible_ids],
+        history=[{**sample, "devices": [d for d in (sample.get("devices") or [])
+                                        if d.get("id") in visible_ids]}
+                 for sample in (cached.get("history") or [])],
+    )
+    metrics = {key: value for key, value in (state.get("metrics") or {}).items() if key != "gpu"}
+    return {"gpus": view, "metrics": {**metrics, "gpu": view}}
+
+
+def number(value, fmt=".0f", unit=""):
+    if type(value) not in (int, float) or not math.isfinite(value):
+        return "N/A"
+    return format(value, fmt) + unit
+
+
+def gpu_text(gpu):
+    driver = gpu.get("driver_version") or "N/A"
+    lines = [f"TIME GPU Monitor   Driver Version: {cell(driver)}"]
+    if gpu.get("gpu_limit") is None:
+        lines.append("Account GPU limit unavailable.")
+    if gpu.get("available") is not True:
+        lines.append("GPU telemetry unavailable" +
+                     (" · showing the last sample." if gpu.get("stale") else "."))
+    if gpu.get("observed_at"):
+        lines.append(f"Sample: {cell(gpu['observed_at'])}")
+    devices = gpu.get("devices") or []
+    if not devices:
+        return "\n".join([*lines, "No GPUs to display."])
+    lines.append(table(
+        ("GPU", "Name", "Fan", "Temp", "Perf", "Pwr:Usage/Cap", "Memory-Usage", "GPU-Util"),
+        [(d.get("index"), d.get("name"), number(d.get("fan_percent"), unit="%"),
+          number(d.get("temp_c"), unit="C"), d.get("pstate") or "N/A",
+          f"{number(d.get('power_w'), unit='W')} / {number(d.get('power_limit_w'), unit='W')}",
+          f"{number(d.get('memory_used_mb'), unit='MiB')} / {number(d.get('memory_total_mb'), unit='MiB')}",
+          number(d.get("utilization_percent"), unit="%")) for d in devices]))
+    processes = gpu.get("processes") or []
+    lines.append("Processes (your account)" if gpu.get("process_visibility") == "own_only" else "Processes")
+    lines.append(table(("GPU", "PID", "Type", "Process", "GPU Memory"),
+                       [(p.get("gpu_index"), p.get("pid"), p.get("type"),
+                         p.get("process_name") or p.get("command") or p.get("name"),
+                         number(p.get("memory_used_mb"), unit="MiB")) for p in processes])
+                 if processes else "No visible GPU processes.")
+    return "\n".join(lines)
+
+
+def fields(data, indent=""):
+    lines = []
+    if isinstance(data, dict):
+        for key, value in data.items():
+            label = cell(key).replace("_", " ").capitalize()
+            if isinstance(value, (dict, list)) and value:
+                lines.extend([f"{indent}{label}", *fields(value, indent + "  ")])
+            else:
+                lines.append(f"{indent}{label}: {cell(value) if value not in ({}, []) else '—'}")
+    elif isinstance(data, list):
+        for value in data:
+            lines.extend(fields(value, indent) if isinstance(value, (dict, list)) else [indent + cell(value)])
+    else:
+        lines.append(indent + cell(data))
+    return lines
+
+
+def quota_text(data):
+    quota, usage, monthly = (data.get(key) or {} for key in ("quota", "usage", "monthly_quota"))
+    lines = [
+        f"GPU in use: {cell(usage.get('gpu'))} / {cell(quota.get('gpu_limit'))}",
+        f"Concurrent jobs: {cell(usage.get('concurrent_jobs'))} / "
+        f"{cell(quota.get('concurrent_job_limit', quota.get('concurrent_gpu_limit')))}",
+        f"Active jobs: {cell(usage.get('active_jobs'))} / {cell(quota.get('active_job_limit'))}",
+        f"Monthly GPU hours · {cell(monthly.get('month'))} · "
+        + ("enforced" if monthly.get("enforcement_ready") is True else "status unconfirmed"),
+    ]
+    verified = monthly.get("usage_verified") is True
+
+    def hours(seconds):
+        return number(seconds / 3600, ".3f") if verified and type(seconds) in (int, float) else "—"
+
+    tiers = monthly.get("tiers") or []
+    if tiers:
+        lines.append(table(("Tier", "Limit", "Used", "Remaining"),
+                           [(tier.get("name"), *(hours(tier.get(key)) for key in
+                             ("limit_gpu_seconds", "used_gpu_seconds", "remaining_gpu_seconds"))) for tier in tiers]))
+    if verified:
+        lines.append("Monthly overage: " + hours(monthly.get("overage_gpu_seconds")) + " GPU·h")
+    return "\n".join(lines)
+
+
+def job_time(job):
+    minutes = job.get("requested_minutes", job.get("time_minutes"))
+    return "Unlimited" if job.get("policy_version") == 2 or minutes == 4294967295 else (
+        f"{cell(minutes)} min" if minutes is not None else "—")
+
+
+def command_text(data, command):
+    if not isinstance(data, dict):
+        return "\n".join(fields(data))
+    if command == "gpu":
+        return gpu_text(data["gpus"])
+    if command == "quota":
+        return quota_text(data)
+    if command == "logs":
+        if not data.get("available"):
+            return cell(data.get("reason") or "Log not available yet.")
+        return "".join(ch for ch in (data.get("content") or "")
+                       if ch in "\n\t" or not unicodedata.category(ch).startswith("C")).rstrip("\n")
+    if isinstance(data.get("jobs"), list):
+        return table(("Job ID", "Slurm ID", "State", "Name", "GPU", "Monthly tier", "Time limit"),
+                     [(j.get("id"), j.get("scheduler_id"), j.get("state"), j.get("name"),
+                       j.get("requested_gpu"), j.get("selected_tier"), job_time(j))
+                      for j in data["jobs"]]) if data["jobs"] else "No visible jobs."
+    if isinstance(data.get("job"), dict):
+        job = data["job"]
+        return "\n".join(fields({
+            "job ID": job.get("id"), "Slurm ID": job.get("scheduler_id"),
+            "name": job.get("name"), "state": job.get("state"),
+            "GPU": job.get("requested_gpu", job.get("gpu")), "monthly tier": job.get("selected_tier"),
+            "time limit": job_time(job), "reason": job.get("reason_text"),
+            "command": job.get("command"), "log": job.get("output_path"),
+        }))
+    if isinstance(data.get("applications"), list):
+        return table(("Application", "Kind", "Status", "Created"),
+                     [(a.get("id"), a.get("kind"), a.get("status"), a.get("created_at"))
+                      for a in data["applications"]]) if data["applications"] else "No applications."
+    return "\n".join(fields(data)) or "OK"
+
+
 def emit(value, args=None):
     json_requested = bool(args and getattr(args, "json", False))
     pretty = bool(args and getattr(args, "pretty", False))
-    if json_requested or not sys.stdout.isatty():
+    text_requested = bool(args and getattr(args, "text", False))
+    command = getattr(args, "command", None)
+    if json_requested or (command != "gpu" and not text_requested and not sys.stdout.isatty()):
         sys.stdout.write(json.dumps(value, ensure_ascii=False,
                                     sort_keys=True, indent=2 if pretty else None)
                          + "\n")
     else:
         meta = value.get("meta", {}) if isinstance(value, dict) else {}
-        outcome = str(meta.get("outcome", "unknown")).upper()
         if value.get("ok"):
-            sys.stdout.write("outcome: %s\n" % outcome)
-            data = value.get("data")
-            if isinstance(data, dict) and isinstance(data.get("jobs"), list):
-                for job in data["jobs"]:
-                    sys.stdout.write("%s\t%s\t%s\n" % (
-                        job.get("id", "-"), job.get("state", "UNKNOWN"),
-                        job.get("name", "-")))
-            else:
-                sys.stdout.write(json.dumps(data, ensure_ascii=False,
-                                            sort_keys=True, indent=2) + "\n")
+            output = command_text(value.get("data"), command)
+            if output:
+                sys.stdout.write(output + "\n")
+            if meta.get("request_id"):
+                sys.stdout.write(f"Request: {cell(meta['request_id'])} · {cell(meta.get('outcome'))}\n")
         else:
             error = value.get("error") or {}
-            sys.stdout.write("outcome: %s\nerror [%s]: %s\n" % (
-                outcome, error.get("code", "error"),
-                error.get("message", "operation failed")))
+            sys.stdout.write("Error [%s]: %s\n" % (
+                cell(error.get("code", "error")), cell(error.get("message", "operation failed"))))
             if meta.get("request_id"):
                 sys.stdout.write("request_id: %s\n" % meta["request_id"])
             if error.get("details") is not None:
-                sys.stdout.write("details: %s\n" % error["details"])
+                sys.stdout.write("\n".join(fields(error["details"], "  ")) + "\n")
+        for warning in value.get("warnings") or []:
+            sys.stdout.write("Warning: " + cell(warning) + "\n")
     sys.stdout.flush()
 
 
@@ -85,7 +257,9 @@ def build_parser():
     parser = JsonArgumentParser(
         prog="timectl",
         description="time platform client; uses the existing root-broker Unix socket")
-    parser.add_argument("--json", action="store_true", help="kept for explicit JSON intent")
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    output.add_argument("--text", action="store_true", help="show tables even when redirected or piped")
     parser.add_argument("--pretty", action="store_true")
     parser.add_argument("--state-dir", default=None, help=argparse.SUPPRESS)
     commands = parser.add_subparsers(dest="command")
@@ -390,8 +564,7 @@ def handle(args):
     if command == "gpu":
         if args.watch:
             raise TimeError("feature_not_supported", "GPU watch has no streaming contract; use gpu repeatedly", status=409)
-        state = state_value(client)
-        return response_envelope(True, {"gpus": state.get("gpus"), "metrics": state.get("metrics")})
+        return response_envelope(True, gpu_view(state_value(client)))
     if command == "quota":
         state = state_value(client)
         return response_envelope(True, {
@@ -582,25 +755,23 @@ def exit_code(exc):
 
 def main(argv=None):
     parser = build_parser()
+    format_args = argparse.Namespace()
     try:
         raw = list(sys.argv[1:] if argv is None else argv)
-        json_flag = False
-        pretty_flag = False
         filtered = []
         command_boundary = False
         for value in raw:
             if value == "--":
                 command_boundary = True
-            if not command_boundary and value == "--json":
-                json_flag = True
-                continue
-            if not command_boundary and value == "--pretty":
-                pretty_flag = True
+            if not command_boundary and value in ("--json", "--text", "--pretty"):
+                setattr(format_args, value[2:], True)
                 continue
             filtered.append(value)
+        if getattr(format_args, "json", False) and getattr(format_args, "text", False):
+            parser_error("--json and --text cannot be combined")
         args = parser.parse_args(filtered)
-        args.json = bool(getattr(args, "json", False) or json_flag)
-        args.pretty = bool(getattr(args, "pretty", False) or pretty_flag)
+        vars(args).update(vars(format_args))
+        format_args.command = args.command
         if not args.command:
             parser_error("a command is required")
         result = handle(args)
@@ -609,15 +780,15 @@ def main(argv=None):
         return EXIT_UNKNOWN if outcome == "unknown" else EXIT_CONFLICT if outcome == "rejected" else EXIT_OK
     except TimeError as exc:
         emit(format_error(exc, request_id=getattr(exc, "request_id", None) or getattr(locals().get("args", None), "client_request_id", None)),
-             locals().get("args"))
+             format_args)
         return exit_code(exc)
     except (ValueError, TypeError) as exc:
         error = TimeError("invalid_arguments", str(exc), status=400)
-        emit(format_error(error), locals().get("args"))
+        emit(format_error(error), format_args)
         return EXIT_ARGS
     except KeyboardInterrupt:
         error = TimeError("interrupted", "operation interrupted; no cancellation was sent", status=499)
-        emit(format_error(error), locals().get("args"))
+        emit(format_error(error), format_args)
         return EXIT_UNKNOWN
 
 

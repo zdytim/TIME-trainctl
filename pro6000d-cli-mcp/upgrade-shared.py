@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import tempfile
 
@@ -92,13 +93,14 @@ def verify_dir(path, payload, check, mode):
         file_mode = 0o600 if mode == 0o700 else 0o644
         if read_checked(path/name, file_mode, check) != data: raise ValueError('file differs: '+str(path/name))
 
-def _upgrade(source, old_source, lib=LIB, bin_dir=BIN, execute=False, check=trusted, hook=lambda *_: None):
+def _upgrade(source, old_source, lib=LIB, bin_dir=BIN, execute=False, check=trusted,
+             hook=lambda *_: None, old_name=OLD_NAME, new_name=NEW_NAME):
     source, old_source, lib, bin_dir = map(Path, (source, old_source, lib, bin_dir))
     payload, old_payload = manifest_payload(source, check), manifest_payload(old_source, check)
     check(lib); check(bin_dir)
-    verify_dir(lib/OLD_NAME, old_payload, check, 0o755)
-    version, backup = lib/NEW_NAME, lib/(NEW_NAME+'-backups')
-    old, new = wrappers(lib, OLD_NAME), wrappers(lib, NEW_NAME)
+    verify_dir(lib/old_name, old_payload, check, 0o755)
+    version, backup = lib/new_name, lib/(new_name+'-backups')
+    old, new = wrappers(lib, old_name), wrappers(lib, new_name)
     states = []
     for name in old:
         data = read_checked(bin_dir/name, 0o755, check)
@@ -145,9 +147,14 @@ def _upgrade(source, old_source, lib=LIB, bin_dir=BIN, execute=False, check=trus
         if conflicts: raise RuntimeError('rollback incomplete; manual recovery required: '+', '.join(conflicts)) from error
         raise
 
-def upgrade(source, old_source, lib=LIB, bin_dir=BIN, execute=False, check=trusted, hook=lambda *_: None):
+def upgrade(source, old_source, lib=LIB, bin_dir=BIN, execute=False, check=trusted,
+            hook=lambda *_: None, *, old_name=OLD_NAME, new_name=NEW_NAME):
+    version_pattern = r"[0-9]{8}-[a-z0-9]+(?:-[a-z0-9]+)*"
+    if old_name == new_name or any(not re.fullmatch(version_pattern, name)
+                                   or name.endswith("-backups") for name in (old_name, new_name)):
+        raise ValueError("invalid client upgrade versions")
     if not execute:
-        return _upgrade(source, old_source, lib, bin_dir, False, check, hook)
+        return _upgrade(source, old_source, lib, bin_dir, False, check, hook, old_name, new_name)
     lib = Path(lib)
     check(lib)
     lockpath = lib / '.upgrade.lock'
@@ -161,18 +168,21 @@ def upgrade(source, old_source, lib=LIB, bin_dir=BIN, execute=False, check=trust
                 (st.st_dev, st.st_ino) != (current.st_dev, current.st_ino)):
             raise ValueError('unsafe upgrade lock')
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return _upgrade(source, old_source, lib, bin_dir, True, check, hook)
+        return _upgrade(source, old_source, lib, bin_dir, True, check, hook, old_name, new_name)
     finally:
         os.close(fd)
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('source', type=Path, help='reviewed new source and manifest')
-    parser.add_argument('old_source', type=Path, help='reviewed installed v1 source and manifest')
+    parser.add_argument('old_source', type=Path, help='reviewed installed source and manifest')
+    parser.add_argument('--from-version', default=OLD_NAME)
+    parser.add_argument('--to-version', default=NEW_NAME)
     parser.add_argument('--execute', action='store_true')
     args = parser.parse_args()
     if args.execute and (os.geteuid() != 0 or os.uname().nodename != 'ubuntu'): parser.error('--execute requires root on ubuntu')
-    upgrade(args.source.absolute(), args.old_source.absolute(), execute=args.execute)
+    upgrade(args.source.absolute(), args.old_source.absolute(), execute=args.execute,
+            old_name=args.from_version, new_name=args.to_version)
     print('Upgrade complete' if args.execute else 'Dry-run checks passed; no files changed')
 
 if __name__ == '__main__': main()
