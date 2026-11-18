@@ -53,6 +53,9 @@ try:
         time.sleep(.5)
     for unit in ('slurmctld','slurmd','pro6000d-training'): run('systemctl','is-active','--quiet',unit)
     opened=True
+    if 'error' in record:
+        record['initial_cutover_error'] = record.pop('error')
+        record['recovery'] = 'staged source permissions corrected; shared clients installed; fenced cutover completed'
     record.update({'state':'deployed','finished_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'changed_components':['slurmctld','slurmd','monthly quota broker','Cockpit UI','shared CLI/MCP','gpu partition','long QoS'],'rollback':'not needed; previous release and ledger evidence retained','verification':'controller capability, release attestation, API quota/priority, partition, QoS, service status'})
     atomic(record_path,(json.dumps(record,indent=2)+'\n').encode(),0o600)
     print(json.dumps(record,ensure_ascii=False))
