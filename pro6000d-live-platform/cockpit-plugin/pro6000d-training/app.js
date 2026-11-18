@@ -26,18 +26,26 @@
   const errorText = e => (e && (e.message || e.code)) || '操作未完成，请稍后重试';
 
   function api(method, path, body) {
+    return bridgeRequest('/usr/local/bin/pro6000d-training-client', {err:'message'}, {method,path,body:body || {}});
+  }
+  function provisionAccount(request) {
+    return bridgeRequest('/usr/local/sbin/pro6000d-provision-account', {err:'message',superuser:'require'}, request);
+  }
+  function bridgeRequest(program, options, request) {
     if (!window.cockpit) return Promise.reject({message:'请从 Cockpit 登录后打开训练管理'});
     return new Promise((resolve, reject) => {
       let output = '', settled = false;
-      const proc = cockpit.spawn(['/usr/local/bin/pro6000d-training-client'], {err:'message'});
+      const proc = cockpit.spawn([program], options);
       const timer = setTimeout(() => { if (!settled) {settled=true; if(typeof proc.close==='function')proc.close('timeout'); reject({message:'服务响应超时。操作结果可能仍在处理中，请刷新查看后再决定是否重试。'});} }, 45000);
       proc.stream(data => { output += data; });
-      proc.input(JSON.stringify({method,path,body:body || {}}) + '\n', false);
+      proc.input(JSON.stringify(request) + '\n', false);
       const finish = failure => {
         if (settled) return;
         settled = true; clearTimeout(timer);
-        try { const r=JSON.parse(output.trim()); if (r.ok) resolve(r.data); else reject(r.error || {message:'服务拒绝了操作'}); }
-        catch (_) { reject({message: failure ? String(failure) : '后端响应格式异常'}); }
+        try { const r=JSON.parse(output.trim()); if (r.ok) resolve(r.data); else reject(r.error || {message:r.message || '服务拒绝了操作'}); }
+        catch (_) { reject({message: failure && failure.problem==='access-denied' && options.superuser==='require'
+          ? '请先启用 Cockpit 顶栏的「管理员权限」，再开通训练账户。'
+          : failure ? String(failure) : '后端响应格式异常'}); }
       };
       proc.then(() => finish(null)); proc.catch(finish);
     });
@@ -128,7 +136,9 @@
   function accountsPage(){
     const d=state.default_quota||state.quota;
     if(!isAdmin())return head('我的账户','查看月度 GPU 小时和资源数量限制')+banner()+TimeMonthlyUI.panel(state.monthly_quota)+`<div class="card section-space"><div class="cardbody"><h2>长期资源上限 · ${esc(state.identity.username)}</h2><p>${esc(quotaText(state.quota))}</p><p>来源：${state.quota.source==='personal_override'?'个人覆盖':'继承默认'}</p><p class="small">这里限制 GPU 张数和任务数量，不增加月度 GPU 小时。</p>${button('申请调整长期资源上限','apply-quota')}</div></div>`;
-    return head('账户与配额','默认规则统一生效，特殊需要使用个人覆盖',button('系统账户管理','native','data-path="/users"'))+banner()+monthlyAccounts()+topPriorityPanel()+`<div class="card"><div class="cardhead"><h2>默认额度</h2>${button('编辑默认额度','edit-quota','data-uid="default"')}</div><div class="cardbody">${esc(quotaText(d))}</div></div><div class="panel section-space"><div class="panelhead"><h2>已开通训练平台的账户</h2></div><div class="table-scroll"><table><thead><tr><th>账户</th><th>当前用量</th><th>额度</th><th>来源</th><th>管理</th></tr></thead><tbody>${(state.accounts||[]).map(a=>`<tr><td><strong>${esc(a.username)}</strong><div class="small">${a.is_admin?'管理员':'普通用户'} · UID ${a.uid}</div></td><td>${(a.usage||{}).gpu||0} GPU / ${(a.usage||{}).concurrent_jobs||0} 并发 / ${(a.usage||{}).active_jobs||0} 活动任务</td><td>${esc(quotaText(a.quota))}</td><td>${a.quota.source==='personal_override'?'个人覆盖':'继承默认'}</td><td><button class="linkbutton" data-action="edit-quota" data-uid="${a.uid}">编辑</button>${a.quota.source==='personal_override'?`<button class="linkbutton" data-action="inherit-quota" data-uid="${a.uid}">恢复继承</button>`:''}</td></tr>`).join('')||'<tr><td colspan="5">暂无已开通账户</td></tr>'}</tbody></table></div></div>`;
+    const actions=button('新增训练账户','create-training-account','',true)+button('开通已有账户','enroll-training-account')+
+      button('系统账户管理','native','data-path="/users"');
+    return head('账户与配额','管理训练账户、月度 GPU 小时和资源上限',actions)+banner()+monthlyAccounts()+topPriorityPanel()+`<div class="card"><div class="cardhead"><h2>默认额度</h2>${button('编辑默认额度','edit-quota','data-uid="default"')}</div><div class="cardbody">${esc(quotaText(d))}</div></div><div class="panel section-space"><div class="panelhead"><h2>已开通训练平台的账户</h2></div><div class="table-scroll"><table><thead><tr><th>账户</th><th>当前用量</th><th>额度</th><th>来源</th><th>管理</th></tr></thead><tbody>${(state.accounts||[]).map(a=>`<tr><td><strong>${esc(a.username)}</strong><div class="small">${a.is_admin?'管理员':'普通用户'} · UID ${a.uid}</div></td><td>${(a.usage||{}).gpu||0} GPU / ${(a.usage||{}).concurrent_jobs||0} 并发 / ${(a.usage||{}).active_jobs||0} 活动任务</td><td>${esc(quotaText(a.quota))}</td><td>${a.quota.source==='personal_override'?'个人覆盖':'继承默认'}</td><td><button class="linkbutton" data-action="edit-quota" data-uid="${a.uid}">编辑</button>${a.quota.source==='personal_override'?`<button class="linkbutton" data-action="inherit-quota" data-uid="${a.uid}">恢复继承</button>`:''}</td></tr>`).join('')||'<tr><td colspan="5">暂无已开通账户</td></tr>'}</tbody></table></div></div>`;
   }
   function prioritySnapshot(){return queuedState||state;}
   function topPriorityReady(){const s=prioritySnapshot(),p=s&&s.priority_management;return !!(isAdmin()&&!disconnected&&s&&s.identity&&s.identity.is_admin===true&&p&&p.available===true&&p.reconciled===true);}
@@ -276,6 +286,57 @@
     try {await action();} catch(e){if($('#modal-error'))$('#modal-error').innerHTML=`<div class="error">${esc(errorText(e))}</div>`;else notify(errorText(e),true);}
     finally {if(ref)ref.busy=false;document.querySelectorAll('.modalfoot button').forEach(b=>b.disabled=false);}
   }
+  async function trainingAccountModal(mode){
+    if(!isAdmin())return;
+    const create=mode==='create';
+    const title=create?'新增训练账户':'开通已有账户';
+    const cancel=button('取消','close-modal');
+    const form=v=>'<form id="training-account-form">'+v+'</form>';
+    const save=button(create?'创建并开通':'开通训练','save-training-account','',true);
+    if(create){
+      modal(title,form(
+        field('Linux 用户名','username','','text','required maxlength="32" pattern="[a-z_][a-z0-9_\\-]{0,31}" autocomplete="off"')+
+        field('初始登录密码','password','','password','required minlength="12" maxlength="128" autocomplete="new-password"')+
+        '<p class="small">账户开通后可使用此密码登录，GPU 张数和月度 GPU 小时继承平台默认值。</p>'
+      ),cancel+save,{kind:'training-account',mode});
+      return;
+    }
+    modal(title,'<p role="status">正在读取本机普通账户…</p>',cancel,{kind:'training-account',mode});
+    const pending=modalState;
+    try {
+      const result=await provisionAccount({mode:'list'});
+      if(modalState!==pending)return;
+      if(!result.accounts.length){
+        modal(title,'<p>暂无可以开通的本机账户。</p>',cancel);
+        return;
+      }
+      const users=[{value:'',label:'请选择账户'},...result.accounts.map(name=>({value:name,label:name}))];
+      modal(title,form(selectField('Linux 用户名','username',users,'')+
+        '<p class="small">开通后保留原登录密码。该账户需要重新登录才能使用新权限。</p>'
+      ),cancel+save,{kind:'training-account',mode});
+      $('#f-username').required=true;
+    } catch(e){
+      if(modalState===pending)$('#modal-error').textContent=errorText(e);
+    }
+  }
+  async function saveTrainingAccount(){
+    const form=$('#training-account-form');
+    if(!isAdmin()||!form||!form.reportValidity())return;
+    const request={mode:modalState.mode,...fields(form)};
+    await mutation(async()=>{
+      const result=await provisionAccount(request);
+      closeModal(true);
+      await refresh(true);
+      const account=(state.accounts||[]).find(a=>a.uid===result.uid&&a.username===result.username);
+      const monthly=account&&account.monthly_quota;
+      const quota=account?'<p>'+esc(quotaText(account.quota))+'</p>':'<p>请刷新「用户与额度」查看该账户的额度。</p>';
+      const tiers=monthly&&monthly.usage_verified===true&&Array.isArray(monthly.tiers)?monthly.tiers:[];
+      const hours=tiers.filter(t=>Number.isFinite(t.limit_gpu_seconds)).map(t=>t.name+' '+(t.limit_gpu_seconds/3600).toFixed(2));
+      const balance=hours.length?'<p>每月 GPU 小时：'+esc(hours.join(' · '))+'</p>':'';
+      modal('训练账户已开通','<p><strong>'+esc(result.username)+'</strong> 已具备训练调度权限。</p>'+quota+balance+
+        '<p>请用该账户重新登录 Cockpit，从「训练管理」提交任务。</p>',button('完成','close-modal','',true));
+    });
+  }
   function defaultJob(){const home=state.identity.home||'/home/'+state.identity.username;return {name:'training',gpu:1,cpu:1,memory_mb:8192,workdir:home,environment:'system',output_path:home+'/slurm-%j.out',command:'python train.py'};}
   function jobFields(j){return `<div class="formgrid">${field('任务名称','name',j.name,'text','required pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"')}${field('GPU 数量','gpu',j.gpu,'number','min="1" required')}${field('工作目录','workdir',j.workdir,'text','required')}${field('Python / Conda 环境','environment',j.environment,'text','required')}${field('日志输出路径','output_path',j.output_path,'text','required')}${TimeMonthlyUI.selector(state.monthly_quota,j.selected_tier)}${field('CPU 数量','cpu',j.cpu,'number','min="1" required')}${field('内存（MiB）','memory_mb',j.memory_mb,'number','min="128" required')}</div><div class="field"><label for="f-command">训练命令</label><textarea id="f-command" class="control" name="command" maxlength="4096" required>${esc(j.command)}</textarea><div class="help">命令在你的账户下运行。system 使用系统环境，也可填写已配置的 Conda 环境。日志文件名可用 %j 代表任务编号。</div></div>`;}
   function jobModal(draft=defaultJob(),apply=false){
@@ -350,6 +411,9 @@
     if(name==='apply-rules')return applyRules();
     if(name==='apply-quota-form')return quotaApplication();
     if(name==='send-quota-application')return sendQuotaApplication();
+    if(name==='create-training-account')return trainingAccountModal('create');
+    if(name==='enroll-training-account')return trainingAccountModal('existing');
+    if(name==='save-training-account')return saveTrainingAccount();
     if(name==='edit-quota')return editQuota(b.dataset.uid);
     if(name==='inherit-quota')return editQuota(b.dataset.uid,true);
     if(name==='top-priority-edit')return topPriorityEdit(b.dataset.uid);
@@ -383,6 +447,7 @@
     const form=e.target;
     if(form.id==='job-form')sendJob(modalState&&modalState.kind==='job-application');
     else if(form.id==='monthly-application-form')sendMonthlyApplication();
+    else if(form.id==='training-account-form')saveTrainingAccount();
     else if(form.id==='quota-application-form')sendQuotaApplication();
     else if(form.id==='quota-form')previewQuota();
     else if(form.id==='rules-form')previewRules();

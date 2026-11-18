@@ -30,6 +30,7 @@ def main():
     if '26.05.5' not in version: raise SystemExit('Review native plugin ABI for this Slurm version first')
     for name in ('pro6000d-training-api.py', 'pro6000d-training-client.py', 'monthly_quota.py', 'monthly_reservation.py', 'controller_bridge.py', 'controller_view.py', 'activation_attestation.py'):
         ast.parse((ROOT/'backend'/name).read_text())
+    ast.parse((ROOT/'deploy/provision-account.py').read_text())
     gpu=run(['/usr/bin/nvidia-smi','--query-gpu=index','--format=csv,noheader']).stdout.splitlines()
     if len(gpu)!=4: raise SystemExit('Run outside the restricted user.slice; expected four working GPUs')
     running=run(['/opt/slurm/current/bin/squeue','-h','-o','%i|%u|%T']).stdout
@@ -93,6 +94,7 @@ def main():
     for name in ('monthly_quota.py', 'monthly_reservation.py', 'controller_bridge.py', 'controller_view.py', 'activation_attestation.py'):
         copy(ROOT/'backend'/name, '/usr/local/lib/pro6000d-training/'+name)
     copy(ROOT/'backend/pro6000d-training-client.py','/usr/local/bin/pro6000d-training-client',0o755)
+    copy(ROOT/'deploy/provision-account.py','/usr/local/sbin/pro6000d-provision-account',0o700)
     copy(ROOT/'deploy/backend.service','/etc/systemd/system/pro6000d-training.service')
     write('/etc/systemd/system/pro6000d-training.service.d/slurm.conf','[Service]\nEnvironment=SLURM_CONF=/etc/slurm/slurm.conf\n')
     pluginroot=Path('/usr/share/cockpit/pro6000d-training');preserve(pluginroot)
