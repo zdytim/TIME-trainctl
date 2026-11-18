@@ -16,6 +16,35 @@ class TierTests(unittest.TestCase):
         self.assertEqual(time_mcp.job_from_args(args)['selected_tier'],'debug')
         self.assertIn('selected_tier',time_mcp.job_properties())
 
+    def test_new_cli_does_not_request_runtime_or_qos(self):
+        args = timectl.build_parser().parse_args(['run', '--tier', 'normal', '--', 'python', 'train.py'])
+        job = timectl.make_job(args)
+        self.assertNotIn('time_minutes', job)
+        self.assertNotIn('qos', job)
+
+    def test_mcp_does_not_accept_removed_options(self):
+        job = time_mcp.job_from_args({'command': ['python'], 'selected_tier': 'normal'})
+        self.assertNotIn('time_minutes', job)
+        self.assertNotIn('qos', job)
+        for key in ('time', 'qos', 'time_minutes', 'duration'):
+            with self.assertRaises(Exception):
+                time_mcp.job_from_args({'command': ['python'], 'selected_tier': 'normal', key: '1h'})
+
+    def test_mcp_approved_application_submits_only_its_identity(self):
+        server = time_mcp.Server.__new__(time_mcp.Server)
+        server.ledger = object()
+        server.consent = object()
+        seen = {}
+        def mutate(method, path, body, intent, timeout, request_id=None):
+            seen.update(body)
+            return {}, request_id, 'confirmed'
+        server.mutate = mutate
+        server.call('time_submit_job', {'temporary_application_id': 'app-123',
+                    'client_request_id': 'req-123', 'confirm': True, 'user_intent': 'submit_job'})
+        self.assertEqual(seen['temporary_application_id'], 'app-123')
+        self.assertNotIn('command', seen)
+        self.assertNotIn('time_minutes', seen)
+
     def test_mcp_rejects_invalid_tier(self):
         with self.assertRaises(Exception):
             time_mcp.job_from_args({'command':['python'],'selected_tier':'imaginary'})

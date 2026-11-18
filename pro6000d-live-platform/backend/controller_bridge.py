@@ -437,7 +437,7 @@ class ControllerBridge:
             raise ValueError("invalid reservation identity")
         return uid, request_id
 
-    def reserve(self, uid, request_id, tier, gpu, minutes):
+    def reserve(self, uid, request_id, tier, gpu, minutes, *, policy_version=1):
         """Request a controller-owned hold; unknown replies require reconciliation.
 
         This transport does not establish that the allocation gate is active.
@@ -448,16 +448,26 @@ class ControllerBridge:
             raise ValueError("invalid reservation tier")
         gpu = self._uint(gpu, 2**32 - 1)
         minutes = self._uint(minutes, 2**32 - 1)
-        amount = gpu * minutes * 60 * 10**9
+        if policy_version not in (1, 2):
+            raise ValueError("invalid reservation policy")
+        if policy_version == 2:
+            if minutes != 4294967295:
+                raise ValueError("invalid actual usage duration")
+            self.require_actual_usage_policy()
+        amount = gpu * (minutes * 60 if policy_version == 1 else 1) * 10**9
         if not gpu or not minutes or amount > 2**64 - 1:
             raise ValueError("invalid reservation amount")
-        line = self._exchange("RESERVE1 %d %s %d %d %d" %
-                              (uid, request_id, tier_ids[tier], gpu, minutes), mutation=True)
+        line = self._exchange("RESERVE%d %d %s %d %d %d" %
+                              (policy_version, uid, request_id, tier_ids[tier], gpu, minutes), mutation=True)
         if line == "DENIED capacity":
             raise ControllerDenied("selected tier cannot cover the request")
         if line != "OK %d" % amount:
             raise ControllerOutcomeUnknown("unexpected reserve reply; reconcile the same request ID")
         return {"request_id": request_id, "reserved_gpu_nanoseconds": amount}
+
+    def require_actual_usage_policy(self):
+        if self._exchange("ACTUAL_USAGE_UNLIMITED2 0") != "OK ACTUAL_USAGE_UNLIMITED2 SUPPORTED":
+            raise ControllerUnavailable("actual usage policy not ready")
 
     def reservation(self, uid, request_id):
         """Read the hold fields; this protocol does not expose binding state."""
@@ -484,6 +494,18 @@ class ControllerBridge:
         if line != "OK":
             raise ControllerOutcomeUnknown("bound cancellation outcome unknown")
         return {"cancelled": True}
+
+    def cancel_bound_reservation2(self, uid, request_id, scheduler_id, submit, sluid):
+        uid, request_id = self._reservation_request(uid, request_id)
+        scheduler_id = self._uint(scheduler_id, 2**32 - 1)
+        submit = self._uint(submit, 2**64 - 1)
+        sluid = self._uint(sluid, 2**64 - 1)
+        if not scheduler_id or not submit or not sluid or type(self.expected_pid) is not int or self.expected_pid <= 0:
+            raise ControllerUnavailable('verified bound identity required')
+        line = self._exchange('CANCEL_BOUND2 %d %s %d %d %d' % (uid, request_id, scheduler_id, submit, sluid), mutation=True, required_pid=self.expected_pid)
+        if line != 'OK':
+            raise ControllerOutcomeUnknown('bound cancellation outcome unknown')
+        return {'cancelled': True}
 
     def rollover_reservation(self, uid, request_id):
         """Renew an unstarted hold into the controller's current month."""
@@ -616,6 +638,20 @@ class ControllerBridge:
             raise ControllerUnavailable('reservation identity not confirmed')
         return {'submit': int(fields[4]), 'sluid': int(fields[5])}
 
+    def terminal_binding_receipt(self, uid, request_id, scheduler_id, submit, sluid):
+        uid, request_id = self._reservation_request(uid, request_id)
+        scheduler_id = self._uint(scheduler_id, 2**32 - 1)
+        submit, sluid = self._uint(submit, 2**64-1), self._uint(sluid, 2**64-1)
+        if not scheduler_id or not submit or not sluid or type(self.expected_pid) is not int or self.expected_pid <= 0:
+            raise ControllerUnavailable('verified terminal binding required')
+        fields = self._exchange('BIND2_TERMINAL_GET %d %s %d %d %d' % (uid, request_id, scheduler_id, submit, sluid),
+                                required_pid=self.expected_pid).split(' ')
+        if (len(fields) != 8 or fields[:6] != ['OK', str(uid), request_id, str(scheduler_id), str(submit), str(sluid)] or
+                fields[6] not in ('0', '2', '3') or not re.fullmatch(r'(?:0|[1-9][0-9]*)', fields[7]) or
+                int(fields[7]) > 2**64-1 or (fields[6] == '2') != (int(fields[7]) > 0)):
+            raise ControllerUnavailable('terminal binding receipt unavailable')
+        return {'submit': submit, 'sluid': sluid, 'terminal': int(fields[6]), 'generation': int(fields[7])}
+
     def pending_binding_receipt(self, uid, request_id, scheduler_id):
         """Read BIND2 only if the exact Slurm job is currently pending."""
         uid, request_id = self._reservation_request(uid, request_id)
@@ -629,19 +665,26 @@ class ControllerBridge:
             raise ControllerUnavailable('pending reservation identity not confirmed')
         return {'submit': int(fields[4]), 'sluid': int(fields[5])}
 
-    def reservation_status(self, uid, request_id):
+    def reservation_status(self, uid, request_id, *, policy_version=1):
         """Read live binding state; absence is not proof of no prior effect."""
+        if policy_version not in (1, 2):
+            raise ValueError("invalid reservation policy")
         uid, request_id = self._reservation_request(uid, request_id)
-        fields = self._exchange("RESERVE2_GET %d %s" % (uid, request_id)).split(" ")
-        if fields == ["OK", "2", "ABSENT"]:
+        command = "RESERVE_POLICY2_GET" if policy_version == 2 else "RESERVE2_GET"
+        fields = self._exchange("%s %d %s" % (command, uid, request_id)).split(" ")
+        if fields == (["OK", "ABSENT"] if policy_version == 2 else ["OK", "2", "ABSENT"]):
             return {"uid": uid, "request_id": request_id, "present": False}
+        if policy_version == 2:
+            if len(fields) != 12 or fields[:3] != ["OK", "FOUND", "2"]:
+                raise ControllerUnavailable("invalid reservation policy response")
+            fields = ["OK", "2", "FOUND"] + fields[3:]
         if (len(fields) != 12 or fields[:3] != ["OK", "2", "FOUND"] or
                 any(not re.fullmatch(r"[0-9]+", x) for x in fields[3:])):
             raise ControllerUnavailable("invalid reservation status response")
         month, tier, gpu, minutes, amount, job, generation, state, sluid = (int(x) for x in fields[3:])
         if (not 197001 <= month <= 999912 or not 1 <= month % 100 <= 12 or tier > 2 or
-                not 1 <= gpu <= 2**32 - 1 or not 1 <= minutes <= 2**32 - 1 or
-                amount > 2**64 - 1 or amount != gpu * minutes * 60 * 10**9 or
+                not 1 <= gpu <= 2**32 - 1 or not 1 <= minutes <= 2**32 - 1 or (policy_version == 2 and minutes != 4294967295) or
+                amount > 2**64 - 1 or amount != gpu * (minutes * 60 if policy_version == 1 else 1) * 10**9 or
                 job > 2**32 - 1 or generation > 2**64 - 1 or sluid > 2**64 - 1 or state > 6 or
                 (state == 0 and (job or generation or sluid)) or
                 (state == 1 and (not job or generation or sluid)) or
@@ -651,11 +694,12 @@ class ControllerBridge:
             raise ControllerUnavailable("invalid reservation status fields")
         return {"uid": uid, "request_id": request_id, "present": True, "month": month,
                 "tier": ("debug", "important", "normal")[tier], "gpu": gpu, "minutes": minutes,
-                "original_gpu_nanoseconds": amount, "hold_active": state < 4, "scheduler_id": job or None,
+                "original_gpu_nanoseconds": amount, "policy_version": policy_version,
+                "hold_active": state < 4, "scheduler_id": job or None,
                 "generation": generation or None, "sluid": sluid or None,
                 "state": ("unbound", "bound", "prepared", "active", "cancelled", "released", "cancelled_bound")[state]}
 
-    def cancel_request(self, uid, request_id, tier, gpu, minutes, *, required_pid=None):
+    def cancel_request(self, uid, request_id, tier, gpu, minutes, *, required_pid=None, policy_version=1):
         """Atomically cancel an unbound hold or tombstone an absent request."""
         uid, request_id = self._reservation_request(uid, request_id)
         tiers = {"debug": 0, "important": 1, "normal": 2}
@@ -663,9 +707,11 @@ class ControllerBridge:
             raise ValueError("invalid reservation tier")
         gpu = self._uint(gpu, 2**32 - 1)
         minutes = self._uint(minutes, 2**32 - 1)
-        if not gpu or not minutes or gpu * minutes * 60 * 10**9 > 2**64 - 1:
+        if policy_version not in (1, 2) or (policy_version == 2 and minutes != 4294967295):
+            raise ValueError("invalid reservation policy")
+        if not gpu or not minutes or gpu * (minutes * 60 if policy_version == 1 else 1) * 10**9 > 2**64 - 1:
             raise ValueError("invalid reservation amount")
-        command = "CANCEL_REQUEST1 %d %s %d %d %d" % (uid, request_id, tiers[tier], gpu, minutes)
+        command = "CANCEL_REQUEST%d %d %s %d %d %d" % (policy_version, uid, request_id, tiers[tier], gpu, minutes)
         if required_pid is not None:
             if type(required_pid) is not int or required_pid <= 0 or self.expected_pid != required_pid:
                 raise ControllerUnavailable('verified controller process required')
@@ -717,3 +763,25 @@ class PinnedControllerBridge(ControllerBridge):
                 (required_pid is not None and required_pid != pid)):
             raise ControllerUnavailable('controller peer identity changed')
         return super()._exchange(message, mutation=mutation, required_pid=pid)
+
+
+class ActualUsageControllerBridge(PinnedControllerBridge):
+    def __init__(self, path, controller_uid, expected_pid, timeout=2.0, *, release_manifest):
+        super().__init__(path, controller_uid, expected_pid, timeout, release_manifest=release_manifest)
+        fd, self._actual_generation = self._attest_process(expected_pid)
+        os.close(fd)
+
+    def _exchange(self, message, mutation=False, required_pid=None):
+        try:
+            if self._generation(self.expected_pid) != self._actual_generation:
+                raise ControllerUnavailable('actual usage controller boot changed')
+            reply = super()._exchange(message, mutation=mutation, required_pid=required_pid)
+            if self._generation(self.expected_pid) != self._actual_generation:
+                raise ControllerUnavailable('actual usage controller boot changed')
+            return reply
+        except (OSError, ValueError, IndexError, ControllerUnavailable) as exc:
+            if mutation:
+                raise ControllerOutcomeUnknown('controller identity changed; reconcile same request') from exc
+            if isinstance(exc, ControllerUnavailable):
+                raise
+            raise ControllerUnavailable('actual usage controller identity unavailable') from exc

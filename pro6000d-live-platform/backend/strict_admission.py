@@ -14,6 +14,18 @@ from top_pending_intent import TopPendingIntents
 
 
 class StrictAdmission:
+    def reservation_status_for_job(self, uid, marker):
+        job = self.db.execute('SELECT owner_uid,policy_version FROM jobs WHERE id=?', (marker,)).fetchone()
+        hold = self.db.execute('SELECT uid,policy_version FROM monthly_dispatch_holds WHERE job_id=?', (marker,)).fetchone()
+        if job is not None and job['owner_uid'] != uid or hold is not None and hold['uid'] != uid:
+            raise ControllerUnavailable('reservation owner differs')
+        policy = job['policy_version'] if job is not None else (hold['policy_version'] if hold is not None else 1)
+        if policy not in (1, 2) or hold is not None and hold['policy_version'] != policy:
+            raise ControllerUnavailable('reservation policy differs')
+        if policy == 1:
+            return self.bridge.reservation_status(uid, marker)
+        return self.bridge.reservation_status(uid, marker, policy_version=policy)
+
     def __init__(self, runtime, bridge, db):
         if runtime.store.db is not db or db.in_transaction:
             raise ValueError('idle shared broker database required')
@@ -319,7 +331,7 @@ class StrictAdmission:
                 tuple(job) != (uid, str(job_id), state, 1) or not self._has_marker_locked(marker)):
             raise ControllerUnavailable('v2 terminal durable identity differs')
         remote = self.bridge.top_terminal_receipt(uid, marker, job_id)
-        reservation = self.bridge.reservation_status(uid, marker)
+        reservation = self.reservation_status_for_job(uid, marker)
         if (remote != {'submit': submit, 'sluid': int(sluid), 'generation': generation, 'state': final_state, 'exit_code': exit_code} or
                 reservation.get('state') != 'released' or reservation.get('scheduler_id') != job_id or
                 reservation.get('generation') != generation or reservation.get('sluid') != int(sluid)):
@@ -346,7 +358,7 @@ class StrictAdmission:
                 self.db.execute('SELECT 1 FROM top_started_receipts WHERE marker=?', (marker,)).fetchone()):
             raise ControllerUnavailable('cancelled promotion identity differs')
         self.bridge.cancelled_top_receipt(marker,uid,intent[1],intent[2],intent[3],job_id,submit,int(sluid))
-        reservation = self.bridge.reservation_status(uid,marker)
+        reservation = self.reservation_status_for_job(uid,marker)
         if reservation.get('state') != 'cancelled_bound' or reservation.get('scheduler_id') != job_id or reservation.get('generation') is not None:
             raise ControllerUnavailable('cancelled reservation differs')
         return (uid,job_id,submit,sluid,0,None,None)
@@ -534,8 +546,10 @@ class StrictAdmission:
         required_pid = self.bridge.expected_pid
         bridge = self.bridge
         class AttestedCancel:
-            def cancel_request(self, uid, request_id, tier, gpu, minutes):
-                return bridge.cancel_request(uid, request_id, tier, gpu, minutes, required_pid=required_pid)
+            def cancel_request(self, uid, request_id, tier, gpu, minutes, *, policy_version=1):
+                return bridge.cancel_request(uid, request_id, tier, gpu, minutes, required_pid=required_pid, policy_version=policy_version)
+            def reservation_status(self, uid, request_id, *, policy_version=1):
+                return bridge.reservation_status(uid, request_id, policy_version=policy_version)
         try:
             ReservationCoordinator(self.db, AttestedCancel()).cancel(marker, uid, ensure_tombstone=True)
         except ReservationUncertain as exc:
@@ -686,7 +700,7 @@ class StrictAdmission:
                         raise ControllerUnavailable('pending promotion identity unavailable')
                     hold = self.db.execute('SELECT * FROM monthly_dispatch_holds WHERE job_id=?', (marker,)).fetchone()
                     proof = self.bridge.pending_binding_receipt(uid, marker, int(sid))
-                    remote = self.bridge.reservation_status(uid, marker)
+                    remote = self.reservation_status_for_job(uid, marker)
                     if (hold is None or hold['uid'] != uid or hold['state'] != 'BOUND' or hold['binding_version'] != 2 or
                             hold['scheduler_id'] != int(sid) or hold['bind_submit'] != str(proof['submit']) or
                             hold['bind_sluid'] != str(proof['sluid']) or remote.get('state') != 'bound' or
@@ -1081,7 +1095,7 @@ class StrictAdmission:
         if not isinstance(expected_digest, str) or not re.fullmatch(r'[0-9a-f]{64}', expected_digest):
             return False
         row = self.db.execute('SELECT name,requested_gpu,requested_cpu,requested_mem_mb,requested_minutes,'
-                              'qos,workdir,env_name,command,output_path,selected_tier,temporary_application_id '
+                              'qos,workdir,env_name,command,output_path,selected_tier,temporary_application_id,policy_version,policy_digest '
                               'FROM jobs WHERE id=? AND owner_uid=?', (marker, uid)).fetchone()
         if row is None:
             return False
@@ -1093,7 +1107,12 @@ class StrictAdmission:
                                     separators=(',', ':'), allow_nan=False).encode('utf-8')).hexdigest()
         except (TypeError, ValueError, OverflowError, UnicodeError):
             return False
-        return hmac.compare_digest(actual, expected_digest)
+        if not hmac.compare_digest(actual, expected_digest) or row['policy_version'] not in (1, 2):
+            return False
+        if row['policy_version'] == 2:
+            expected_policy_digest = hashlib.sha256(('monthly-policy:2:' + expected_digest).encode('ascii')).hexdigest()
+            return isinstance(row['policy_digest'], str) and hmac.compare_digest(row['policy_digest'], expected_policy_digest)
+        return True
 
     def adopt_waiting(self, uid, username, marker):
         """Fence and register an existing unstarted platform job after promotion."""
@@ -1390,7 +1409,7 @@ class StrictAdmission:
                 state, generation = 'running', current['generation']
             if current['submit'] != submit or str(current['sluid']) != sluid:
                 raise ControllerUnavailable('pending promotion allocation identity differs')
-            reservation = self.bridge.reservation_status(uid, marker)
+            reservation = self.reservation_status_for_job(uid, marker)
             if (reservation.get('scheduler_id') != sid or
                     reservation.get('state') != ('bound' if state == 'pending' else 'active') or
                     (state == 'running' and reservation.get('generation') != generation) or
@@ -1693,7 +1712,7 @@ class StrictAdmission:
         self._same_controller()
         before = self.runtime.coordinator.transport.status()
         self.bridge.cancelled_top_receipt(marker, uid, intent[1], intent[2], intent[3], sid, binding[2], int(binding[3]))
-        remote = self.bridge.reservation_status(uid, marker)
+        remote = self.reservation_status_for_job(uid, marker)
         if (remote.get('state') != 'cancelled_bound' or remote.get('scheduler_id') != sid or
                 remote.get('generation') is not None or self.runtime.coordinator.transport.status() != before):
             raise ControllerUnavailable('cancellation tombstone differs')
@@ -1899,7 +1918,7 @@ class StrictAdmission:
                         elif policy.get('enabled') is not False:
                             return
                         self._same_controller()
-                        status = self.bridge.reservation_status(uid, marker)
+                        status = self.reservation_status_for_job(uid, marker)
                         if (status.get('scheduler_id') != int(scheduler_id) or
                                 status.get('state') not in ('bound', 'active') or
                                 (top and status.get('state') != 'active') or
@@ -2252,7 +2271,7 @@ class StrictAdmission:
             self._same_controller()
             self.bridge.fence_top()
             status = self._refresh_after_controller_write(policy, status)
-            reservation = self.bridge.reservation_status(uid, marker)
+            reservation = self.reservation_status_for_job(uid, marker)
             if (not reservation.get('present') or reservation.get('state') != 'cancelled' or
                     reservation.get('scheduler_id') is not None or reservation.get('generation') is not None):
                 raise ControllerUnavailable('unstarted reservation cancellation not confirmed')
@@ -2411,9 +2430,9 @@ class StrictAdmission:
                 if self.db.in_transaction: self.db.execute('ROLLBACK')
                 raise
             self._same_controller()
-            state = self.bridge.reservation_status(uid, marker)
+            state = self.reservation_status_for_job(uid, marker)
             self.bridge.cancel_pending_top(marker, uid, row[1], row[2], row[3], scheduler_id, binding[2], int(binding[3]))
-            state = self.bridge.reservation_status(uid, marker)
+            state = self.reservation_status_for_job(uid, marker)
             if state.get('state') != 'cancelled_bound' or state.get('scheduler_id') != scheduler_id:
                 raise ControllerOutcomeUnknown('pending cancellation not durably confirmed')
             self.db.execute('BEGIN IMMEDIATE')
@@ -2451,7 +2470,7 @@ class StrictAdmission:
         self._same_controller()
         before = self.runtime.coordinator.transport.status()
         receipt = self.bridge.top_terminal_receipt(uid, marker, scheduler_id)
-        reservation = self.bridge.reservation_status(uid, marker)
+        reservation = self.reservation_status_for_job(uid, marker)
         if (reservation.get('state') != 'released' or reservation.get('scheduler_id') != scheduler_id or
                 reservation.get('generation') != receipt['generation'] or reservation.get('sluid') != receipt['sluid'] or
                 (receipt['state'] & 0xff) not in (3, 4, 5, 6, 7, 8, 9, 10, 11)):
@@ -2547,7 +2566,7 @@ class StrictAdmission:
         self._same_controller()
         before = self.runtime.coordinator.transport.status()
         receipt = self.bridge.binding_receipt(uid, marker, scheduler_id)
-        status = self.bridge.reservation_status(uid, marker)
+        status = self.reservation_status_for_job(uid, marker)
         running = self.bridge.top_running_receipt(uid, marker, scheduler_id)
         intent = self.db.execute('SELECT uid,account_generation,request_id,request_hash,state FROM top_pending_intents WHERE marker=?', (marker,)).fetchone()
         if intent is None or intent[0] != uid or intent[4] != 'registered':

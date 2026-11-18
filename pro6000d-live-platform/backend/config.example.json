@@ -7,6 +7,7 @@
   "admin_group": "pro6000d-admin",
   "job_group": "pro6000d-gpu",
   "partition": "gpu",
+  "unlimited_qos": "long",
   "max_requested_gpu": 1,
   "capacity": {"gpu": 1, "cpu": 32, "memory_mb": 112000},
   "max_job_minutes": 4320,

@@ -54,8 +54,6 @@ def job_properties(include_auth=False):
         "gpus": INTEGER,
         "cpus": INTEGER,
         "mem": STRING,
-        "time": STRING,
-        "qos": STRING,
         "selected_tier": {"type":"string", "enum":["debug", "important", "normal"]},
         "workdir": STRING,
         "output": STRING,
@@ -80,9 +78,11 @@ TOOLS = [
     {"name": "time_list_jobs", "description": "List jobs visible to this authenticated user.",
      "inputSchema": obj_schema({})},
     {"name": "time_validate_job", "description": "Validate a command through the broker without queueing it.",
-     "inputSchema": obj_schema(job_properties(), required=["command", "selected_tier"])},
-    {"name": "time_submit_job", "description": "Submit one user-authorized job through the broker; never calls sbatch directly.",
-     "inputSchema": obj_schema(job_properties(True), required=["command", "selected_tier", "confirm", "user_intent"])},
+     "inputSchema": obj_schema(job_properties(), required=["command", "selected_tier"], additional=False)},
+    {"name": "time_submit_job", "description": "Submit a user-authorized new job without a per-job time limit or automatic requeue, or an approved application under its original terms.",
+     "inputSchema": {**obj_schema(job_properties(True), required=["confirm", "user_intent"], additional=False),
+                     "oneOf": [{"required": ["command", "selected_tier"], "not": {"required": ["temporary_application_id"]}},
+                               {"required": ["temporary_application_id"], "not": {"anyOf": [{"required": ["command"]}, {"required": ["selected_tier"]}]}}]}},
     {"name": "time_get_job_log", "description": "Read at most the existing broker's bounded log tail; follow is unsupported.",
      "inputSchema": obj_schema({"job_id": STRING}, required=["job_id"])},
     {"name": "time_cancel_job", "description": "Cancel one specific user-authorized job through the broker.",
@@ -146,6 +146,9 @@ def require_intent(args, expected):
 
 
 def job_from_args(args):
+    unknown = set(args) - set(job_properties(True))
+    if unknown:
+        raise TimeError("invalid_arguments", "unsupported job arguments: " + ", ".join(sorted(unknown)), status=400)
     command = args.get("command")
     if not isinstance(command, list) or not command or any(not isinstance(x, str) for x in command):
         raise TimeError("invalid_arguments", "command must be a non-empty string array", status=400)
@@ -153,7 +156,6 @@ def job_from_args(args):
         return normalize_command_job(
             command, name=args.get("name"), gpus=args.get("gpus", 1),
             cpus=args.get("cpus", 1), memory=args.get("mem", "1GiB"),
-            duration=args.get("time", "60m"), qos=args.get("qos"),
             workdir=args.get("workdir"), output=args.get("output"),
             environment=args.get("environment", "system"), selected_tier=args.get("selected_tier"))
     except ValueError as exc:
@@ -246,11 +248,15 @@ class Server(object):
             return response_envelope(True, self.read("POST", "/api/v1/jobs/validate", job_from_args(args), timeout=10))
         if name == "time_submit_job":
             require_intent(args, "submit_job")
-            job = job_from_args(args)
+            if args.get("temporary_application_id"):
+                allowed = {"temporary_application_id", "client_request_id", "confirm", "user_intent"}
+                if set(args) - allowed:
+                    raise TimeError("invalid_arguments", "approved application must be submitted without other job fields", status=400)
+                job = {"temporary_application_id": require_identifier(args, "temporary_application_id")}
+            else:
+                job = job_from_args(args)
             request_id = args.get("client_request_id") or self.ledger.new_id()
             job["client_request_id"] = request_id
-            if args.get("temporary_application_id"):
-                job["temporary_application_id"] = args["temporary_application_id"]
             data, _, outcome = self.mutate("POST", "/api/v1/jobs", {
                 **job, "confirm": args.get("confirm"),
                 "user_intent": args.get("user_intent")}, "submit_job", 45,

@@ -25,7 +25,7 @@
     const q = view || {};
     if (q.enforcement_ready !== true || q.selectable_tiers_ready !== true) return '';
     const current = names.includes(selected) ? selected : 'normal';
-    return `<div class="field"><label for="f-selected_tier">月度额度档位</label><select class="control" id="f-selected_tier" name="selected_tier">${names.map(name => `<option value="${name}"${name === current ? ' selected' : ''}>${name}</option>`).join('')}</select><div class="help">启动前，所选档位余额须覆盖 GPU 数量乘申请时限。</div></div>`;
+    return `<div class="field"><label for="f-selected_tier">月度额度档位</label><select class="control" id="f-selected_tier" name="selected_tier">${names.map(name => `<option value="${name}"${name === current ? ' selected' : ''}>${name}</option>`).join('')}</select><div class="help">启动前按所选月度档位检查余额，运行后按实际 GPU 使用时间计费。</div></div>`;
   }
   return {panel, selector};
 });

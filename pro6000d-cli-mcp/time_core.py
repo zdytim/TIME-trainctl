@@ -138,7 +138,7 @@ def parse_month(value):
 
 
 def normalize_command_job(command, name=None, gpus=1, cpus=1, memory="1GiB",
-                           duration="60m", qos=None, workdir=None,
+                           workdir=None,
                            output=None, environment="system", selected_tier=None):
     if not command:
         raise ValueError("a command is required after --")
@@ -161,13 +161,10 @@ def normalize_command_job(command, name=None, gpus=1, cpus=1, memory="1GiB",
         "gpu": gpu_count,
         "cpu": cpu_count,
         "memory_mb": parse_memory(memory),
-        "time_minutes": parse_duration(duration),
         "workdir": effective_workdir,
         "environment": environment,
         "selected_tier": selected_tier,
     }
-    if qos:
-        result["qos"] = qos
     if output:
         result["output_path"] = os.path.abspath(output)
     return result

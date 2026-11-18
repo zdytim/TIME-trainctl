@@ -72,10 +72,8 @@ def add_job_options(parser):
     parser.add_argument("--gpus", default=1)
     parser.add_argument("--cpus", default=1)
     parser.add_argument("--mem", default="1GiB")
-    parser.add_argument("--time", dest="duration", default="60m")
-    parser.add_argument("--qos", default=None)
     parser.add_argument("--tier", choices=("debug", "important", "normal"), default=None,
-                        help="required monthly GPU-hour tier (distinct from --qos)")
+                        help="required monthly GPU-hour tier")
     parser.add_argument("--workdir", default=None)
     parser.add_argument("--output", default=None)
     parser.add_argument("--environment", default="system")
@@ -132,8 +130,6 @@ def build_parser():
     request_create.add_argument("--gpus", type=int, default=1)
     request_create.add_argument("--cpus", type=int, default=1)
     request_create.add_argument("--mem", default="1GiB")
-    request_create.add_argument("--time", dest="duration", default="60m")
-    request_create.add_argument("--qos", default="normal")
     request_create.add_argument("--gpu-hours", type=int)
     request_create.add_argument("--month", default=None)
     request_create.add_argument("--client-request-id", default=None)
@@ -198,7 +194,7 @@ def make_job(args):
     return normalize_command_job(
         strip_command_terminator(args.command_argv), name=args.name,
         gpus=args.gpus, cpus=args.cpus, memory=args.mem,
-        duration=args.duration, qos=args.qos, workdir=args.workdir,
+        workdir=args.workdir,
         output=args.output, environment=args.environment, selected_tier=args.tier)
 
 
@@ -426,6 +422,8 @@ def handle(args):
             data = request_read(client, "POST", "/api/v1/jobs/validate", job,
                                 timeout=10)
             return response_envelope(True, data)
+        if not temporary_id:
+            args.confirmation_text = "Submit without a per-job time limit or automatic requeue? GPU usage is billed to the selected monthly quota. [y/N] "
         mutation_allowed(args)
         request_id = args.client_request_id or ledger.new_id()
         job["client_request_id"] = request_id

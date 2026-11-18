@@ -30,6 +30,8 @@ class ReservationCoordinator:
                 state TEXT NOT NULL, scheduler_id INTEGER)""")
             db.execute('UPDATE monthly_dispatch_holds SET state=state WHERE 0')
             columns = {row[1] for row in db.execute('PRAGMA table_info(monthly_dispatch_holds)')}
+            if 'policy_version' not in columns:
+                db.execute('ALTER TABLE monthly_dispatch_holds ADD COLUMN policy_version INTEGER NOT NULL DEFAULT 1')
             legacy_schema = 'bind_submit' not in columns and 'bind_sluid' not in columns
             for name in ('bind_submit', 'bind_sluid'):
                 if name not in columns:
@@ -52,25 +54,31 @@ class ReservationCoordinator:
         return self.db.execute('SELECT * FROM monthly_dispatch_holds WHERE job_id=?', (job_id,)).fetchone()
 
     @staticmethod
-    def _validate(job_id, uid, tier, gpu, minutes, month):
+    def _validate(job_id, uid, tier, gpu, minutes, month, policy_version=1):
         if (not isinstance(job_id, str) or not re.fullmatch(r'[0-9a-f]{32}', job_id)
                 or isinstance(uid, bool) or not isinstance(uid, int) or not 0 < uid <= 2**32-1
                 or tier not in ('debug', 'important', 'normal')
                 or isinstance(gpu, bool) or not isinstance(gpu, int) or not 0 < gpu <= 2**32-1
                 or isinstance(minutes, bool) or not isinstance(minutes, int) or not 0 < minutes <= 2**32-1
                 or isinstance(month, bool) or not isinstance(month, int) or not 197001 <= month <= 999912
-                or not 1 <= month % 100 <= 12 or gpu * minutes * 60 * 10**9 > 2**64-1):
+                or not 1 <= month % 100 <= 12 or (policy_version == 1 and gpu * minutes * 60 * 10**9 > 2**64-1)
+                or (policy_version == 2 and (minutes != 4294967295 or gpu * 10**9 > 2**64-1))):
             raise ReservationUncertain('invalid reservation request')
 
     def _status(self, row, rollover_month=None):
         try:
-            status = self.bridge.reservation_status(row['uid'], row['job_id'])
+            if row['policy_version'] == 1:
+                status = self.bridge.reservation_status(row['uid'], row['job_id'])
+            else:
+                status = self.bridge.reservation_status(row['uid'], row['job_id'], policy_version=2)
         except ControllerUnavailable as exc:
             raise ReservationUncertain('reservation status unavailable') from exc
         if not status.get('present'):
             raise ReservationUncertain('reservation absent; outcome is unknown')
         if any(status.get(k) != row[k] for k in ('uid', 'tier', 'gpu', 'minutes')):
             raise ReservationUncertain('reservation fields differ from durable intent')
+        if status.get('policy_version', 1) != row['policy_version']:
+            raise ReservationUncertain('reservation policy differs from durable intent')
         if status.get('month') != row['month']:
             # Adopt a lost rollover reply only for the same unstarted request
             # and scheduler binding. Never infer a fresh hold from absence.
@@ -105,24 +113,34 @@ class ReservationCoordinator:
             raise ReservationUncertain('controller did not confirm new reservation month')
         return status
 
-    def hold(self, job_id, uid, tier, gpu, minutes, month, require_waiting=False):
-        self._validate(job_id, uid, tier, gpu, minutes, month)
+    def hold(self, job_id, uid, tier, gpu, minutes, month, require_waiting=False, policy_version=1):
+        self._validate(job_id, uid, tier, gpu, minutes, month, policy_version)
+        if policy_version not in (1, 2):
+            raise ReservationUncertain('invalid reservation policy')
         # Persist the immutable request first. The controller treats a repeat
         # of the same request as idempotent and retains cancellation tombstones.
         self.db.execute('BEGIN IMMEDIATE')
         try:
             if require_waiting:
-                job = self.db.execute('SELECT state,owner_uid,selected_tier FROM jobs WHERE id=?', (job_id,)).fetchone()
-                if not job or job['state'] != 'WAITING_QUOTA' or job['owner_uid'] != uid or job['selected_tier'] != tier:
+                job = self.db.execute('SELECT state,owner_uid,selected_tier,policy_version,requested_gpu,requested_minutes,temporary_application_id FROM jobs WHERE id=?', (job_id,)).fetchone()
+                if (not job or job['state'] != 'WAITING_QUOTA' or job['owner_uid'] != uid or
+                        job['selected_tier'] != tier or job['policy_version'] != policy_version or
+                        job['requested_gpu'] != gpu or job['requested_minutes'] != minutes):
                     raise ReservationUncertain('job no longer waiting for this reservation')
+                if job['temporary_application_id']:
+                    app = self.db.execute('SELECT owner_uid,policy_version,bound_job_id,authorization_used FROM applications WHERE id=?',
+                                          (job['temporary_application_id'],)).fetchone()
+                    if (not app or app['owner_uid'] != uid or app['policy_version'] != policy_version or
+                            app['bound_job_id'] != job_id or app['authorization_used'] != 1):
+                        raise ReservationUncertain('application reservation policy differs')
             row = self._row(job_id)
             should_send = False
             if row is None:
-                self.db.execute('INSERT INTO monthly_dispatch_holds(job_id,uid,tier,gpu,minutes,month,state,scheduler_id,binding_version) VALUES(?,?,?,?,?,?,?,?,2)',
-                                (job_id, uid, tier, gpu, minutes, month, 'REQUESTING', None))
+                self.db.execute('INSERT INTO monthly_dispatch_holds(job_id,uid,tier,gpu,minutes,month,state,scheduler_id,binding_version,policy_version) VALUES(?,?,?,?,?,?,?,?,2,?)',
+                                (job_id, uid, tier, gpu, minutes, month, 'REQUESTING', None, policy_version))
                 should_send = True
             else:
-                if tuple(row[k] for k in ('uid', 'tier', 'gpu', 'minutes')) != (uid, tier, gpu, minutes):
+                if tuple(row[k] for k in ('uid', 'tier', 'gpu', 'minutes', 'policy_version')) != (uid, tier, gpu, minutes, policy_version):
                     raise ReservationUncertain('reservation intent conflicts')
                 if row['state'] == 'DEFERRED' and row['scheduler_id'] is None:
                     # A definite denial wrote no hold. A new month may safely
@@ -138,13 +156,19 @@ class ReservationCoordinator:
         row = self._row(job_id)
         if not should_send and row['state'] == 'REQUESTING':
             try:
-                observed = self.bridge.reservation_status(uid, job_id)
+                if policy_version == 1:
+                    observed = self.bridge.reservation_status(uid, job_id)
+                else:
+                    observed = self.bridge.reservation_status(uid, job_id, policy_version=2)
             except ControllerUnavailable as exc:
                 raise ReservationUncertain('reservation status unavailable') from exc
             should_send = not observed.get('present')
         if should_send:
             try:
-                self.bridge.reserve(uid, job_id, tier, gpu, minutes)
+                if policy_version == 1:
+                    self.bridge.reserve(uid, job_id, tier, gpu, minutes)
+                else:
+                    self.bridge.reserve(uid, job_id, tier, gpu, minutes, policy_version=policy_version)
             except ControllerDenied as exc:
                 self.db.execute("UPDATE monthly_dispatch_holds SET state='DEFERRED' WHERE job_id=? AND state='REQUESTING'", (job_id,))
                 raise ReservationDeferred('selected tier cannot cover the requested GPU time') from exc
@@ -166,13 +190,21 @@ class ReservationCoordinator:
         row = self._row(job_id)
         if row is None:
             if ensure_tombstone:
-                job = self.db.execute("SELECT owner_uid,state,scheduler_id,selected_tier,requested_gpu,requested_minutes "
+                job = self.db.execute("SELECT owner_uid,state,scheduler_id,selected_tier,requested_gpu,requested_minutes,policy_version "
                                       "FROM jobs WHERE id=?", (job_id,)).fetchone()
                 if (not job or job['owner_uid'] != uid or job['state'] != 'CANCELLING_RESERVATION' or
                         job['scheduler_id'] is not None or job['selected_tier'] is None):
                     raise ReservationUncertain('job is not fenced for cancellation')
                 try:
-                    self.bridge.cancel_request(uid, job_id, job['selected_tier'], job['requested_gpu'], job['requested_minutes'])
+                    if job['policy_version'] == 1:
+                        self.bridge.cancel_request(uid, job_id, job['selected_tier'], job['requested_gpu'], job['requested_minutes'])
+                    else:
+                        self.bridge.cancel_request(uid, job_id, job['selected_tier'], job['requested_gpu'], job['requested_minutes'], policy_version=job['policy_version'])
+                        status = self.bridge.reservation_status(uid, job_id, policy_version=job['policy_version'])
+                        if (not status.get('present') or status.get('state') != 'cancelled' or
+                                any(status.get(key) != job[column] for key, column in
+                                    (('tier', 'selected_tier'), ('gpu', 'requested_gpu'), ('minutes', 'requested_minutes')))):
+                            raise ReservationUncertain('cancellation tombstone not confirmed')
                 except (ControllerUnavailable, ValueError) as exc:
                     raise ReservationUncertain('cancellation tombstone outcome unknown') from exc
             return  # No intent can be created after the caller's fence.
@@ -181,7 +213,13 @@ class ReservationCoordinator:
         # One controller transaction either cancels an existing unbound hold
         # or creates an absent-request tombstone. This fences in-flight RESERVE1.
         try:
-            self.bridge.cancel_request(uid, job_id, row['tier'], row['gpu'], row['minutes'])
+            if row['policy_version'] == 1:
+                self.bridge.cancel_request(uid, job_id, row['tier'], row['gpu'], row['minutes'])
+            else:
+                self.bridge.cancel_request(uid, job_id, row['tier'], row['gpu'], row['minutes'], policy_version=row['policy_version'])
+                status = self._status(row)
+                if status.get('state') != 'cancelled':
+                    raise ReservationUncertain('cancellation not confirmed')
         except (ControllerUnavailable, ValueError) as exc:
             raise ReservationUncertain('cancellation outcome unknown') from exc
         self.db.execute("UPDATE monthly_dispatch_holds SET state='CANCELLED' WHERE job_id=? AND state IN ('REQUESTING','HELD','DEFERRED','CANCELLED') AND scheduler_id IS NULL", (job_id,))
@@ -201,14 +239,31 @@ class ReservationCoordinator:
             row = self._row(job_id)
         if row['scheduler_id'] != scheduler_id:
             raise ReservationUncertain('terminal scheduler identity unavailable')
+        def confirm_policy2_identity(current):
+            if current['binding_version'] != 2 or not current['bind_submit'] or not current['bind_sluid']:
+                raise ReservationUncertain('durable binding identity unavailable')
+            try:
+                submit, sluid = int(current['bind_submit']), int(current['bind_sluid'])
+                if str(submit) != current['bind_submit'] or str(sluid) != current['bind_sluid'] or not 0 < submit <= 2**64-1 or not 0 < sluid <= 2**64-1:
+                    raise ValueError('invalid binding identity')
+                receipt = self.bridge.terminal_binding_receipt(uid, job_id, scheduler_id, submit, sluid)
+                if (receipt['submit'], receipt['sluid']) != (submit, sluid):
+                    raise ReservationUncertain('controller binding identity differs')
+                return submit, sluid, receipt['terminal'], receipt['generation']
+            except (ControllerUnavailable, ValueError, KeyError, TypeError) as exc:
+                raise ReservationUncertain('controller binding identity unavailable') from exc
         if row['state'] == 'CLOSED':
-            if require_controller_confirmation:
+            if require_controller_confirmation or row['policy_version'] == 2:
                 status = self._status(row)
                 if (status.get('scheduler_id') != scheduler_id or not
                         (status.get('state') == 'cancelled_bound' or
                          (status.get('state') == 'released' and type(status.get('generation')) is int and
                           status['generation'] > 0))):
                     raise ReservationUncertain('closed reservation is not confirmed by controller')
+                if row['policy_version'] == 2:
+                    _, _, terminal, generation = confirm_policy2_identity(row)
+                    if terminal != (3 if status.get('state') == 'cancelled_bound' else 2) or (terminal == 2 and generation != status.get('generation')):
+                        raise ReservationUncertain('terminal receipt state differs')
             return
         if row['state'] not in ('BINDING', 'BOUND'):
             raise ReservationUncertain('terminal reservation state unavailable')
@@ -216,7 +271,15 @@ class ReservationCoordinator:
         state, bound = status.get('state'), status.get('scheduler_id')
         if state in ('unbound', 'bound') and bound in (None, scheduler_id):
             try:
-                self.bridge.cancel_bound_reservation(uid, job_id, scheduler_id)
+                if row['policy_version'] == 1:
+                    self.bridge.cancel_bound_reservation(uid, job_id, scheduler_id)
+                elif row['policy_version'] == 2 and state == 'bound' and bound == scheduler_id:
+                    submit, sluid, terminal, generation = confirm_policy2_identity(row)
+                    if terminal != 0 or generation != 0:
+                        raise ReservationUncertain('job is not confirmed terminal')
+                    self.bridge.cancel_bound_reservation2(uid, job_id, scheduler_id, submit, sluid)
+                else:
+                    raise ReservationUncertain('bound cancellation identity unavailable')
             except ControllerUnavailable as exc:
                 raise ReservationUncertain('terminal reservation cancellation unconfirmed') from exc
             status = self._status(self._row(job_id), rollover_month=int(month_now().replace('-', '')))
@@ -225,6 +288,10 @@ class ReservationCoordinator:
                 state == 'cancelled_bound' or
                 (state == 'released' and isinstance(status.get('generation'), int) and status['generation'] > 0)):
             raise ReservationUncertain('terminal allocation release not confirmed')
+        if row['policy_version'] == 2:
+            _, _, terminal, generation = confirm_policy2_identity(row)
+            if terminal != (3 if state == 'cancelled_bound' else 2) or (terminal == 2 and generation != status.get('generation')):
+                raise ReservationUncertain('terminal receipt state differs')
         self.db.execute("UPDATE monthly_dispatch_holds SET state='CLOSED' WHERE job_id=? AND scheduler_id=? AND state IN ('BINDING','BOUND')", (job_id,scheduler_id))
         if self._row(job_id)['state'] != 'CLOSED':
             raise ReservationUncertain('terminal reservation changed concurrently')

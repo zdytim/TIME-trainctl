@@ -28,6 +28,7 @@ NODE_DAEMON = '/opt/slurm/current/sbin/slurmd'
 RELEASE_MANIFEST = Path('/etc/pro6000d-training/monthly-release.json')
 CONTROLLER_CAPABILITY = b'PRO6000D_MANDATORY_GPU_ALLOCATION_GATE_BUILD_V1'
 NODE_CAPABILITY = b'PRO6000D_DURABLE_NODE_CLEANUP_PROOF_BUILD_V1'
+ACTUAL_CAPABILITY = b'PRO6000D_ACTUAL_USAGE_UNLIMITED2_BUILD_V1'
 
 
 def _validate_slurm_config():
@@ -62,6 +63,13 @@ def _validate_slurm_config():
     return str(path)
 
 
+def _manifest_actual_usage(manifest):
+    enabled = manifest.get('actual_usage_unlimited2', False)
+    if type(enabled) is not bool:
+        raise ValueError('actual_usage_unlimited2 must be a boolean')
+    return enabled
+
+
 def _validate_release(executable, config, role="controller"):
     # The manifest is installed only after the paired candidate has been
     # reviewed and tested.  A root-owned *old* controller is not sufficient:
@@ -82,6 +90,7 @@ def _validate_release(executable, config, role="controller"):
             manifest = json.load(stream)
             if manifest.get('version') != 1:
                 raise ValueError('unsupported manifest')
+            actual_usage = _manifest_actual_usage(manifest)
             for name, actual in ((role, executable), ('slurm_conf', Path(config)), ('gres_conf', GRES_CONFIG), ('cgroup_conf', CGROUP_CONFIG)):
                 entry = manifest['files'][name]
                 if set(entry) != {'path', 'sha256'} or not re.fullmatch(r'[0-9a-f]{64}', entry['sha256']):
@@ -90,6 +99,7 @@ def _validate_release(executable, config, role="controller"):
                     raise ValueError('artifact path mismatch')
                 digest = hashlib.sha256()
                 marker_found = False
+                actual_found = False
                 tail = b''
                 with actual.open('rb') as artifact:
                     info = os.fstat(artifact.fileno())
@@ -100,8 +110,10 @@ def _validate_release(executable, config, role="controller"):
                         if name == role:
                             marker = CONTROLLER_CAPABILITY if role == 'controller' else NODE_CAPABILITY
                             marker_found |= marker in tail + block
-                            tail = (tail + block)[-len(marker):]
-                if digest.hexdigest() != entry['sha256'] or (name == role and not marker_found):
+                            actual_found |= ACTUAL_CAPABILITY in tail + block
+                            tail = (tail + block)[-max(len(marker), len(ACTUAL_CAPABILITY)): ]
+                if (digest.hexdigest() != entry['sha256'] or (name == role and not marker_found) or
+                        (name == 'controller' and actual_usage and not actual_found)):
                     raise ValueError('artifact digest or controller capability mismatch')
                 if name == 'gres_conf':
                     for line in actual.read_text().splitlines():
@@ -109,6 +121,7 @@ def _validate_release(executable, config, role="controller"):
                             raise ValueError('included GPU configuration is not supported')
         except (KeyError, TypeError, ValueError, OSError) as exc:
             raise SystemExit('release manifest does not match controller/configuration') from exc
+    return actual_usage
 
 
 def _open_verified_node_pidfd(config):
@@ -163,7 +176,7 @@ def main():
         info = parent.stat()
         if info.st_uid != 0 or info.st_mode & 0o022:
             raise SystemExit('controller executable directory is not root-managed')
-    _validate_release(executable, config)
+    actual_usage = _validate_release(executable, config)
     directory = WITNESS_DIR.lstat()
     if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != 0 or directory.st_mode & 0o077:
         raise SystemExit('witness directory must be root-owned and private')
@@ -213,6 +226,8 @@ def main():
     os.set_inheritable(node_pidfd, True)
     env = {key: value for key, value in os.environ.items()
            if key not in ('LD_PRELOAD', 'LD_LIBRARY_PATH', 'PYTHONPATH', 'PYTHONHOME')}
+    # Never trust an inherited switch; only the validated root manifest decides.
+    env['TIME_QUOTA_ACTUAL_USAGE_V2'] = '1' if actual_usage else '0'
     env['TIME_QUOTA_WITNESS_FD'] = str(fd)
     env['TIME_QUOTA_NODE_PROOF_FD'] = str(proof_fd)
     env['TIME_QUOTA_NODE_PIDFD'] = str(node_pidfd)

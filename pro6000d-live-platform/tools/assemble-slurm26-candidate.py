@@ -32,6 +32,7 @@ PATCHES = (
     'slurm26-recovery-defer-candidate.patch', 'slurm26-selector-rebuild-candidate.patch',
     'slurm26-local-node-iterator-fix.patch',
     'slurm26-strict-priority-integration.patch',
+    'slurm26-actual-usage-no-requeue.patch',
 )
 
 

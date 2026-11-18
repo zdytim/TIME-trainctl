@@ -15,7 +15,7 @@ assert(ui.panel({usage_verified:false, enforcement_ready:false, tiers}).includes
 assert(!ui.panel({usage_verified:false, enforcement_ready:false, tiers}).includes('5.00'));
 const active = {...staged, enforcement_ready:true, selectable_tiers_ready:true, request_available:true};
 assert(ui.panel(active).includes('data-action="monthly-apply"'));
-assert(ui.panel(active).includes('账面剩余') && ui.panel(active).includes('未消耗预留'));
+assert(ui.panel(active).includes('账面剩余') && ui.panel(active).includes('尚未消耗的预留'));
 assert(ui.selector(active,'important').includes('name="selected_tier"'));
 assert(ui.selector(active,'important').includes('value="important" selected'));
 assert(ui.panel({state:'unknown',usage_verified:false,enforcement_ready:false,enforcement_limitation:'月度强制调度尚未启用。'}).includes('状态未确认'));

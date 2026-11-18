@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 from monthly_quota import MonthlyLedger, month_now
 from monthly_reservation import ReservationCoordinator, ReservationDeferred, ReservationUncertain
-from controller_bridge import ControllerBridge, PinnedControllerBridge, ControllerUnavailable, ControllerOutcomeUnknown, PriorityBarrierWait
+from controller_bridge import ControllerBridge, PinnedControllerBridge, ActualUsageControllerBridge, ControllerUnavailable, ControllerOutcomeUnknown, PriorityBarrierWait
 from controller_view import selectable_snapshot_view, unavailable
 from activation_attestation import verify_release
 import base64
@@ -361,10 +361,15 @@ class Service:
                                  ("resource_unknown", "INTEGER NOT NULL DEFAULT 0"),
                                  ("selected_tier", "TEXT"), ("cancel_target", "TEXT"),
                                  ("effective_job_digest_version", "INTEGER"), ("effective_job_digest", "TEXT"),
+                                 ("policy_version", "INTEGER NOT NULL DEFAULT 1"),
+                                 ("policy_digest", "TEXT"),
                                  ("priority_marker_required", "INTEGER")):
             if name not in columns:
                 self.store.db.execute("ALTER TABLE jobs ADD COLUMN " + name + " " + definition)
         self.store.db.execute("CREATE INDEX IF NOT EXISTS jobs_dispatch_scan ON jobs(origin,state,selected_tier,id)")
+        application_columns = {r[1] for r in self.store.db.execute("PRAGMA table_info(applications)")}
+        if "policy_version" not in application_columns:
+            self.store.db.execute("ALTER TABLE applications ADD COLUMN policy_version INTEGER NOT NULL DEFAULT 1")
 
         self.store.db.execute("""CREATE TABLE IF NOT EXISTS monthly_grant_outbox (
             application_id TEXT PRIMARY KEY, target_uid INTEGER NOT NULL, month INTEGER NOT NULL,
@@ -555,13 +560,26 @@ class Service:
             raise ApiError(403, "path_owner_mismatch", "路径不属于调用用户")
         return str(resolved)
 
-    def validate_job(self, ident: Dict[str, Any], payload: Dict[str, Any], temporary: bool = False) -> Dict[str, Any]:
+    @staticmethod
+    def normalize_legacy_defaults(payload):
+        if not isinstance(payload, dict):
+            raise ApiError(400, 'invalid_job', '任务必须是对象')
+        if 'time_minutes' in payload or 'qos' in payload:
+            raise ApiError(400, 'legacy_time_fields', '新任务不支持指定时限或 QoS，请移除参数并更新客户端')
+        return payload, False
+
+    def validate_job(self, ident: Dict[str, Any], payload: Dict[str, Any], temporary: bool = False, policy_version: Optional[int] = None) -> Dict[str, Any]:
         user = self.user(ident["uid"])
         if not isinstance(payload, dict):
             raise ApiError(400, "invalid_job", "任务必须是对象")
+        if policy_version is None:
+            payload, _ = self.normalize_legacy_defaults(payload)
+            policy_version = 2
         selected_tier = payload.get("selected_tier")
         readiness = self.monthly_controller_snapshot(ident["uid"])
         ready = readiness.get("enforcement_ready") is True and readiness.get("selectable_tiers_ready") is True
+        if policy_version == 2 and "selected_tier" not in payload:
+            raise ApiError(400, "selected_tier_required", "请选择月度额度档位")
         cfg = self.config.get("monthly_controller", {})
         configured = isinstance(cfg, dict) and cfg.get("activation_enabled") is True
         if configured and not ready:
@@ -575,23 +593,27 @@ class Service:
             raise ApiError(400, "selected_tier_required", "请选择月度额度档位")
         name = payload.get("name", "training")
         command = payload.get("command", "")
-        qos = payload.get("qos", "normal")
+        if policy_version not in (1, 2):
+            raise ApiError(409, "invalid_policy", "任务计费版本无效")
+        qos = payload.get("qos", self.config.get("unlimited_qos", "long")) if policy_version == 2 else payload.get("qos", "normal")
+        if policy_version == 2 and (not isinstance(qos, str) or not SAFE_NAME.fullmatch(qos)):
+            raise ApiError(503, "invalid_unlimited_qos", "无限时长 QoS 配置无效")
         try:
             gpu = int(payload.get("gpu", 1)); cpu = int(payload.get("cpu", 1))
-            mem = int(payload.get("memory_mb", 1024)); minutes = int(payload.get("time_minutes", 60))
+            mem = int(payload.get("memory_mb", 1024)); minutes = 4294967295 if policy_version == 2 else int(payload.get("time_minutes", 60))
         except (TypeError, ValueError):
             raise ApiError(400, "invalid_resource", "GPU、CPU、内存和时限必须是整数")
         if not SAFE_NAME.fullmatch(str(name)):
             raise ApiError(400, "invalid_name", "任务名只允许字母、数字、点、下划线和连字符")
         if not isinstance(command, str) or not command.strip() or len(command) > 4096 or "\x00" in command:
             raise ApiError(400, "invalid_command", "命令不能为空、不能超过 4096 字符或包含 NUL")
-        if qos not in self.qos:
+        if policy_version == 1 and qos not in self.qos:
             raise ApiError(400, "invalid_qos", "未知时限档位")
         if gpu < 1 or gpu > int(self.config.get("max_requested_gpu", 64)) or cpu < 1 or cpu > 512 or mem < 128 or mem > 1048576:
             raise ApiError(400, "invalid_resource", "资源请求超出接口允许范围")
-        if minutes < 1 or minutes > int(self.config.get("max_job_minutes", 4320)):
+        if policy_version == 1 and (minutes < 1 or minutes > int(self.config.get("max_job_minutes", 4320))):
             raise ApiError(400, "cluster_time_limit", "时限超出测试节点允许的最大值")
-        if not temporary and minutes > int(self.qos[qos]["max_minutes"]):
+        if policy_version == 1 and not temporary and minutes > int(self.qos[qos]["max_minutes"]):
             raise ApiError(400, "time_limit_exceeded", "实际时限超过所选档位的单作业上限")
         capacity = self.config.get("capacity", {})
         if gpu > int(capacity.get("gpu", self.config.get("max_requested_gpu", 64))) or cpu > int(capacity.get("cpu", os.cpu_count() or 1)) or mem > int(capacity.get("memory_mb", 1048576)):
@@ -939,7 +961,7 @@ class Service:
             legacy = legacy_hold is not None and tuple(legacy_hold) == (row['owner_uid'], int(sid), 'BOUND', 1, None, None)
             receipt = (strict.bridge.legacy_terminal_receipt(row['owner_uid'], row['id'], int(sid)) if legacy else
                        strict.bridge.ordinary_terminal_receipt(row['owner_uid'], row['id'], int(sid)))
-            status = strict.bridge.reservation_status(row['owner_uid'], row['id'])
+            status = strict.reservation_status_for_job(row['owner_uid'], row['id'])
             terminal = states.get(receipt['state'] & 0xff)
             if (terminal is None or status.get('state') != 'released' or
                     status.get('scheduler_id') != int(sid) or (not legacy and status.get('sluid') != receipt['sluid']) or
@@ -999,7 +1021,7 @@ class Service:
                                (row['id'], row['id'])).fetchone()):
                 raise ControllerUnavailable('legacy reservation or priority identity ambiguous')
             receipt = strict.bridge.legacy_terminal_receipt(row['owner_uid'], row['id'], int(sid))
-            remote = strict.bridge.reservation_status(row['owner_uid'], row['id'])
+            remote = strict.reservation_status_for_job(row['owner_uid'], row['id'])
             terminal = {3: 'COMPLETED', 4: 'CANCELLED', 5: 'FAILED', 6: 'FAILED',
                         7: 'FAILED', 8: 'FAILED', 9: 'FAILED', 10: 'FAILED',
                         11: 'FAILED'}.get(receipt['state'] & 0xff)
@@ -1177,7 +1199,7 @@ class Service:
                         held = self.store.db.execute(
                             'SELECT uid,scheduler_id,state,binding_version,bind_submit,bind_sluid '
                             'FROM monthly_dispatch_holds WHERE job_id=?', (row['id'],)).fetchone()
-                        status = strict.bridge.reservation_status(row['owner_uid'], row['id'])
+                        status = strict.reservation_status_for_job(row['owner_uid'], row['id'])
                         observed = records.get(sid)
                         observed_state = observed.get('state', '').split('+')[0] if observed else ''
                         if (held is not None and held['binding_version'] == 1 and
@@ -1758,7 +1780,7 @@ class Service:
         except ControllerUnavailable as exc:
             raise ReservationUncertain("controller configuration unavailable") from exc
 
-    def _strict_monthly_hold(self, row, selected, job, strict):
+    def _strict_monthly_hold(self, row, selected, job, strict, actual_bridge=None):
         """Reserve under the priority lock against the same attested controller."""
         db = self.store.db
         with strict.runtime.coordinator.serialized():
@@ -1775,12 +1797,15 @@ class Service:
                 if (source.path, source.controller_uid, source.expected_pid, source.release_manifest) != (
                         peer.path, peer.controller_uid, peer.expected_pid, peer.release_manifest):
                     raise ReservationUncertain('reservation controller differs from priority controller')
-                pinned = PinnedControllerBridge(source.path, source.controller_uid, source.expected_pid,
+                pinned = actual_bridge or PinnedControllerBridge(source.path, source.controller_uid, source.expected_pid,
                                                 source.timeout, release_manifest=source.release_manifest)
+                if (pinned.path, pinned.controller_uid, pinned.expected_pid, pinned.release_manifest) != (
+                        source.path, source.controller_uid, source.expected_pid, source.release_manifest):
+                    raise ReservationUncertain('actual usage controller differs')
                 if not pinned.readiness():
                     raise ReservationUncertain('reservation controller unavailable')
                 ReservationCoordinator(db, pinned).hold(row['id'], row['owner_uid'], selected, job['gpu'],
-                    job['time_minutes'], int(month_now().replace('-', '')), require_waiting=True)
+                    job['time_minutes'], int(month_now().replace('-', '')), require_waiting=True, policy_version=row['policy_version'])
                 def reverify(current_policy, after):
                     policy_fields = ('uid', 'username', 'identity_generation', 'enabled', 'version')
                     if (any(current_policy.get(k) != policy.get(k) for k in policy_fields) or
@@ -1831,27 +1856,63 @@ class Service:
                   "priority_marker_required", "name", "requested_gpu", "requested_cpu", "requested_mem_mb",
                   "requested_minutes", "qos", "workdir", "env_name", "command", "output_path",
                   "selected_tier", "temporary_application_id", "effective_job_digest_version",
-                  "effective_job_digest")
+                  "effective_job_digest", "policy_version", "policy_digest")
         where = " AND ".join(name + " IS ?" for name in fields)
         sql = ("UPDATE jobs SET state='SUBMITTING',reason_code='submitting',"
                "reason_text='正在提交调度器',updated_at=? WHERE id=? AND state='WAITING_QUOTA' AND " + where +
                " AND (temporary_application_id IS NULL OR temporary_application_id='' OR EXISTS ("
                "SELECT 1 FROM applications a WHERE a.id=jobs.temporary_application_id "
                "AND a.owner_uid=jobs.owner_uid AND a.kind='temporary_job' AND a.status='APPROVED' "
+               "AND a.policy_version=jobs.policy_version "
                "AND a.authorization_used=1 AND a.bound_job_id=jobs.id "
                "AND (a.expires_at GLOB '*Z' OR a.expires_at GLOB '*[+-][0-9][0-9]:[0-9][0-9]') "
                "AND julianday(a.expires_at)>julianday('now')))" )
         return self.store.db.execute(sql, (utc_now(), row['id'], *(row[name] for name in fields))).rowcount == 1
 
+    def sbatch_argv(self, row, job, user, job_gid, script):
+        selected = job.get('selected_tier')
+        argv = ["sbatch", "--parsable", "--uid", str(user.pw_uid), "--gid", str(job_gid),
+                "--job-name", "p6-" + row["id"], "--partition", self.config.get("partition", "gpu"),
+                "--comment", "pro6000d-job:" + row["id"] + ((":tier=" + selected) if selected is not None else ""), "--gres", "gpu:%d" % job["gpu"],
+                "--cpus-per-task", str(job["cpu"]), "--mem", "%dM" % job["memory_mb"],
+                "--time", "0" if row['policy_version'] == 2 else str(job["time_minutes"]), "--chdir", job["workdir"],
+                "--export", "ALL", "--output", job["output_path"], "--error", job["output_path"], str(script)]
+        if selected is not None:
+            argv[-1:-1] = ["--nodes=1-1"]
+        if self.config.get("slurm_account"):
+            argv[-1:-1] = ["--account", str(self.config["slurm_account"])]
+            if row['policy_version'] == 1:
+                argv[-1:-1] = ["--qos", job["qos"]]
+        if row['policy_version'] == 2:
+            if not isinstance(job['qos'], str) or not SAFE_NAME.fullmatch(job['qos']):
+                raise ApiError(409, 'invalid_policy', '任务 QoS 快照无效')
+            argv[-1:-1] = ["--qos", job["qos"], "--no-requeue"]
+        return argv
+
     def dispatch_job(self, ident: Dict[str, Any], row: sqlite3.Row, job: Dict[str, Any], temporary: bool = False) -> Dict[str, Any]:
         if row["origin"] != "platform":
             raise ApiError(409, "external_job_read_only", "外部 Slurm 任务不能通过平台重新提交")
+        if row['policy_version'] not in (1, 2):
+            raise ApiError(409, 'invalid_policy', '任务计费版本无效')
+        actual_bridge = None
+        if row['policy_version'] == 2:
+            if job['time_minutes'] != 4294967295 or not isinstance(job['qos'], str) or not SAFE_NAME.fullmatch(job['qos']) or job.get('selected_tier') is None:
+                raise ApiError(409, 'invalid_policy', '任务计费参数不一致')
+            try:
+                source = self.verified_monthly_bridge()
+                actual_bridge = ActualUsageControllerBridge(source.path, source.controller_uid, source.expected_pid,
+                                                            source.timeout, release_manifest=source.release_manifest)
+                actual_bridge.require_actual_usage_policy()
+            except ControllerUnavailable as exc:
+                raise ApiError(503, 'actual_usage_not_ready', '按实际运行计费尚未就绪，任务继续等待') from exc
         version, digest = row["effective_job_digest_version"], row["effective_job_digest"]
         if version is not None or digest is not None:
             try:
                 expected = self.effective_job_digest(row["id"], row["owner_uid"], job, row["temporary_application_id"])
                 if version != 1 or not isinstance(digest, str) or not hmac.compare_digest(digest, expected):
                     raise ValueError("effective job snapshot mismatch")
+                if row['policy_version'] == 2 and row['policy_digest'] != hashlib.sha256(('monthly-policy:2:' + digest).encode('ascii')).hexdigest():
+                    raise ValueError("job policy snapshot mismatch")
             except (KeyError, TypeError, ValueError) as exc:
                 raise ApiError(409, "job_snapshot_mismatch", "任务内容与入队记录不一致，请重新提交") from exc
         selected = job.get("selected_tier")
@@ -1892,11 +1953,11 @@ class Service:
                 raise ApiError(409, "selected_tier_unavailable", "月度选档控制尚未就绪")
             try:
                 if strict is not None:
-                    self._strict_monthly_hold(row, selected, job, strict)
+                    self._strict_monthly_hold(row, selected, job, strict, actual_bridge)
                 else:
-                    coordinator = self.monthly_reservation_coordinator()
+                    coordinator = ReservationCoordinator(self.store.db, actual_bridge) if actual_bridge else self.monthly_reservation_coordinator()
                     coordinator.hold(row["id"], row["owner_uid"], selected, job["gpu"], job["time_minutes"],
-                                     int(month_now().replace("-", "")), require_waiting=True)
+                                     int(month_now().replace("-", "")), require_waiting=True, policy_version=row['policy_version'])
             except ReservationDeferred as exc:
                 raise ApiError(409, "monthly_capacity_wait", "所选档位余额不足以覆盖申请时限；任务继续排队") from exc
             except Exception as exc:
@@ -1924,6 +1985,11 @@ class Service:
                 fh.flush(); os.fsync(fh.fileno())
         # Persist the intent before submission. In strict mode an uncertain
         # result remains SUBMITTING until controller identity can be proven.
+        if row['policy_version'] == 2:
+            try:
+                actual_bridge.require_actual_usage_policy()
+            except ControllerUnavailable as exc:
+                raise ApiError(503, 'actual_usage_not_ready', '按实际运行计费尚未就绪，任务继续等待') from exc
         top_held = False
         submission_snapshot = []
         if strict is not None:
@@ -1959,18 +2025,8 @@ class Service:
             raise ApiError(409, "submission_already_claimed", "任务状态已变化，等待核对")
         # ALL exports only run()'s explicit sanitized environment. On Slurm 19,
         # NONE implicitly asks Slurm to collect a login environment through PAM.
-        argv = ["sbatch", "--parsable", "--uid", str(user.pw_uid), "--gid", str(job_gid),
-                "--job-name", "p6-" + row["id"], "--partition", self.config.get("partition", "gpu"),
-                "--comment", "pro6000d-job:" + row["id"] + ((":tier=" + selected) if selected is not None else ""), "--gres", "gpu:%d" % job["gpu"],
-                "--cpus-per-task", str(job["cpu"]), "--mem", "%dM" % job["memory_mb"],
-                "--time", str(job["time_minutes"]), "--chdir", job["workdir"],
-                "--export", "ALL", "--output", job["output_path"], "--error", job["output_path"], str(script)]
-        if selected is not None:
-            # The current controller gate validates a single-node request.
-            argv[-1:-1] = ["--nodes=1-1"]
+        argv = self.sbatch_argv(row, job, user, job_gid, script)
         no_hold = False
-        if self.config.get("slurm_account"):
-            argv[-1:-1] = ["--account", str(self.config["slurm_account"]), "--qos", job["qos"]]
         if top_held:
             attempted = [False]
             def submit_unheld():
@@ -2166,14 +2222,14 @@ class Service:
                         self.store.db.execute("UPDATE jobs SET state='EXPIRED',reason_code='approval_expired',reason_text='批准在运行前过期，需重新申请',finished_at=?,updated_at=? WHERE id=? AND state='WAITING_QUOTA'", (utc_now(), utc_now(), row["id"]))
                     continue
                 cap = max(quota["gpu_limit"], job["gpu"]) if temporary else quota["gpu_limit"]
-                if not temporary and (job["gpu"] > quota["gpu_limit"] or job["time_minutes"] > int(self.qos[job["qos"]]["max_minutes"])):
+                if not temporary and (job["gpu"] > quota["gpu_limit"] or (row['policy_version'] == 1 and job["time_minutes"] > int(self.qos[job["qos"]]["max_minutes"]))):
                     if not self._dispatch_note_waiting(row, 'policy_changed', '规则已变更，任务超过当前额度或档位时限；请取消后重新申请'):
                         self.last_reconcile_ok = False
                         break
                     continue
                 if usage["gpu"] + job["gpu"] > cap or usage["concurrent_jobs"] >= quota["concurrent_job_limit"]:
                     continue
-                self.validate_job(ident, job, temporary=temporary)
+                self.validate_job(ident, job, temporary=temporary, policy_version=row['policy_version'])
                 self.dispatch_job(ident, row, job, temporary)
                 if not self.last_reconcile_ok:
                     break
@@ -2246,8 +2302,13 @@ class Service:
         if app_id is not None and not isinstance(app_id, str):
             raise ApiError(400, "invalid_temporary_authorization", "批准标识无效")
         app = None
+        policy_version = 2
         if app_id:
             app = self.store.db.execute("SELECT * FROM applications WHERE id=? AND owner_uid=?", (str(app_id), uid)).fetchone()
+            if app:
+                policy_version = app['policy_version']
+                if policy_version not in (1, 2):
+                    raise ApiError(409, 'invalid_policy', '申请计费版本无效')
             if app and app["bound_job_id"]:
                 prior = self.store.db.execute("SELECT * FROM jobs WHERE id=?", (app["bound_job_id"],)).fetchone()
                 if prior:
@@ -2287,12 +2348,15 @@ class Service:
             if expiry:
                 raise ApiError(409, "temporary_authorization_expired", "批准已过期")
             approved = json_object(app["approved_json"], {})
-            job = self.validate_job(ident, approved, temporary=True)
+            job = self.validate_job(ident, approved, temporary=True, policy_version=policy_version)
+            if policy_version == 2 and (approved.get('time_minutes') != job['time_minutes'] or approved.get('qos') != job['qos']):
+                raise ApiError(409, 'authorization_binding_mismatch', '批准绑定的计费参数不一致')
             supplied = {key: payload[key] for key in job if key in payload}
             if supplied and any(supplied[key] != job[key] for key in supplied):
                 raise ApiError(409, "authorization_binding_mismatch", "批准绑定的任务已变更，必须重新申请")
         else:
-            job = self.validate_job(ident, payload)
+            normalized, _ = self.normalize_legacy_defaults(payload)
+            job = self.validate_job(ident, normalized, policy_version=policy_version)
             if job["gpu"] > self.quota(uid)["gpu_limit"]:
                 raise ApiError(409, "permanent_quota_exceeded", "单任务 GPU 请求超过个人上限，请申请临时资源")
         if strict is not None and job.get('selected_tier') is None:
@@ -2310,10 +2374,12 @@ class Service:
         db = self.store.db
         def insert_job(db):
             if app:
-                changed = db.execute("UPDATE applications SET authorization_used=1,bound_job_id=?,updated_at=? WHERE id=? AND status='APPROVED' AND authorization_used=0 AND bound_job_id IS NULL", (jid, utc_now(), app_id)).rowcount
+                changed = db.execute("UPDATE applications SET authorization_used=1,bound_job_id=?,updated_at=? WHERE id=? AND status='APPROVED' AND authorization_used=0 AND bound_job_id IS NULL AND policy_version=?", (jid, utc_now(), app_id, policy_version)).rowcount
                 if changed != 1:
                     raise ApiError(409, "authorization_consumed", "批准已被其他请求使用")
             db.execute("INSERT INTO jobs(id,owner_uid,owner_name,name,state,requested_gpu,requested_cpu,requested_mem_mb,requested_minutes,qos,workdir,env_name,command,output_path,reason_code,reason_text,temporary_application_id,created_at,updated_at,client_request_id,selected_tier,client_request_hash,effective_job_digest_version,effective_job_digest) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (jid, uid, ident["username"], job["name"], "WAITING_QUOTA", job["gpu"], job["cpu"], job["memory_mb"], job["time_minutes"], job["qos"], job["workdir"], job["environment"], job["command"], job["output_path"], "waiting_user_quota", "已入队，等待个人额度与设备资源", app_id, utc_now(), utc_now(), request_id, job.get("selected_tier"), request_hash, 1, effective_digest))
+            policy_digest = hashlib.sha256(('monthly-policy:2:' + effective_digest).encode('ascii')).hexdigest() if policy_version == 2 else None
+            db.execute("UPDATE jobs SET policy_version=?,policy_digest=? WHERE id=?", (policy_version, policy_digest, jid))
             self.store.audit(uid, ident["username"], "queue", "job", jid, {"temporary_application_id": app_id}, "accepted")
         if strict is not None:
             try:
@@ -2730,6 +2796,7 @@ finally: os.close(fd)
         if len(reason) < 5 or len(reason) > 2000:
             raise ApiError(400, "reason_required", "理由长度需为 5 到 2000 字符")
         requested = payload.get("requested")
+        application_policy = 1
         if kind == "monthly_gpu_hours":
             if not self.monthly_controller_snapshot(ident["uid"]).get("request_available"):
                 raise ApiError(409,"monthly_not_enabled","月度额度追加暂不可用")
@@ -2743,7 +2810,11 @@ finally: os.close(fd)
         elif kind == "temporary_job":
             if not self.config.get("temporary_authorizations", {}).get("enabled", False):
                 raise ApiError(409, "temporary_authorization_disabled", "临时资源授权尚未开启")
-            requested = self.validate_job(ident, requested, temporary=True)
+            if not isinstance(requested, dict):
+                raise ApiError(400, "invalid_job", "任务必须是对象")
+            requested, _ = self.normalize_legacy_defaults(requested)
+            application_policy = 2
+            requested = self.validate_job(ident, requested, temporary=True, policy_version=application_policy)
         else:
             requested = self.quota_value(requested)
         if self.store.db.execute("SELECT COUNT(*) FROM applications WHERE owner_uid=? AND status='PENDING'", (ident["uid"],)).fetchone()[0] >= 32:
@@ -2752,6 +2823,8 @@ finally: os.close(fd)
         db=self.store.db; db.execute("BEGIN IMMEDIATE")
         try:
             db.execute("INSERT INTO applications(id,owner_uid,owner_name,kind,status,requested_json,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", (aid, ident["uid"], ident["username"], kind, "PENDING", json.dumps(requested, sort_keys=True), reason, utc_now(), utc_now()))
+            if kind == 'temporary_job':
+                db.execute("UPDATE applications SET policy_version=? WHERE id=?", (application_policy, aid))
             if kind == "monthly_gpu_hours":
                 db.execute("INSERT INTO monthly_requests VALUES(?,?,?)", (ident["uid"],requested["client_request_id"],aid))
             self.store.audit(ident["uid"], ident["username"], "create", "application", aid, {"kind":kind}, "pending")
@@ -2816,9 +2889,19 @@ finally: os.close(fd)
             if not isinstance(adjusted, dict):
                 raise ApiError(400, "invalid_approved", "批准内容必须是对象")
             if row["kind"] == "temporary_job":
-                for key in ("gpu", "cpu", "memory_mb", "time_minutes", "qos"):
+                application_policy = row['policy_version']
+                if application_policy not in (1, 2):
+                    raise ApiError(409, 'invalid_policy', '申请计费版本无效')
+                if application_policy == 2:
+                    if (type(approved.get('time_minutes')) is not int or approved['time_minutes'] != 4294967295 or
+                            not isinstance(approved.get('qos'), str) or not SAFE_NAME.fullmatch(approved['qos'])):
+                        raise ApiError(409, 'invalid_policy', '申请的无限时长或 QoS 快照无效')
+                    if any(key in adjusted and (type(adjusted[key]) is not type(approved[key]) or adjusted[key] != approved[key])
+                           for key in ('time_minutes', 'qos')):
+                        raise ApiError(400, 'immutable_policy_fields', '不能调整无限时长任务的时限或 QoS')
+                for key in (("gpu", "cpu", "memory_mb") if application_policy == 2 else ("gpu", "cpu", "memory_mb", "time_minutes", "qos")):
                     if key in adjusted: approved[key] = adjusted[key]
-                approved = self.validate_job(self.identity(row["owner_uid"]), approved, temporary=True)
+                approved = self.validate_job(self.identity(row["owner_uid"]), approved, temporary=True, policy_version=application_policy)
                 valid = int(payload.get("valid_minutes", 1440))
                 if not 1 <= valid <= 10080:
                     raise ApiError(400, "invalid_expiry", "有效期须为 1 到 10080 分钟")
@@ -2828,7 +2911,7 @@ finally: os.close(fd)
         status="REJECTED" if action == "reject" else "APPROVED"
         db=self.store.db; db.execute("BEGIN IMMEDIATE")
         try:
-            changed=db.execute("UPDATE applications SET status=?,approved_json=?,decision_reason=?,expires_at=?,updated_at=? WHERE id=? AND status='PENDING'", (status,json.dumps(approved,sort_keys=True) if status=="APPROVED" else None,reason or "管理员批准",expiry,utc_now(),aid)).rowcount
+            changed=db.execute("UPDATE applications SET status=?,approved_json=?,decision_reason=?,expires_at=?,updated_at=? WHERE id=? AND status='PENDING' AND policy_version=?", (status,json.dumps(approved,sort_keys=True) if status=="APPROVED" else None,reason or "管理员批准",expiry,utc_now(),aid,row['policy_version'])).rowcount
             if changed != 1: raise ApiError(409,"application_already_decided","申请已处理")
             if status == "APPROVED" and row["kind"] == "quota_change":
                 self.write_quota(row["owner_uid"], approved)
@@ -2864,7 +2947,7 @@ finally: os.close(fd)
             reasons = []
             quota = self.quota(row["owner_uid"])
             if row["requested_gpu"] > quota["gpu_limit"]: reasons.append("GPU 请求超过用户当前个人上限")
-            if row["requested_minutes"] > limit: reasons.append("单作业时限超过新档位上限")
+            if row['policy_version'] == 1 and row["requested_minutes"] > limit: reasons.append("单作业时限超过新档位上限")
             usage = self.active_usage(row["owner_uid"])
             if usage["active_jobs"] > quota["active_job_limit"]: reasons.append("活动任务数超过用户当前上限")
             if reasons: impacts.append({"job_id": row["id"], "scheduler_id": row["scheduler_id"], "user": row["owner_name"], "reasons": reasons, "action": "仅提示，不自动终止"})
@@ -2986,12 +3069,18 @@ finally: os.close(fd)
                 state["accounts"] = [{**account, **users.get(account["uid"], {})} for account in state["accounts"]]
             return state
         if method == "GET" and path == "/api/v1/jobs": return {"jobs": self.jobs(ident)}
-        if method == "POST" and path == "/api/v1/jobs/validate": return {"job": self.validate_job(ident, payload), "quota": self.quota(uid), "usage": self.active_usage(uid)}
-        if method == "POST" and path == "/api/v1/jobs": return {"job": self.submit(ident, payload)}
+        if method == "POST" and path == "/api/v1/jobs/validate":
+            job = self.validate_job(ident, payload)
+            return {"job": job, "quota": self.quota(uid), "usage": self.active_usage(uid)}
+        if method == "POST" and path == "/api/v1/jobs":
+            job = self.submit(ident, payload)
+            return {"job": job}
         if method == "POST" and path.startswith("/api/v1/jobs/") and path.endswith("/cancel"): return {"job": self.cancel(ident, path.split("/")[-2])}
         if method == "GET" and path.startswith("/api/v1/jobs/") and path.endswith("/log"): return self.log(ident, path.split("/")[-2])
         if method == "GET" and path == "/api/v1/applications": return {"applications": self.applications(ident)}
-        if method == "POST" and path == "/api/v1/applications": return {"application": self.create_application(ident, payload)}
+        if method == "POST" and path == "/api/v1/applications":
+            application = self.create_application(ident, payload)
+            return {"application": application}
         if method == "POST" and path.startswith("/api/v1/applications/") and path.endswith("/grant-reconcile"): return {"application": self.finish_monthly_grant(ident, path.split("/")[-2])}
         if method == "POST" and path.startswith("/api/v1/applications/") and path.endswith("/decision"): return {"application": self.decide_application(ident, path.split("/")[-2], payload)}
         if method == "POST" and path.startswith("/api/v1/notifications/") and path.endswith("/read"): self.read_notification(ident, path.split("/")[-2]); return {"ok": True}

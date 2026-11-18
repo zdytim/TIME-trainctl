@@ -1,0 +1,856 @@
+--- a/src/slurmctld/monthly_quota.c
++++ b/src/slurmctld/monthly_quota.c
+@@ -266,6 +266,7 @@
+ 
+ typedef struct mq_reserve1 {
+ 	uint32_t uid, month, tier, gpu, minutes, job_id;
++	uint32_t policy_version;
+ 	uint64_t amount, generation;
+ 	uint64_t bind_submit, bind_sluid;
+ 	uint64_t final_sluid;
+@@ -279,9 +280,95 @@
+ 	struct mq_reserve1 *next;
+ } mq_reserve1_t;
+ static mq_reserve1_t *mq_reserves;
++/* Only the verified root wrapper can enable new admission. Historical v2
++ * replay, settlement and cancellation remain independent of this switch. */
++const char pro6000d_actual_usage_unlimited2_build[] = "PRO6000D_ACTUAL_USAGE_UNLIMITED2_BUILD_V1";
++static bool _strict_actual_priority_ready(void);
++static bool _actual_policy_enabled(void)
++{
++	const char *value = getenv("TIME_QUOTA_ACTUAL_USAGE_V2");
++	return value && !strcmp(value, "1");
++}
++
++bool monthly_quota_actual_usage_ready(void)
++{
++	return _actual_policy_enabled() && monthly_quota_selectable_ready() &&
++		_strict_actual_priority_ready();
++}
++
++static bool _token_enabled(void);
++
++/* Caller holds Slurm job locks.  Look up immutable v2 binding rather than
++ * trusting the mutable job comment, requeue flag or time limit. */
++bool monthly_quota_requeue_prohibited(const struct job_record *job)
++{
++	const mq_reserve1_t *entry;
++	char marker[33]; enum time_tier tier;
++	bool blocked = false;
++	if (!job) return true;
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled && !_token_enabled()) goto done;
++	/* Prefer a matching persisted binding even when the ledger is unhealthy. */
++	for (entry = mq_reserves; entry; entry = entry->next) {
++		bool same_instance;
++		if (!entry->job_id || entry->job_id != job->job_id) continue;
++		same_instance = entry->uid == job->user_id && job->details &&
++			entry->bind_submit && entry->bind_sluid &&
++			entry->bind_submit == (uint64_t)job->details->submit_time &&
++			entry->bind_sluid == (uint64_t)job->step_id.sluid;
++		if (same_instance) { blocked = entry->policy_version > 1; goto done; }
++		if (entry->policy_version > 1 && !entry->terminal) {
++			blocked = true; goto done;
++		}
++	}
++	/* A managed job lacking a binding is uncertain if its ledger is not
++	 * ready; finite legacy reservations are not inferred from mutable time. */
++	if (!time_parse_job_marker(job->comment, marker, &tier) &&
++	    (!mq_enabled || !mq_healthy || !mq_reconciled || !mq_selectable_replay ||
++	     job->time_limit == INFINITE)) blocked = true;
++done:
++	pthread_mutex_unlock(&mq_lock);
++	return blocked;
++}
++
++static bool _reservation_time_matches(const mq_reserve1_t *entry, uint32_t time_limit)
++{
++	if (!entry || !time_limit) return false;
++	if (entry->policy_version == 2)
++		return entry->minutes == INFINITE && time_limit == INFINITE;
++	if (entry->policy_version > 2) return false;
++	return entry->minutes == time_limit;
++}
++
++static bool _allocation_amount_invalid(uint64_t gpu, uint64_t duration,
++		uint64_t used, uint64_t limit, bool unlimited)
++{
++	(void)unlimited;
++	return !duration || gpu > UINT64_MAX / duration || used > limit;
++}
+ #include "src/slurmctld/monthly_top_markers.h"
+ #include "src/slurmctld/monthly_hold_sum.h"
+ static mq_requeue_intent_t *mq_requeue_intents;
++
++static bool _policy_conflict(uint32_t uid, bool actual)
++{
++	mq_reserve1_t *entry;
++	mq_requeue_intent_t *intent;
++	for (entry = mq_reserves; entry; entry = entry->next)
++		if (entry->uid == uid && !entry->terminal && (entry->policy_version == 2) != actual)
++			return true;
++	for (intent = mq_requeue_intents; intent; intent = intent->next) {
++		mq_top_marker_t *marker;
++		mq_reserve1_t *prior;
++		if (intent->uid != uid) continue;
++		marker = _top_marker_find(intent->marker);
++		if (marker && !intent->held && !marker->requeue_pending) continue;
++		for (prior = mq_reserves; prior; prior = prior->next)
++			if (prior->uid == uid && !strcmp(prior->request, intent->marker)) break;
++		if (!marker || !prior || (prior->policy_version == 2) != actual) return true;
++	}
++	return false;
++}
+ 
+ static int _requeue_intent_apply(const mq_requeue_intent_t *value)
+ {
+@@ -3049,9 +3136,21 @@
+ 		mq_reserve1_t *entry;
+ 		if (field_count != 6 || _parse_u32(fields[3], &uid) ||
+ 		    !_reserve1_request_valid(fields[4]) || _parse_u32(fields[5], &job_id) || !job_id ||
+-		    !(entry = _reserve1_find(uid, fields[4])) || entry->terminal || entry->generation ||
++		    !(entry = _reserve1_find(uid, fields[4])) || entry->policy_version > 1 || entry->terminal || entry->generation ||
+ 		    (entry->job_id && entry->job_id != job_id)) return -1;
+ 		entry->job_id = job_id;
++		_reserve1_finish(entry, 3, 0);
++		return 0;
++	}
++	if (mq_selectable_replay && !strcmp(event, "CANCEL_BOUND2")) {
++		mq_reserve1_t *entry;
++		uint64_t submit, sluid;
++		if (field_count != 8 || _parse_u32(fields[3], &uid) ||
++		    !_reserve1_request_valid(fields[4]) || _parse_u32(fields[5], &job_id) || !job_id ||
++		    _parse_u64(fields[6], &submit) || !submit || _parse_u64(fields[7], &sluid) || !sluid ||
++		    !(entry = _reserve1_find(uid, fields[4])) || entry->policy_version != 2 ||
++		    entry->terminal || entry->generation || entry->job_id != job_id ||
++		    entry->bind_submit != submit || entry->bind_sluid != sluid || _find_active_job(job_id)) return -1;
+ 		_reserve1_finish(entry, 3, 0);
+ 		return 0;
+ 	}
+@@ -3131,10 +3230,12 @@
+ 		return 0;
+ 	}
+ #endif
+-	if (mq_selectable_replay && (!strcmp(event, "RESERVE1") || !strcmp(event, "CANCEL_EMPTY1"))) {
++	if (mq_selectable_replay && (!strcmp(event, "RESERVE1") || !strcmp(event, "CANCEL_EMPTY1") ||
++	    !strcmp(event, "RESERVE2") || !strcmp(event, "CANCEL_EMPTY2"))) {
+ 		mq_reserve1_t *entry;
+ 		uint32_t tier, gpu, minutes;
+ 		uint64_t amount;
++		bool actual = !strcmp(event, "RESERVE2") || !strcmp(event, "CANCEL_EMPTY2");
+ 		if (field_count != 10 || _parse_u32(fields[3], &uid) ||
+ 		    !_reserve1_request_valid(fields[4]) || _parse_u32(fields[5], &month) ||
+ 		    month / 100 < 1970 || month / 100 > 9999 || month % 100 < 1 || month % 100 > 12 ||
+@@ -3142,17 +3243,19 @@
+ 		    _parse_u32(fields[7], &gpu) || !gpu ||
+ 		    _parse_u32(fields[8], &minutes) || !minutes ||
+ 		    _parse_u64(fields[9], &amount) ||
+-		    (uint64_t)minutes > UINT64_MAX / (60ULL * MQ_NSEC_PER_SEC) ||
+-		    (uint64_t)gpu > UINT64_MAX / ((uint64_t)minutes * 60ULL * MQ_NSEC_PER_SEC) ||
+-		    amount != (uint64_t)gpu * minutes * 60ULL * MQ_NSEC_PER_SEC ||
++		    (actual ? (minutes != INFINITE || amount != (uint64_t)gpu * MQ_NSEC_PER_SEC) :
++		     ((uint64_t)minutes > UINT64_MAX / (60ULL * MQ_NSEC_PER_SEC) ||
++		      (uint64_t)gpu > UINT64_MAX / ((uint64_t)minutes * 60ULL * MQ_NSEC_PER_SEC) ||
++		      amount != (uint64_t)gpu * minutes * 60ULL * MQ_NSEC_PER_SEC)) ||
+ 		    _reserve1_find(uid, fields[4]))
+ 			return -1;
+ 		entry = xcalloc(1, sizeof(*entry));
+ 		entry->uid = uid; entry->month = month; entry->tier = tier;
++		entry->policy_version = actual ? 2 : 1;
+ 		entry->gpu = gpu; entry->minutes = minutes; entry->amount = amount;
+ 		memcpy(entry->request, fields[4], sizeof(entry->request));
+ 		entry->next = mq_reserves; mq_reserves = entry;
+-		if (!strcmp(event, "CANCEL_EMPTY1")) _reserve1_finish(entry, 1, 0);
++		if (!strcmp(event, "CANCEL_EMPTY1") || !strcmp(event, "CANCEL_EMPTY2")) _reserve1_finish(entry, 1, 0);
+ 		return 0;
+ 	}
+ 	if (!strcmp(event, "CUTOVER2_RESET_USAGE"))
+@@ -3847,6 +3950,57 @@
+ 	return rc;
+ }
+ 
++/* Node proofs are loaded after WAL replay.  A replayed v2 prepared
++ * generation is not trusted until its predecessor's exact cleanup proof has
++ * been re-associated with the terminal reservation. */
++static bool _v2_requeue_postproof_valid(const mq_active_record_t *prepared,
++		const mq_requeue_intent_t *intent, const mq_reserve1_t *prior,
++		const mq_top_marker_t *marker)
++{
++	if (!prepared || !intent || !prior || !marker || prior->policy_version != 2 ||
++	    prepared->reservation_key.kind != MQ_RESERVATION_REQUEUE ||
++	    !prepared->identity_bound || !prepared->reservation_bound || !intent->held ||
++	    !prior->final_node_proven || prior->terminal != 2 || !intent->old_generation ||
++	    prior->uid != intent->uid || prepared->uid != intent->uid || marker->uid != intent->uid ||
++	    prior->job_id != intent->job_id || prepared->job_id != intent->job_id || marker->job_id != intent->job_id ||
++	    prior->generation != intent->old_generation || marker->generation != intent->old_generation ||
++	    prior->final_submit != intent->old_submit || prior->final_sluid != intent->old_sluid ||
++	    prior->final_restart != intent->old_restart || marker->submit != intent->old_submit ||
++	    marker->sluid != intent->old_sluid || marker->restart != intent->old_restart ||
++	    !intent->old_submit || !intent->old_sluid || !intent->next_submit || !intent->next_sluid ||
++	    prepared->submit_sec != intent->next_submit || prepared->sluid != intent->next_sluid ||
++	    prepared->restart_count != intent->next_restart || marker->next_submit != intent->next_submit ||
++	    marker->next_sluid != intent->next_sluid || marker->next_restart != intent->next_restart ||
++	    !marker->requeue_pending || !marker->requeue_verified ||
++	    prepared->reservation_key.requeue.restart != intent->next_restart ||
++	    strcmp(prepared->marker_id, intent->marker) || strcmp(prior->request, intent->marker) ||
++	    strcmp(marker->marker, intent->marker) ||
++	    strcmp(prepared->reservation_key.requeue.marker, intent->marker) ||
++	    prior->tier != intent->tier || prepared->selected_tier != intent->tier ||
++	    prior->gpu != intent->gpu || prepared->planned_gpu != intent->gpu ||
++	    prior->minutes != INFINITE || intent->minutes != INFINITE ||
++	    prior->amount != intent->amount || prepared->requeue_amount != intent->amount ||
++	    !intent->amount || prepared->requeue_month != intent->hold_month || !intent->hold_month)
++		return false;
++	return true;
++}
++
++static int _verify_v2_requeue_postproof(void)
++{
++	mq_active_record_t *prepared;
++	for (prepared = mq_requeue_prepared; prepared; prepared = prepared->next) {
++		mq_reserve1_t *prior = _reserve1_find(prepared->uid, prepared->marker_id);
++		mq_requeue_intent_t *intent = NULL;
++		mq_top_marker_t *marker;
++		if (!prior) return -1;
++		if (prior->policy_version != 2) continue; /* Preserve legacy replay. */
++		marker = _top_marker_find(prepared->marker_id);
++		if (mq_requeue_find(mq_requeue_intents, &prepared->reservation_key.requeue, &intent) != 1 ||
++		    !_v2_requeue_postproof_valid(prepared, intent, prior, marker)) return -1;
++	}
++	return 0;
++}
++
+ static int _open_wal(void)
+ {
+ 	struct stat stat_buf;
+@@ -3895,6 +4049,7 @@
+ 	mq_nodepid_fd = monthly_quota_inherited_nodepid_fd();
+ 	if (mq_nodeproof_fd < 0 || mq_nodepid_fd < 0 || mq_nodeproof_fd == mq_witness_fd ||
+ 	    mq_nodepid_fd == mq_witness_fd || mq_nodepid_fd == mq_nodeproof_fd || _find_node_proof(NULL) < 0 ||
++	    _verify_v2_requeue_postproof() ||
+ 	    _hash_gres_config(mq_gres_digest) || _hash_gpu_inventory(mq_gpu_inventory_digest) ||
+ 	    !_supported_gres_device_order()) goto fail;
+ 	return 0;
+@@ -4685,7 +4840,10 @@
+ 			      bound->bind_submit != (uint64_t)job_ptr->details->submit_time ||
+ 			      bound->bind_sluid != (uint64_t)job_ptr->step_id.sluid || job_ptr->restart_cnt)) ||
+ 			    bound->month != month || bound->tier != selected ||
+-			    bound->gpu != gpu_count || bound->minutes != job_ptr->time_limit) {
++			    bound->gpu != gpu_count || !_reservation_time_matches(bound, job_ptr->time_limit) ||
++			    (bound->policy_version == 2 && (!_actual_policy_enabled() ||
++			     !bound->bind_submit || !bound->bind_sluid ||
++			     _policy_conflict(job_ptr->user_id, true)))) {
+ 				_set_pending_reason(job_ptr, "bound reservation identity unavailable");
+ 				pthread_mutex_unlock(&mq_lock);
+ 				return -1;
+@@ -4705,15 +4863,19 @@
+ 			return -1;
+ 		}
+ 		if (preselect) {
+-			if (!job_ptr->time_limit || job_ptr->time_limit >= INFINITE ||
+-			    (uint64_t)job_ptr->time_limit > UINT64_MAX / (60ULL * MQ_NSEC_PER_SEC)) {
++			if (!job_ptr->time_limit || (job_ptr->time_limit >= INFINITE &&
++			    (!bound || bound->policy_version != 2 || !_actual_policy_enabled())) ||
++			    (bound && bound->policy_version != 2 &&
++			    (uint64_t)job_ptr->time_limit > UINT64_MAX / (60ULL * MQ_NSEC_PER_SEC))) {
+ 				_set_pending_reason(job_ptr, "finite job time limit required");
+ 				pthread_mutex_unlock(&mq_lock);
+ 				return -1;
+ 			}
+-			duration_ns = (uint64_t)job_ptr->time_limit * 60ULL * MQ_NSEC_PER_SEC;
+-			if (gpu_count > UINT64_MAX / duration_ns ||
+-			    record->selectable.used[selected] > record->selectable.limit[selected]) {
++			duration_ns = bound && bound->policy_version == 2 ? MQ_NSEC_PER_SEC :
++				(uint64_t)job_ptr->time_limit * 60ULL * MQ_NSEC_PER_SEC;
++			if (_allocation_amount_invalid(gpu_count, duration_ns,
++			    record->selectable.used[selected], record->selectable.limit[selected],
++			    _top_unlimited(job_ptr->user_id))) {
+ 				_set_pending_reason(job_ptr, "reservation amount unavailable");
+ 				pthread_mutex_unlock(&mq_lock);
+ 				return -1;
+@@ -6625,6 +6787,7 @@
+ {
+ 	mq_top_marker_t *marker;
+ 	mq_requeue_intent_t *intent;
++	mq_reserve1_t *prior;
+ 	mq_requeue_key_t key = {0};
+ 	mq_time_t now;
+ 	uint32_t month;
+@@ -6641,6 +6804,10 @@
+ 	    intent->next_submit != marker->next_submit ||
+ 	    intent->next_sluid != marker->next_sluid || !intent->amount) goto out;
+ 	if (intent->held) { *amount = intent->amount; *hold_month = intent->hold_month; rc = 0; goto out; }
++	prior = _reserve1_find(uid, request);
++	if (!prior || prior->policy_version > 2 || _policy_conflict(uid, prior->policy_version == 2)) {
++		rc = -2; goto out;
++	}
+ 	if (_now(&now) || _month_key(&now, &month) || _settle_all(&now)) goto out;
+ 	availability_rc = _reserve1_available(uid, month, intent->tier, &now, &available);
+ 	if (availability_rc) {
+@@ -7021,8 +7188,8 @@
+ #endif
+ #endif
+ 
+-int monthly_quota_reserve1(uid_t uid, const char *request, uint32_t tier,
+-			   uint32_t gpu, uint32_t minutes, uint64_t *amount)
++static int _monthly_quota_reserve(uid_t uid, const char *request, uint32_t tier,
++			   uint32_t gpu, uint32_t minutes, uint64_t *amount, bool actual)
+ {
+ 	mq_reserve1_t *entry, *created;
+ 	mq_time_t now;
+@@ -7032,9 +7199,10 @@
+ 
+ 	if (!TIME_ENABLE_SELECTABLE_V2 || (uid_t)(uint32_t)uid != uid ||
+ 	    !_reserve1_request_valid(request) || tier >= TIME_TIER_COUNT || !gpu || !minutes ||
+-	    (uint64_t)minutes > UINT64_MAX / (60ULL * MQ_NSEC_PER_SEC) || !amount)
+-		return -1;
+-	duration = (uint64_t)minutes * 60ULL * MQ_NSEC_PER_SEC;
++	    (!actual && (uint64_t)minutes > UINT64_MAX / (60ULL * MQ_NSEC_PER_SEC)) || !amount ||
++	    (actual && minutes != INFINITE))
++		return -1;
++	duration = actual ? MQ_NSEC_PER_SEC : (uint64_t)minutes * 60ULL * MQ_NSEC_PER_SEC;
+ 	if (gpu > UINT64_MAX / duration)
+ 		return -1;
+ 	required = gpu * duration;
+@@ -7045,13 +7213,14 @@
+ 		goto out;
+ 	entry = _reserve1_find((uint32_t)uid, request);
+ 	if (entry) {
+-		if (!entry->terminal && entry->month == month && entry->tier == tier && entry->gpu == gpu &&
++		if ((entry->policy_version == 2) == actual && !entry->terminal && entry->month == month && entry->tier == tier && entry->gpu == gpu &&
+ 		    entry->minutes == minutes && entry->amount == required) {
+ 			*amount = required;
+ 			rc = 0;
+ 		}
+ 		goto out;
+ 	}
++	if (_policy_conflict(uid, actual)) { rc = -2; goto out; }
+ 	availability_rc = _reserve1_available(uid, month, tier, &now, &available);
+ 	if (availability_rc) { if (availability_rc == -2) rc = -2; goto out; }
+ 	if (!_top_unlimited(uid) && required > available) { rc = -2; goto out; }
+@@ -7066,9 +7235,10 @@
+ 	}
+ 	created = xcalloc(1, sizeof(*created));
+ 	created->uid = uid; created->month = month; created->tier = tier;
++	created->policy_version = actual ? 2 : 1;
+ 	created->gpu = gpu; created->minutes = minutes; created->amount = required;
+ 	memcpy(created->request, request, sizeof(created->request));
+-	if (_append_event("RESERVE1|%u|%s|%u|%u|%u|%u|%" PRIu64,
++	if (_append_event(actual ? "RESERVE2|%u|%s|%u|%u|%u|%u|%" PRIu64 : "RESERVE1|%u|%s|%u|%u|%u|%u|%" PRIu64,
+ 			  created->uid, created->request, month, tier, gpu, minutes, required)) {
+ 		xfree(created);
+ 		_mark_unhealthy("RESERVE1 persistence failed");
+@@ -7080,6 +7250,19 @@
+ out:
+ 	pthread_mutex_unlock(&mq_lock);
+ 	return rc;
++}
++
++int monthly_quota_reserve1(uid_t uid, const char *request, uint32_t tier,
++			   uint32_t gpu, uint32_t minutes, uint64_t *amount)
++{
++	return _monthly_quota_reserve(uid, request, tier, gpu, minutes, amount, false);
++}
++
++int monthly_quota_reserve_actual(uid_t uid, const char *request, uint32_t tier,
++				 uint32_t gpu, uint64_t *amount)
++{
++	if (!_actual_policy_enabled()) return -1;
++	return _monthly_quota_reserve(uid, request, tier, gpu, INFINITE, amount, true);
+ }
+ 
+ /* Renew a held, unstarted request into the current month atomically. */
+@@ -7128,7 +7311,7 @@
+ 	    !_reserve1_request_valid(request)) return -1;
+ 	pthread_mutex_lock(&mq_lock);
+ 	if (!mq_enabled || !mq_healthy || !mq_reconciled || !mq_selectable_replay ||
+-	    !(entry = _reserve1_find((uint32_t)uid, request))) goto out;
++	    !(entry = _reserve1_find((uint32_t)uid, request)) || entry->policy_version > 1) goto out;
+ 	if (entry->terminal) {
+ 		if (entry->terminal == 1) rc = 0;
+ 		goto out;
+@@ -7153,6 +7336,49 @@
+ /* Fence an immutable request even if the broker crashed before RESERVE1.
+  * Both operations serialize under mq_lock, so a late reserve cannot create a
+  * hold after cancellation and a concurrent bind cannot be refunded. */
++int monthly_quota_cancel_request2(uid_t uid, const char *request, uint32_t tier,
++				 uint32_t gpu, uint32_t minutes)
++{
++	mq_reserve1_t *entry;
++	mq_time_t now;
++	uint32_t month;
++	uint64_t amount;
++	int rc = -1;
++	if (!TIME_ENABLE_SELECTABLE_V2 || !TIME_ENABLE_MONTHLY_TOMBSTONES_DRAFT ||
++	    (uid_t)(uint32_t)uid != uid || !_reserve1_request_valid(request) ||
++	    tier >= TIME_TIER_COUNT || !gpu || minutes != INFINITE) return -1;
++	amount = (uint64_t)gpu * MQ_NSEC_PER_SEC;
++	pthread_mutex_lock(&mq_lock);
++	if (!mq_enabled || !mq_healthy || !mq_reconciled || !mq_selectable_replay ||
++	    _now(&now) || _month_key(&now, &month)) goto out;
++	entry = _reserve1_find(uid, request);
++	if (entry) {
++		if (entry->policy_version != 2 || entry->tier != tier || entry->gpu != gpu ||
++		    entry->minutes != minutes || entry->amount != amount || entry->job_id || entry->generation ||
++		    (entry->terminal && entry->terminal != 1)) goto out;
++		if (entry->terminal == 1) { rc = 0; goto out; }
++		if (_append_event("CANCEL1|%u|%s", (uint32_t)uid, request)) {
++			_mark_unhealthy("CANCEL1 persistence failed"); goto out;
++		}
++		_reserve1_finish(entry, 1, 0); rc = 0; goto out;
++	}
++	/* A durable broker REQUESTING intent may precede the controller hold.
++	 * Tombstone it even after disabling new admission; this writes v2 WAL. */
++	entry = xcalloc(1, sizeof(*entry));
++	entry->uid = uid; entry->month = month; entry->tier = tier; entry->policy_version = 2;
++	entry->gpu = gpu; entry->minutes = minutes; entry->amount = amount;
++	memcpy(entry->request, request, sizeof(entry->request));
++	if (_append_event("CANCEL_EMPTY2|%u|%s|%u|%u|%u|%u|%" PRIu64,
++			  (uint32_t)uid, request, month, tier, gpu, minutes, amount)) {
++		xfree(entry); _mark_unhealthy("CANCEL_EMPTY2 persistence failed"); goto out;
++	}
++	entry->next = mq_reserves; mq_reserves = entry;
++	_reserve1_finish(entry, 1, 0); rc = 0;
++out:
++	pthread_mutex_unlock(&mq_lock);
++	return rc;
++}
++
+ int monthly_quota_cancel_request1(uid_t uid, const char *request, uint32_t tier,
+ 				  uint32_t gpu, uint32_t minutes)
+ {
+@@ -7173,7 +7399,7 @@
+ 	    _now(&now) || _month_key(&now, &month)) goto out;
+ 	entry = _reserve1_find((uint32_t)uid, request);
+ 	if (entry) {
+-		if (entry->tier != tier || entry->gpu != gpu || entry->minutes != minutes ||
++		if (entry->policy_version > 1 || entry->tier != tier || entry->gpu != gpu || entry->minutes != minutes ||
+ 		    entry->amount != amount || entry->job_id || entry->generation ||
+ 		    (entry->terminal && entry->terminal != 1)) goto out;
+ 		if (entry->terminal == 1) { rc = 0; goto out; }
+@@ -7197,6 +7423,76 @@
+ 	return rc;
+ }
+ 
++int monthly_quota_bind2_terminal_get(uid_t uid, const char *request, uint32_t job_id,
++		uint64_t submit, uint64_t sluid, uint32_t *terminal, uint64_t *generation)
++{
++	mq_reserve1_t *entry;
++	struct job_record *job;
++	enum time_tier tier;
++	char marker[33];
++	int rc = -1;
++	if ((uid_t)(uint32_t)uid != uid || !_reserve1_request_valid(request) || !job_id ||
++	    !submit || !sluid || !terminal || !generation || !monthly_top_job_write_locked()) return -1;
++	pthread_mutex_lock(&mq_lock);
++	entry = _reserve1_find(uid, request);
++	if (!mq_enabled || !mq_healthy || !mq_reconciled || !mq_selectable_replay || !entry ||
++	    entry->policy_version != 2 || entry->job_id != job_id || entry->bind_submit != submit ||
++	    entry->bind_sluid != sluid || _find_active_job(job_id)) goto out;
++	if (entry->terminal == 3 && !entry->generation) {
++		*terminal = 3; *generation = 0; rc = 0;
++	} else if (entry->terminal == 2 && entry->generation && entry->final_node_proven &&
++		   entry->final_submit == submit && entry->final_sluid == sluid) {
++		*terminal = 2; *generation = entry->generation; rc = 0;
++	} else if (!entry->terminal && !entry->generation && (job = find_job_record(job_id)) &&
++		   job->user_id == uid && IS_JOB_COMPLETED(job) && !IS_JOB_COMPLETING(job) &&
++		   job->details && job->details->submit_time > 0 &&
++		   (uint64_t)job->details->submit_time == submit && job->step_id.sluid == sluid && !job->restart_cnt &&
++		   !time_parse_job_marker(job->comment, marker, &tier) && !strcmp(marker, request) && tier == entry->tier &&
++		   (!job->start_time || (job->end_time && job->start_time == job->end_time)) &&
++		   !job->node_cnt && (!job->node_bitmap || !bit_set_count(job->node_bitmap))) {
++		*terminal = 0; *generation = 0; rc = 0;
++	}
++out:
++	pthread_mutex_unlock(&mq_lock);
++	return rc;
++}
++
++int monthly_quota_cancel_bound2(uid_t uid, const char *request, uint32_t job_id,
++		uint64_t submit, uint64_t sluid)
++{
++	mq_reserve1_t *entry;
++	struct job_record *job;
++	enum time_tier tier;
++	char marker[33];
++	int rc = -1;
++	if ((uid_t)(uint32_t)uid != uid || !_reserve1_request_valid(request) ||
++	    !job_id || !submit || !sluid || !monthly_top_job_write_locked()) return -1;
++	pthread_mutex_lock(&mq_lock);
++	entry = _reserve1_find(uid, request);
++	if (!mq_enabled || !mq_healthy || !mq_reconciled || !mq_selectable_replay || !entry ||
++	    entry->policy_version != 2 || entry->job_id != job_id || entry->bind_submit != submit ||
++	    entry->bind_sluid != sluid || _find_active_job(job_id)) goto out;
++	if (entry->terminal == 3 && !entry->generation) { rc = 0; goto out; }
++	if (entry->terminal == 2 && entry->generation && entry->final_node_proven &&
++	    entry->final_submit == submit && entry->final_sluid == sluid) { rc = 0; goto out; }
++	if (entry->terminal || entry->generation || !(job = find_job_record(job_id)) ||
++	    job->user_id != uid || !IS_JOB_COMPLETED(job) || IS_JOB_COMPLETING(job) ||
++	    !job->details || job->details->submit_time <= 0 ||
++	    (uint64_t)job->details->submit_time != submit || job->step_id.sluid != sluid || job->restart_cnt ||
++	    (job->start_time && (!job->end_time || job->start_time != job->end_time)) ||
++	    job->node_cnt || (job->node_bitmap && bit_set_count(job->node_bitmap)) ||
++	    time_parse_job_marker(job->comment, marker, &tier) || strcmp(marker, request) || tier != entry->tier) goto out;
++	if (_append_event("CANCEL_BOUND2|%u|%s|%u|%" PRIu64 "|%" PRIu64,
++			  (uint32_t)uid, request, job_id, submit, sluid)) {
++		_mark_unhealthy("bound cancellation persistence failed"); goto out;
++	}
++	_reserve1_finish(entry, 3, 0);
++	rc = 0;
++out:
++	pthread_mutex_unlock(&mq_lock);
++	return rc;
++}
++
+ /* Release only an identified scheduler job that never started. */
+ int monthly_quota_cancel_bound1(uid_t uid, const char *request, uint32_t job_id)
+ {
+@@ -7209,7 +7505,7 @@
+ 		return -1;
+ 	pthread_mutex_lock(&mq_lock);
+ 	if (!mq_enabled || !mq_healthy || !mq_reconciled || !mq_selectable_replay ||
+-	    !(entry = _reserve1_find((uint32_t)uid, request))) goto out;
++	    !(entry = _reserve1_find((uint32_t)uid, request)) || entry->policy_version > 1) goto out;
+ 	if (entry->terminal) {
+ 		if (entry->terminal == 3 && entry->job_id == job_id) rc = 0;
+ 		goto out;
+@@ -7244,12 +7540,51 @@
+ 	if (!jobs) return -1;
+ 	iterator = list_iterator_create(jobs);
+ 	while ((job = list_next(iterator))) {
+-		mq_reserve1_t *entry;
++		mq_reserve1_t *entry, *versioned = NULL, *cursor;
+ 		char marker[33];
+ 		enum time_tier selected;
+ 		int action = 0;
+-		if (time_parse_job_marker(job->comment, marker, &selected)) continue;
++		uint64_t submit = 0, sluid = 0;
++		bool parsed = !time_parse_job_marker(job->comment, marker, &selected);
+ 		pthread_mutex_lock(&mq_lock);
++		for (cursor = mq_reserves; cursor; cursor = cursor->next) {
++			if (cursor->policy_version != 2 || cursor->job_id != job->job_id ||
++			    cursor->generation || (cursor->terminal && cursor->terminal != 3)) continue;
++			if (versioned) { result = -1; break; }
++			versioned = cursor;
++		}
++		if (result) { pthread_mutex_unlock(&mq_lock); break; }
++		if (versioned) {
++			if (!mq_enabled || !mq_healthy || !mq_reconciled || !parsed ||
++			    versioned->uid != job->user_id || strcmp(versioned->request, marker) ||
++			    versioned->tier != selected || !versioned->bind_submit || !versioned->bind_sluid ||
++			    !job->details || job->details->submit_time <= 0 ||
++			    (uint64_t)job->details->submit_time != versioned->bind_submit ||
++			    job->step_id.sluid != versioned->bind_sluid || job->restart_cnt ||
++			    job->array_recs || job->array_job_id || job->het_job_id || job->fed_details ||
++			    IS_JOB_COMPLETING(job) || IS_JOB_REQUEUED(job) || _find_active_job(job->job_id) ||
++			    job->node_cnt || (job->node_bitmap && bit_set_count(job->node_bitmap)) ||
++			    (IS_JOB_COMPLETED(job) && job->start_time &&
++			     (!job->end_time || job->start_time != job->end_time)) ||
++			    (versioned->terminal == 3 && IS_JOB_PENDING(job) &&
++			     (job->job_resrcs || job->tres_alloc_cnt)) ||
++			    (versioned->terminal == 3 && !IS_JOB_PENDING(job) && !IS_JOB_COMPLETED(job)) ||
++			    (!versioned->terminal && !IS_JOB_PENDING(job) && !IS_JOB_COMPLETED(job))) {
++				pthread_mutex_unlock(&mq_lock); result = -1; break;
++			}
++			submit = versioned->bind_submit; sluid = versioned->bind_sluid;
++			if (versioned->terminal == 3 && IS_JOB_PENDING(job)) action = 1;
++			else if (!versioned->terminal && IS_JOB_COMPLETED(job)) action = 3;
++			pthread_mutex_unlock(&mq_lock);
++			if (action == 1 && job_signal(job, SIGKILL, KILL_NO_SIBS, slurm_conf.slurm_user_id, false) != SLURM_SUCCESS) {
++				result = -1; break;
++			}
++			if (action == 3 && monthly_quota_cancel_bound2(job->user_id, marker, job->job_id, submit, sluid)) {
++				result = -1; break;
++			}
++			continue;
++		}
++		if (!parsed) { pthread_mutex_unlock(&mq_lock); continue; }
+ 		entry = _reserve1_find(job->user_id, marker);
+ 		if (mq_enabled && mq_healthy && mq_reconciled && entry && entry->tier == selected &&
+ 		    (!entry->job_id || entry->job_id == job->job_id) && !entry->generation) {
+@@ -7793,7 +8128,7 @@
+ 	    !IS_JOB_PENDING(job) || !job->details || job->details->submit_time <= 0 ||
+ 	    time_parse_job_marker(job->comment, marker, &selected) ||
+ 	    strcmp(marker, request) || selected != entry->tier ||
+-	    job->time_limit != entry->minutes ||
++	    entry->policy_version == 2 || !_reservation_time_matches(entry, job->time_limit) ||
+ 	    _job_gpu_count(job, job->tres_req_cnt, false, &gpu, &why) != 1 || gpu != entry->gpu)
+ 		goto out;
+ 	if (entry->job_id) {
+@@ -7948,7 +8283,8 @@
+ 	    job->restart_cnt || job->array_recs || job->array_job_id || job->het_job_id ||
+ 	    !job->details || job->details->submit_time <= 0 || !job->step_id.sluid ||
+ 	    time_parse_job_marker(job->comment, marker, &selected) || strcmp(marker, request) ||
+-	    selected != entry->tier || job->time_limit != entry->minutes ||
++	    selected != entry->tier || !_reservation_time_matches(entry, job->time_limit) ||
++	    (entry->policy_version == 2 && (!_actual_policy_enabled() || _policy_conflict(uid, true))) ||
+ 	    _job_gpu_count(job, job->tres_req_cnt, false, &gpu, &why) != 1 || gpu != entry->gpu)
+ 		goto out;
+ 	submit = (uint64_t)job->details->submit_time; sluid = (uint64_t)job->step_id.sluid;
+@@ -8056,6 +8392,7 @@
+ 	entry = _reserve1_find((uint32_t)uid, request);
+ 	if (!entry) { rc = 0; goto done; }
+ 	result.month = entry->month; result.tier = entry->tier;
++	result.policy_version = entry->policy_version == 2 ? 2 : 1;
+ 	result.gpu = entry->gpu; result.minutes = entry->minutes;
+ 	result.amount = entry->amount; result.job_id = entry->job_id;
+ 	result.generation = entry->generation;
+@@ -8092,6 +8429,50 @@
+ }
+ #endif
+ 
++static bool _strict_actual_priority_ready(void)
++{
++#if defined(TIME_ENABLE_COMPLETION_SNAPSHOT_DRAFT) && TIME_ENABLE_COMPLETION_SNAPSHOT_DRAFT && \
++    defined(TIME_ENABLE_CREATION_BIND2_DRAFT) && TIME_ENABLE_CREATION_BIND2_DRAFT && \
++    defined(TIME_ENABLE_CREATION_BOUND_CAPABILITY_DRAFT) && TIME_ENABLE_CREATION_BOUND_CAPABILITY_DRAFT && \
++    defined(TIME_ENABLE_EXACT_TOP_GATE_DRAFT) && TIME_ENABLE_EXACT_TOP_GATE_DRAFT && \
++    defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD && \
++    defined(TIME_ENABLE_MONTHLY_COMMIT5_DRAFT) && TIME_ENABLE_MONTHLY_COMMIT5_DRAFT && \
++    defined(TIME_ENABLE_MONTHLY_LIFECYCLE_DRAFT) && TIME_ENABLE_MONTHLY_LIFECYCLE_DRAFT && \
++    defined(TIME_ENABLE_MONTHLY_PRIORITY_DRAFT) && TIME_ENABLE_MONTHLY_PRIORITY_DRAFT && \
++    defined(TIME_ENABLE_MONTHLY_QUERY2_DRAFT) && TIME_ENABLE_MONTHLY_QUERY2_DRAFT && \
++    defined(TIME_ENABLE_MONTHLY_SLUID_DRAFT) && TIME_ENABLE_MONTHLY_SLUID_DRAFT && \
++    defined(TIME_ENABLE_MONTHLY_TOMBSTONES_DRAFT) && TIME_ENABLE_MONTHLY_TOMBSTONES_DRAFT && \
++    defined(TIME_ENABLE_MONTHLY_TRANSACTION_DRAFT) && TIME_ENABLE_MONTHLY_TRANSACTION_DRAFT && \
++    defined(TIME_ENABLE_ORDERED_APPLY2_DRAFT) && TIME_ENABLE_ORDERED_APPLY2_DRAFT && \
++    defined(TIME_ENABLE_ORDERED_BASELINE_DRAFT) && TIME_ENABLE_ORDERED_BASELINE_DRAFT && \
++    defined(TIME_ENABLE_ORDERED_SNAPSHOT1_DRAFT) && TIME_ENABLE_ORDERED_SNAPSHOT1_DRAFT && \
++    defined(TIME_ENABLE_ORDERED_STATUS2_DRAFT) && TIME_ENABLE_ORDERED_STATUS2_DRAFT && \
++    defined(TIME_ENABLE_ORDERED_TOP_WAL_DRAFT) && TIME_ENABLE_ORDERED_TOP_WAL_DRAFT && \
++    defined(TIME_ENABLE_SELECTABLE_V2) && TIME_ENABLE_SELECTABLE_V2 && \
++    defined(TIME_ENABLE_SHARED_TOP_SNAPSHOT_DRAFT) && TIME_ENABLE_SHARED_TOP_SNAPSHOT_DRAFT && \
++    defined(TIME_ENABLE_SPLIT_TOP_FENCE_DRAFT) && TIME_ENABLE_SPLIT_TOP_FENCE_DRAFT && \
++    defined(TIME_ENABLE_TOP_BARRIER_DRAFT) && TIME_ENABLE_TOP_BARRIER_DRAFT && \
++    defined(TIME_ENABLE_TOP_GENERATION_DRAFT) && TIME_ENABLE_TOP_GENERATION_DRAFT && \
++    defined(TIME_ENABLE_TOP_HOLD_TRACKING_DRAFT) && TIME_ENABLE_TOP_HOLD_TRACKING_DRAFT && \
++    defined(TIME_ENABLE_TOP_JOBLIST_SCAN_DRAFT) && TIME_ENABLE_TOP_JOBLIST_SCAN_DRAFT && \
++    defined(TIME_ENABLE_TOP_MARKER_ADD3_LIVE_DRAFT) && TIME_ENABLE_TOP_MARKER_ADD3_LIVE_DRAFT && \
++    defined(TIME_ENABLE_TOP_MARKER_ADD3_REPLAY_DRAFT) && TIME_ENABLE_TOP_MARKER_ADD3_REPLAY_DRAFT && \
++    defined(TIME_ENABLE_TOP_MARKER_BIND5_LIVE_DRAFT) && TIME_ENABLE_TOP_MARKER_BIND5_LIVE_DRAFT && \
++    defined(TIME_ENABLE_TOP_MARKER_BIND5_REPLAY_DRAFT) && TIME_ENABLE_TOP_MARKER_BIND5_REPLAY_DRAFT && \
++    defined(TIME_ENABLE_TOP_MARKER_CANCEL4_DRAFT) && TIME_ENABLE_TOP_MARKER_CANCEL4_DRAFT && \
++    defined(TIME_ENABLE_TOP_MARKER_V2_DRAFT) && TIME_ENABLE_TOP_MARKER_V2_DRAFT && \
++    defined(TIME_ENABLE_TOP_RUNNING_RECEIPT_DRAFT) && TIME_ENABLE_TOP_RUNNING_RECEIPT_DRAFT && \
++    defined(TIME_ENABLE_UNHELD_TOP_BIND_DRAFT) && TIME_ENABLE_UNHELD_TOP_BIND_DRAFT
++	bool ready;
++	pthread_mutex_lock(&mq_lock);
++	ready = _snapshot_ready(mq_verified_installation) && mq_top_generation_cutover && !mq_top_uncertain;
++	pthread_mutex_unlock(&mq_lock);
++	return ready;
++#else
++	return false;
++#endif
++}
++
+ bool monthly_quota_selectable_ready(void)
+ {
+ 	bool ready = false;
+--- a/src/slurmctld/monthly_quota_control.c
++++ b/src/slurmctld/monthly_quota_control.c
+@@ -23,6 +23,15 @@
+ #include "src/slurmctld/monthly_quota.h"
+ #include "src/slurmctld/slurmctld.h"
+ 
++extern int monthly_quota_reserve_actual(uid_t uid, const char *request, uint32_t tier,
++					uint32_t gpu, uint64_t *amount);
++extern int monthly_quota_cancel_request2(uid_t uid, const char *request, uint32_t tier,
++					uint32_t gpu, uint32_t minutes);
++extern int monthly_quota_cancel_bound2(uid_t uid, const char *request, uint32_t job_id,
++				       uint64_t submit, uint64_t sluid);
++extern int monthly_quota_bind2_terminal_get(uid_t uid, const char *request, uint32_t job_id,
++		uint64_t submit, uint64_t sluid, uint32_t *terminal, uint64_t *generation);
++
+ static int listener = -1, wakepipe[2] = {-1, -1};
+ static pthread_t thread;
+ static bool started;
+@@ -83,6 +92,16 @@
+ 	}
+ 	if (!length || buf[length - 1] != '\n' || memchr(buf, '\0', length)) return;
+ 	buf[length - 1] = '\0';
++	if (!strcmp(buf, "ACTUAL_USAGE_UNLIMITED2 0")) {
++		const char *answer;
++		lock_slurmctld(config_lock);
++		answer = monthly_quota_actual_usage_ready() ?
++			"OK ACTUAL_USAGE_UNLIMITED2 SUPPORTED\n" :
++			"OK ACTUAL_USAGE_UNLIMITED2 UNSUPPORTED\n";
++		unlock_slurmctld(config_lock);
++		(void)send(fd, answer, strlen(answer), MSG_NOSIGNAL);
++		return;
++	}
+ #if defined(TIME_ENABLE_ORDERED_APPLY2_DRAFT) && TIME_ENABLE_ORDERED_APPLY2_DRAFT
+ 	if (!strncmp(buf, "ORDERED_APPLY2 ", 15)) {
+ 		for (size_t index = 0; index < length - 1; index++) {
+@@ -504,14 +523,31 @@
+ 		rc = monthly_quota_cancel1((uid_t)uid, part[2]);
+ 		unlock_slurmctld(grant_lock);
+ 		if (!rc) snprintf(reply, sizeof(reply), "OK\n");
+-	} else if (count == 6 && !strcmp(part[0], "CANCEL_REQUEST1") &&
++	} else if (count == 6 && (!strcmp(part[0], "CANCEL_REQUEST1") || !strcmp(part[0], "CANCEL_REQUEST2")) &&
+ 	    !number(part[3], &tier_num) && tier_num < 3 &&
+ 	    !number(part[4], &gpu_num) && gpu_num > 0 && gpu_num <= UINT32_MAX &&
+ 	    !number(part[5], &minutes_num) && minutes_num > 0 && minutes_num <= UINT32_MAX) {
+ 		lock_slurmctld(grant_lock);
+-		rc = monthly_quota_cancel_request1((uid_t)uid, part[2], tier_num, gpu_num, minutes_num);
+-		unlock_slurmctld(grant_lock);
+-		if (!rc) snprintf(reply, sizeof(reply), "OK\n");
++		rc = !strcmp(part[0], "CANCEL_REQUEST2") ?
++			monthly_quota_cancel_request2((uid_t)uid, part[2], tier_num, gpu_num, minutes_num) :
++			monthly_quota_cancel_request1((uid_t)uid, part[2], tier_num, gpu_num, minutes_num);
++		unlock_slurmctld(grant_lock);
++		if (!rc) snprintf(reply, sizeof(reply), "OK\n");
++	} else if (count == 6 && !strcmp(part[0], "CANCEL_BOUND2") &&
++	    !number(part[3], &bind_job) && bind_job && bind_job <= UINT32_MAX &&
++	    !number(part[4], &ack_submit) && ack_submit && !number(part[5], &ack_sluid) && ack_sluid) {
++		lock_slurmctld(grant_lock);
++		rc = monthly_quota_cancel_bound2(uid, part[2], bind_job, ack_submit, ack_sluid);
++		unlock_slurmctld(grant_lock);
++		if (!rc) snprintf(reply, sizeof(reply), "OK\n");
++	} else if (count == 6 && !strcmp(part[0], "BIND2_TERMINAL_GET") &&
++	    !number(part[3], &bind_job) && bind_job && bind_job <= UINT32_MAX &&
++	    !number(part[4], &ack_submit) && ack_submit && !number(part[5], &ack_sluid) && ack_sluid) {
++		uint32_t terminal; uint64_t generation;
++		lock_slurmctld(grant_lock);
++		rc = monthly_quota_bind2_terminal_get(uid, part[2], bind_job, ack_submit, ack_sluid, &terminal, &generation);
++		unlock_slurmctld(grant_lock);
++		if (!rc) snprintf(reply, sizeof(reply), "OK %" PRIu64 " %s %" PRIu64 " %" PRIu64 " %" PRIu64 " %u %" PRIu64 "\n", uid, part[2], bind_job, ack_submit, ack_sluid, terminal, generation);
+ 	} else if (count == 4 && !strcmp(part[0], "CANCEL_BOUND1") &&
+ 	    !number(part[3], &bind_job) && bind_job > 0 && bind_job <= UINT32_MAX) {
+ 		lock_slurmctld(grant_lock);
+@@ -572,6 +608,15 @@
+ 		unlock_slurmctld(grant_lock);
+ 		if (!rc) snprintf(reply, sizeof(reply), "OK %" PRIu64 " %s %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
+ 		                  uid, part[2], bind_job, submit, sluid);
++	} else if (count == 6 && !strcmp(part[0], "RESERVE2") &&
++	    !number(part[3], &tier_num) && tier_num < 3 &&
++	    !number(part[4], &gpu_num) && gpu_num > 0 && gpu_num <= UINT32_MAX &&
++	    !strcmp(part[5], "4294967295")) {
++		lock_slurmctld(grant_lock);
++		rc = monthly_quota_reserve_actual((uid_t)uid, part[2], tier_num, gpu_num, &amount);
++		unlock_slurmctld(grant_lock);
++		if (!rc) snprintf(reply, sizeof(reply), "OK %" PRIu64 "\n", amount);
++		else if (rc == -2) { snprintf(reply, sizeof(reply), "DENIED capacity\n"); rc = 0; }
+ 	} else if (count == 6 && !strcmp(part[0], "RESERVE1") &&
+ 	    !number(part[3], &tier_num) && tier_num < 3 &&
+ 	    !number(part[4], &gpu_num) && gpu_num > 0 && gpu_num <= UINT32_MAX &&
+@@ -600,6 +645,19 @@
+ 		if (!rc) snprintf(reply, sizeof(reply), "OK %u %u %u %u %" PRIu64 "\n",
+ 				  result_month, result_tier, result_gpu, result_minutes, amount);
+ #if defined(TIME_ENABLE_MONTHLY_QUERY2_DRAFT) && TIME_ENABLE_MONTHLY_QUERY2_DRAFT
++	} else if (count == 3 && !strcmp(part[0], "RESERVE_POLICY2_GET")) {
++		int status;
++		lock_slurmctld(config_lock);
++		status = monthly_quota_reservation_status(uid, part[2], &reservation_view);
++		unlock_slurmctld(config_lock);
++		if (status == 0) { rc = 0; snprintf(reply, sizeof(reply), "OK ABSENT\n"); }
++		else if (status == 1) {
++			rc = 0;
++			snprintf(reply, sizeof(reply), "OK FOUND %u %u %u %u %u %" PRIu64 " %u %" PRIu64 " %u %" PRIu64 "\n",
++				 reservation_view.policy_version, reservation_view.month, reservation_view.tier,
++				 reservation_view.gpu, reservation_view.minutes, reservation_view.amount,
++				 reservation_view.job_id, reservation_view.generation, reservation_view.state, reservation_view.sluid);
++		}
+ 	} else if (count == 3 && !strcmp(part[0], "RESERVE2_GET")) {
+ 		int status;
+ 		lock_slurmctld(config_lock);
+--- a/src/slurmctld/monthly_quota.h
++++ b/src/slurmctld/monthly_quota.h
+@@ -174,7 +174,7 @@
+ 					 uint64_t *amount);
+ #if defined(TIME_ENABLE_MONTHLY_QUERY2_DRAFT) && TIME_ENABLE_MONTHLY_QUERY2_DRAFT
+ typedef struct {
+-	uint32_t month, tier, gpu, minutes, job_id, state;
++	uint32_t month, tier, gpu, minutes, job_id, state, policy_version;
+ 	uint64_t amount, generation, sluid;
+ } monthly_reservation_status_t;
+ /* Return 1 if found, 0 if absent now, -1 if state is unavailable. Absence
+@@ -335,6 +335,8 @@
+ extern int monthly_quota_reconcile_cancelled(list_t *job_list);
+ extern int monthly_quota_reconcile_readonly(list_t *job_list);
+ extern bool monthly_quota_selectable_ready(void);
++extern bool monthly_quota_actual_usage_ready(void);
++extern bool monthly_quota_requeue_prohibited(const struct job_record *job);
+ extern int monthly_quota_control_start(void);
+ extern void monthly_quota_control_stop(void);
+ extern void monthly_quota_fini(void);
+--- a/src/slurmctld/job_mgr.c
++++ b/src/slurmctld/job_mgr.c
+@@ -3104,6 +3104,9 @@
+ 				&job_ptr->gres_used);
+ 			job_post_resize_acctg(job_ptr);
+ 		} else if (job_ptr->batch_flag &&
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++			   !monthly_quota_requeue_prohibited(job_ptr) &&
++#endif
+ 			   ((job_ptr->details &&
+ 			     job_ptr->details->requeue) ||
+ 			    (foreach_kill_job_by->requeue_on_resume_failure &&
+@@ -6293,7 +6296,11 @@
+ 		job_comp_flag = 0;
+ 	}
+ 
+-	if (requeue && job_ptr->details && job_ptr->batch_flag) {
++	if (requeue && job_ptr->details && job_ptr->batch_flag
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	    && !monthly_quota_requeue_prohibited(job_ptr)
++#endif
++	   ) {
+ 		/*
+ 		 * We want this job to look like it was terminated in the
+ 		 * accounting logs. Set a new submit time so the restarted
+@@ -12996,6 +13003,14 @@
+ 	error_code = _test_job_desc_fields(job_desc);
+ 	if (error_code != SLURM_SUCCESS)
+ 		return error_code;
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	/* Check the immutable reservation before applying any update fields. */
++	if (((job_desc->requeue != NO_VAL16 && job_desc->requeue) ||
++	     (job_desc->comment && (!job_ptr->comment || strcmp(job_desc->comment, job_ptr->comment))) ||
++	     (job_desc->time_limit != NO_VAL && job_desc->time_limit != job_ptr->time_limit)) &&
++	    monthly_quota_requeue_prohibited(job_ptr))
++		return ESLURM_DISABLED;
++#endif
+ 
+ 	/* Do not update MCS label unless explicitly provided */
+ 	if (job_desc->mcs_label) {
+@@ -18251,6 +18266,13 @@
+ 					  job_ptr->account, false)) {
+ 		return ESLURM_ACCESS_DENIED;
+ 	}
++
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	/* New platform unlimited jobs are intentionally non-requeueable, even
++	 * on force-requeue-on-prolog-failure. Preserve the running job. */
++	if (monthly_quota_requeue_prohibited(job_ptr))
++		return ESLURM_DISABLED;
++#endif
+ 
+ 	if (((flags & JOB_STATE_BASE) == JOB_RUNNING) &&
+ 	    !IS_JOB_RUNNING(job_ptr) && !IS_JOB_SUSPENDED(job_ptr)) {
+@@ -19410,6 +19432,14 @@
+ 	job_record_t *base_job_ptr = NULL;
+ 
+ 	xassert(job_ptr);
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++	if (monthly_quota_requeue_prohibited(job_ptr)) {
++		/* Keep the existing terminal state and normal cleanup path. */
++		job_state_unset_flag(job_ptr, JOB_REQUEUE);
++		return false;
++	}
++#endif
++
+ 
+ 	/* If the job is already pending it was
+ 	 * eventually requeued somewhere else.
+--- a/src/slurmctld/read_config.c
++++ b/src/slurmctld/read_config.c
+@@ -1544,6 +1544,9 @@
+ 				epilog_slurmctld(job_ptr);
+ 			}
+ 			if (was_running && job_ptr->batch_flag &&
++#if defined(TIME_ENABLE_MONTHLY_ALLOCATION_GUARD) && TIME_ENABLE_MONTHLY_ALLOCATION_GUARD
++			    !monthly_quota_requeue_prohibited(job_ptr) &&
++#endif
+ 			    job_ptr->details && job_ptr->details->requeue &&
+ 			    job_ptr->part_ptr) {
+ 				/*
