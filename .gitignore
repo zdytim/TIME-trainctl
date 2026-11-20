@@ -4,3 +4,11 @@
 **/*.sqlite3
 **/*.sqlite3-*
 **/*.private.json
+**/.env
+**/.env.local
+**/.venv/
+**/*.log
+**/*.db
+**/*.db-*
+/pro6000d-live-platform/dist/
+/u20-training-platform/dist/
