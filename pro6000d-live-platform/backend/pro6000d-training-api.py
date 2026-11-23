@@ -2568,6 +2568,53 @@ class Service:
             except Exception:
                 self.last_reconcile_ok = False
 
+    def _ordinary_job_sluid(self, row: sqlite3.Row) -> str:
+        """Resolve a platform job to one exact, controller-assigned instance."""
+        sid = str(row['scheduler_id'])
+        if not re.fullmatch(r'[1-9][0-9]{0,9}', sid) or int(sid) > 0xffffffff:
+            raise ControllerUnavailable('invalid scheduler job ID')
+        code, out, _ = run_spawn_locked(['squeue', '--local', '--states=all', '--json=v0.0.45', '--jobs=' + sid], timeout=8)
+        snapshot = json_object(out)
+        jobs = snapshot.get('jobs') if isinstance(snapshot, dict) else None
+        if code or not isinstance(jobs, list) or len(jobs) != 1 or snapshot.get('errors') != []:
+            raise ControllerUnavailable('no unique Slurm job record')
+        job = jobs[0]
+        if not isinstance(job, dict):
+            raise ControllerUnavailable('invalid Slurm job record')
+        comment = 'pro6000d-job:' + row['id']
+        if row['selected_tier'] is not None:
+            comment += ':tier=' + row['selected_tier']
+        if (job.get('job_id') != int(sid) or job.get('user_id') != row['owner_uid'] or
+                job.get('name') != 'p6-' + row['id'] or job.get('comment') != comment):
+            raise ControllerUnavailable('Slurm job does not match its platform record')
+        step = job.get('step_id')
+        sluid = step.get('sluid') if isinstance(step, dict) else None
+        if (not isinstance(sluid, str) or not re.fullmatch(r's[0-9A-F][0-9A-HJKMNP-TV-Z]{12}', sluid)
+                or sluid == 's' + '0' * 13 or step.get('step_id') != 'entire'):
+            raise ControllerUnavailable('Slurm job has no whole-job instance ID')
+        return sluid
+
+    def _cancel_strict_ordinary_job(self, row: sqlite3.Row, strict) -> None:
+        try:
+            with strict.runtime.coordinator.serialized():
+                current = self.store.db.execute('SELECT * FROM jobs WHERE id=?', (row['id'],)).fetchone()
+                if (current is None or tuple(current) != tuple(row) or
+                        strict._has_marker_locked(row['id']) is not False):
+                    raise ControllerUnavailable('platform job changed before cancellation')
+                sluid = self._ordinary_job_sluid(row)
+                # The controller resolves this unique ID at signal time. A
+                # numeric job ID could target a different job after recycling.
+                try:
+                    code, _, err = run_spawn_locked(['scancel', sluid], timeout=8)
+                except TimeoutError as exc:
+                    raise ApiError(409, 'scheduler_identity_unconfirmed', '任务取消结果尚未确认，等待调度器核对') from exc
+        except (ControllerUnavailable, OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
+            raise ApiError(409, 'scheduler_identity_unconfirmed', '任务调度实例尚需核对，暂不能安全取消') from exc
+        if code == 124:
+            raise ApiError(409, 'scheduler_identity_unconfirmed', '任务取消结果尚未确认，等待调度器核对')
+        if code:
+            raise ApiError(502, 'cancel_failed', err or '取消失败')
+
     def cancel(self, ident: Dict[str, Any], jid: str) -> Dict[str, Any]:
         try:
             return self._cancel_once(ident, jid)
@@ -2618,14 +2665,13 @@ class Service:
             self.last_reconcile_ok = False
             self.scheduler_error = '优先任务取消待最终核对'
             return self.job_json(self.store.db.execute('SELECT * FROM jobs WHERE id=?', (jid,)).fetchone())
-        if strict is not None and row['scheduler_id']:
-            # A recycled Slurm job ID could address another user's running job.
-            # Wait for an exact controller instance proof before scancel.
-            raise ApiError(409, 'scheduler_identity_unconfirmed', '任务调度实例尚需核对，暂不能安全取消')
         if row["scheduler_id"]:
-            code, _, err = run(["scancel", row["scheduler_id"]], timeout=8)
-            if code:
-                raise ApiError(502, "cancel_failed", err or "取消失败")
+            if strict is not None:
+                self._cancel_strict_ordinary_job(row, strict)
+            else:
+                code, _, err = run(["scancel", row["scheduler_id"]], timeout=8)
+                if code:
+                    raise ApiError(502, "cancel_failed", err or "取消失败")
             self.store.db.execute("UPDATE jobs SET reason_code='cancellation_requested',reason_text='已请求 Slurm 取消，等待确认',updated_at=? WHERE id=?", (utc_now(), jid))
             self.reconcile()
         else:
